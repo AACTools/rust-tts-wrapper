@@ -32,10 +32,37 @@ Cross-platform TTS (Text-to-Speech) wrapper with C API. Mirrors [js-tts-wrapper]
 
 ```c
 #include "tts_wrapper.h"
+#include <stdio.h>
 
-tts_ctx* ctx = tts_create("system", NULL);
-tts_speak(ctx, "Hello world");
-tts_destroy(ctx);
+void on_audio(const uint8_t* chunk, uintptr_t size, void* userdata) {
+    // Handle streaming audio chunks here
+    printf("Received %zu bytes of audio\n", size);
+}
+
+void on_boundary(const char* word, float start_time, float end_time, void* userdata) {
+    // Handle word boundary events
+    printf("Word '%s' from %.2f to %.2f\n", word, start_time, end_time);
+}
+
+int main() {
+    // 1. Create engine (e.g., ElevenLabs with API key)
+    tts_ctx* ctx = tts_create("elevenlabs", "{\"apiKey\":\"your-api-key\"}");
+
+    // 2. Register callbacks for streaming and word events
+    tts_set_on_audio(ctx, on_audio, NULL);
+    tts_set_on_boundary(ctx, on_boundary, NULL);
+
+    // 3. Set voice and properties
+    tts_set_voice(ctx, "Rachel");
+    tts_set_rate(ctx, 1.0);
+
+    // 4. Speak (blocks until complete when using speak_sync)
+    tts_speak_sync(ctx, "Hello world, streaming is supported.");
+
+    // 5. Cleanup
+    tts_destroy(ctx);
+    return 0;
+}
 ```
 
 ## Usage (Rust)
@@ -43,8 +70,29 @@ tts_destroy(ctx);
 ```rust
 use rust_tts_wrapper::factory;
 
-let engine = factory::create_engine("system", "").unwrap();
-engine.speak("Hello world", None, 1.0, 1.0, 1.0).unwrap();
+let engine = factory::create_engine("elevenlabs", r#"{"apiKey":"your-api-key"}"#).unwrap();
+
+// Standard speaking
+engine.speak("Hello world", Some("Rachel"), 1.0, 1.0, 1.0, None, None).unwrap();
+
+// Speaking with streaming and boundary callbacks
+let mut audio_cb = |chunk: &[u8]| {
+    println!("Received audio chunk of size {}", chunk.len());
+};
+
+let mut boundary_cb = |word: &str, start: f32, end: f32| {
+    println!("Word {} from {} to {}", word, start, end);
+};
+
+engine.speak_sync(
+    "Hello world, streaming is supported.",
+    Some("Rachel"),
+    1.0,
+    1.0,
+    1.0,
+    Some(&mut audio_cb),
+    Some(&mut boundary_cb),
+).unwrap();
 ```
 
 ## Build

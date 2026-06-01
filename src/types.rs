@@ -14,6 +14,8 @@ pub struct Voice {
     pub language: String,
     /// Gender string (e.g. `"male"`, `"female"`, or empty).
     pub gender: String,
+    /// The engine that provides this voice.
+    pub engine: String,
 }
 
 /// Describes a registered engine for introspection.
@@ -74,6 +76,8 @@ pub struct tts_voice {
     pub language: *mut c_char,
     /// Gender (owned C string).
     pub gender: *mut c_char,
+    /// Engine identifier (owned C string).
+    pub engine: *mut c_char,
 }
 
 /// C-compatible engine descriptor returned by [`tts_get_engines`](crate::tts_get_engines).
