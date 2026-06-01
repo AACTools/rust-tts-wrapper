@@ -235,3 +235,35 @@ fn test_word_boundary_empty_text() {
     let boundaries = estimate_word_boundaries("");
     assert!(boundaries.is_empty());
 }
+
+#[test]
+fn test_speech_markdown_detection() {
+    use rust_tts_wrapper::engine::preprocess_speech_markdown;
+    let (result, is_ssml) =
+        preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
+    assert!(is_ssml);
+    assert!(result.contains("<speak>"));
+}
+
+#[test]
+fn test_speech_markdown_plain_text_passthrough() {
+    use rust_tts_wrapper::engine::preprocess_speech_markdown;
+    let (result, is_ssml) = preprocess_speech_markdown("Hello world", "azure");
+    assert!(!is_ssml);
+    assert_eq!(result, "Hello world");
+}
+
+#[test]
+fn test_speech_markdown_azure_platform() {
+    use rust_tts_wrapper::engine::preprocess_speech_markdown;
+    let (result, is_ssml) = preprocess_speech_markdown("This is +important+", "azure");
+    assert!(is_ssml);
+    assert!(result.contains("microsoft") || result.contains("<speak>"));
+}
+
+#[test]
+fn test_speech_markdown_google_platform() {
+    use rust_tts_wrapper::engine::preprocess_speech_markdown;
+    let (_result, is_ssml) = preprocess_speech_markdown("This is +important+", "google");
+    assert!(is_ssml);
+}

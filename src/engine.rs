@@ -9,10 +9,39 @@ pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 /// Callback for word boundary events.
 pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32);
 
+/// Convert speech markdown to SSML if detected, otherwise return text as-is.
+/// Returns (processed_text, is_ssml).
+#[cfg(feature = "cloud")]
+#[must_use]
+pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) {
+    use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
+
+    if !SpeechMarkdownParser::is_speech_markdown(text) {
+        return (text.to_string(), false);
+    }
+
+    let platform = match platform {
+        "azure" => Platform::MicrosoftAzure,
+        "google" => Platform::GoogleAssistant,
+        _ => Platform::AmazonAlexa,
+    };
+
+    match SpeechMarkdownParser::to_ssml(text, platform) {
+        Ok(ssml) => (ssml, true),
+        Err(_) => (text.to_string(), false),
+    }
+}
+
+#[cfg(not(feature = "cloud"))]
+pub fn preprocess_speech_markdown(text: &str, _platform: &str) -> (String, bool) {
+    (text.to_string(), false)
+}
+
 /// Trait that every TTS engine must implement.
 ///
 /// All methods receive voice, rate, pitch, and volume parameters so each
 /// engine can apply them as appropriate.
+#[allow(clippy::missing_errors_doc)]
 pub trait TtsEngine: Send + Sync + fmt::Debug {
     /// Start speaking `text` asynchronously.
     #[allow(clippy::too_many_arguments)]
@@ -91,6 +120,7 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
 
 /// Estimate word boundaries using word-length-adjusted timing.
 /// Matches the algorithm used in js-tts-wrapper and swift-tts-wrapper.
+#[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary> {
     let words: Vec<&str> = text.split_whitespace().filter(|w| !w.is_empty()).collect();

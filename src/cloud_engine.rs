@@ -4,7 +4,7 @@
 //! providers. Includes voice fetching for engines with list endpoints and
 //! word boundary support where APIs provide timing data.
 
-use crate::engine::{estimate_word_boundaries, TtsEngine};
+use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
 
@@ -513,6 +513,8 @@ impl TtsEngine for CloudEngine {
             .or_else(|| self.config.default_voice.clone())
             .unwrap_or_default();
 
+        let (text, _is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
+
         let mut req = self.client.post(&self.config.synth_url);
 
         // Auth header
@@ -529,7 +531,7 @@ impl TtsEngine for CloudEngine {
         // Body depends on engine type
         let resp = if self.config.body_is_ssml {
             // Azure: send SSML XML body
-            let ssml = build_azure_ssml(text, &voice_to_use, rate, pitch);
+            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch);
             let ct = self
                 .config
                 .content_type
@@ -539,7 +541,7 @@ impl TtsEngine for CloudEngine {
             req.body(ssml).send()
         } else if self.config.provider_id == "google" {
             // Google: build JSON body with proper structure
-            let (body, _words) = build_google_request(text, &voice_to_use, on_boundary.is_some());
+            let (body, _words) = build_google_request(&text, &voice_to_use, on_boundary.is_some());
             req = req.json(&body);
             req.send()
         } else {
@@ -548,7 +550,7 @@ impl TtsEngine for CloudEngine {
             if !self.config.text_field.is_empty() {
                 body.insert(
                     self.config.text_field.clone(),
-                    serde_json::Value::String(text.to_string()),
+                    serde_json::Value::String(text.clone()),
                 );
             }
             if !self.config.voice_param.is_empty() && !voice_to_use.is_empty() {
@@ -601,7 +603,7 @@ impl TtsEngine for CloudEngine {
             }
 
             if let Some(cb) = on_boundary.as_mut() {
-                let (_, words) = build_google_request(text, &voice_to_use, true);
+                let (_, words) = build_google_request(&text, &voice_to_use, true);
                 if let Some(tps) = json.get("timepoints").and_then(|v| v.as_array()) {
                     let boundaries = parse_google_timepoints(tps, &words);
                     for b in &boundaries {
@@ -612,7 +614,7 @@ impl TtsEngine for CloudEngine {
                         );
                     }
                 } else {
-                    let estimated = estimate_word_boundaries(text);
+                    let estimated = estimate_word_boundaries(&text);
                     for b in &estimated {
                         cb(
                             &b.text,
@@ -637,7 +639,7 @@ impl TtsEngine for CloudEngine {
             }
 
             if let Some(cb) = on_boundary.as_mut() {
-                let estimated = estimate_word_boundaries(text);
+                let estimated = estimate_word_boundaries(&text);
                 for b in &estimated {
                     cb(
                         &b.text,
@@ -896,5 +898,14 @@ mod tests {
         assert!(ssml.contains("&amp;"));
         assert!(ssml.contains("&lt;"));
         assert!(ssml.contains("&gt;"));
+    }
+
+    #[test]
+    fn test_speech_markdown_preprocessing() {
+        use crate::engine::preprocess_speech_markdown;
+        let (result, is_ssml) =
+            preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
+        assert!(is_ssml);
+        assert!(result.contains("<speak>"));
     }
 }
