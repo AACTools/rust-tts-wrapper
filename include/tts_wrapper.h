@@ -6,9 +6,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/**
- * Opaque context holding an engine instance and its per-instance settings.
- */
 typedef struct tts_ctx tts_ctx;
 
 /**
@@ -31,7 +28,18 @@ typedef struct tts_voice {
    * Gender (owned C string).
    */
   char *gender;
+  /**
+   * Engine identifier (owned C string).
+   */
+  char *engine;
 } tts_voice;
+
+/**
+ * Opaque context holding an engine instance and its per-instance settings.
+ */
+typedef void (*CAudioCb)(const uint8_t*, uintptr_t, void*);
+
+typedef void (*CBoundaryCb)(const char*, float, float, void*);
 
 /**
  * C-compatible engine descriptor returned by [`tts_get_engines`](crate::tts_get_engines).
@@ -169,6 +177,22 @@ void tts_set_pitch(struct tts_ctx *ctx, float pitch);
  * `ctx` must be valid.
  */
 void tts_set_volume(struct tts_ctx *ctx, float volume);
+
+/**
+ * Set the callback for streaming audio chunks.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_audio(struct tts_ctx *ctx, CAudioCb cb, void *userdata);
+
+/**
+ * Set the callback for word boundary events.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_boundary(struct tts_ctx *ctx, CBoundaryCb cb, void *userdata);
 
 /**
  * Return the number of registered engines.

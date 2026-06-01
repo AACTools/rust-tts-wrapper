@@ -47,6 +47,11 @@ use factory::create_engine;
 type BoxedEngine = Box<dyn TtsEngine>;
 
 /// Opaque context holding an engine instance and its per-instance settings.
+pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void)>;
+pub type CBoundaryCb = Option<extern "C" fn(*const c_char, f32, f32, *mut std::ffi::c_void)>;
+type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
+type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32)>;
+
 pub struct tts_ctx {
     engine: Mutex<BoxedEngine>,
     voice_id: Mutex<Option<String>>,
@@ -54,6 +59,10 @@ pub struct tts_ctx {
     pitch: Mutex<f32>,
     volume: Mutex<f32>,
     last_error: Mutex<String>,
+    on_audio: Mutex<CAudioCb>,
+    on_audio_userdata: Mutex<*mut std::ffi::c_void>,
+    on_boundary: Mutex<CBoundaryCb>,
+    on_boundary_userdata: Mutex<*mut std::ffi::c_void>,
 }
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
@@ -101,6 +110,10 @@ pub extern "C" fn tts_create(
             pitch: Mutex::new(1.0),
             volume: Mutex::new(1.0),
             last_error: Mutex::new(String::new()),
+            on_audio: Mutex::new(None),
+            on_audio_userdata: Mutex::new(ptr::null_mut()),
+            on_boundary: Mutex::new(None),
+            on_boundary_userdata: Mutex::new(ptr::null_mut()),
         });
         Box::into_raw(ctx)
     } else {
@@ -146,8 +159,41 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
     let pitch = *ctx_ref.pitch.lock().unwrap();
     let volume = *ctx_ref.volume.lock().unwrap();
 
+    let audio_cb = *ctx_ref.on_audio.lock().unwrap();
+    let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
+    let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
+    let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
+
+    let mut on_audio_closure: Option<BoxedAudioCb> = match audio_cb {
+        Some(cb) => Some(Box::new(move |bytes: &[u8]| {
+            cb(bytes.as_ptr(), bytes.len(), audio_userdata);
+        })),
+        None => None,
+    };
+
+    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary_cb {
+        Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
+            if let Ok(c_word) = CString::new(word) {
+                cb(c_word.as_ptr(), start, end, boundary_userdata);
+            }
+        })),
+        None => None,
+    };
+
     let engine = ctx_ref.engine.lock().unwrap();
-    match engine.speak(&text_str, voice.as_deref(), rate, pitch, volume) {
+    match engine.speak(
+        &text_str,
+        voice.as_deref(),
+        rate,
+        pitch,
+        volume,
+        on_audio_closure
+            .as_mut()
+            .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+        on_boundary_closure
+            .as_mut()
+            .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
+    ) {
         Ok(()) => 0,
         Err(e) => {
             *ctx_ref.last_error.lock().unwrap() = e.to_string();
@@ -178,8 +224,41 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
     let pitch = *ctx_ref.pitch.lock().unwrap();
     let volume = *ctx_ref.volume.lock().unwrap();
 
+    let audio_cb = *ctx_ref.on_audio.lock().unwrap();
+    let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
+    let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
+    let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
+
+    let mut on_audio_closure: Option<BoxedAudioCb> = match audio_cb {
+        Some(cb) => Some(Box::new(move |bytes: &[u8]| {
+            cb(bytes.as_ptr(), bytes.len(), audio_userdata);
+        })),
+        None => None,
+    };
+
+    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary_cb {
+        Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
+            if let Ok(c_word) = CString::new(word) {
+                cb(c_word.as_ptr(), start, end, boundary_userdata);
+            }
+        })),
+        None => None,
+    };
+
     let engine = ctx_ref.engine.lock().unwrap();
-    match engine.speak_sync(&text_str, voice.as_deref(), rate, pitch, volume) {
+    match engine.speak_sync(
+        &text_str,
+        voice.as_deref(),
+        rate,
+        pitch,
+        volume,
+        on_audio_closure
+            .as_mut()
+            .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+        on_boundary_closure
+            .as_mut()
+            .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
+    ) {
         Ok(()) => 0,
         Err(e) => {
             *ctx_ref.last_error.lock().unwrap() = e.to_string();
@@ -246,6 +325,7 @@ pub extern "C" fn tts_get_voices(
                             name: CString::new(v.name.clone()).unwrap().into_raw(),
                             language: CString::new(v.language.clone()).unwrap().into_raw(),
                             gender: CString::new(v.gender.clone()).unwrap().into_raw(),
+                            engine: CString::new(v.engine.clone()).unwrap().into_raw(),
                         },
                     );
                 }
@@ -287,6 +367,9 @@ pub extern "C" fn tts_free_voices(voices: *mut types::tts_voice, count: i32) {
             }
             if !(*v).gender.is_null() {
                 let _ = CString::from_raw((*v).gender);
+            }
+            if !(*v).engine.is_null() {
+                let _ = CString::from_raw((*v).engine);
             }
         }
     }
@@ -350,6 +433,42 @@ pub extern "C" fn tts_set_volume(ctx: *mut tts_ctx, volume: f32) {
         return;
     }
     *unsafe { &*ctx }.volume.lock().unwrap() = volume;
+}
+
+/// Set the callback for streaming audio chunks.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_audio(
+    ctx: *mut tts_ctx,
+    cb: CAudioCb,
+    userdata: *mut std::ffi::c_void,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    *ctx_ref.on_audio.lock().unwrap() = cb;
+    *ctx_ref.on_audio_userdata.lock().unwrap() = userdata;
+}
+
+/// Set the callback for word boundary events.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_boundary(
+    ctx: *mut tts_ctx,
+    cb: CBoundaryCb,
+    userdata: *mut std::ffi::c_void,
+) {
+    if ctx.is_null() {
+        return;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    *ctx_ref.on_boundary.lock().unwrap() = cb;
+    *ctx_ref.on_boundary_userdata.lock().unwrap() = userdata;
 }
 
 /// Return the number of registered engines.

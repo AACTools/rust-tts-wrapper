@@ -150,6 +150,8 @@ impl TtsEngine for SherpaOnnxEngine {
         rate: f32,
         _pitch: f32,
         _volume: f32,
+        mut on_audio: Option<crate::engine::OnAudioCallback>,
+        _on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         let model_info = self.models.get(&self.loaded_model_id).ok_or_else(|| {
             TtsError(format!(
@@ -218,9 +220,22 @@ impl TtsEngine for SherpaOnnxEngine {
             )
             .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
 
-        let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
-        if audio.save(filename.to_string_lossy().as_ref()) {
-            play_wav_file(&filename);
+        if let Some(cb) = on_audio.as_mut() {
+            // SherpaOnnx C API does not currently easily support streaming inside the progress callback without
+            // borrowing issues, because the closure requires `'static`.
+            // So we stream all at once right after generation, to still simulate stream interface.
+            let samples = audio.samples();
+            let mut pcm_bytes = Vec::with_capacity(samples.len() * 2);
+            for &s in samples {
+                let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                pcm_bytes.extend_from_slice(&s16.to_ne_bytes());
+            }
+            cb(&pcm_bytes);
+        } else {
+            let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
+            if audio.save(filename.to_string_lossy().as_ref()) {
+                play_wav_file(&filename);
+            }
         }
 
         Ok(())
@@ -233,8 +248,10 @@ impl TtsEngine for SherpaOnnxEngine {
         rate: f32,
         pitch: f32,
         volume: f32,
+        on_audio: Option<crate::engine::OnAudioCallback>,
+        on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume)
+        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
     }
 
     fn stop(&self) -> TtsResult<()> {
@@ -255,6 +272,7 @@ impl TtsEngine for SherpaOnnxEngine {
                 name: format!("Speaker {i}"),
                 language: lang.clone(),
                 gender: String::new(),
+                engine: "sherpaonnx".to_string(),
             });
         }
         Ok(voices)

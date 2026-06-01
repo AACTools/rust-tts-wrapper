@@ -7,8 +7,12 @@ use std::fmt;
 ///
 /// All methods receive voice, rate, pitch, and volume parameters so each
 /// engine can apply them as appropriate.
+pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
+pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32);
+
 pub trait TtsEngine: Send + Sync + fmt::Debug {
     /// Start speaking `text` asynchronously.
+    #[allow(clippy::too_many_arguments)]
     fn speak(
         &self,
         text: &str,
@@ -16,9 +20,12 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
         rate: f32,
         pitch: f32,
         volume: f32,
+        on_audio: Option<OnAudioCallback>,
+        on_boundary: Option<OnBoundaryCallback>,
     ) -> TtsResult<()>;
 
     /// Speak `text` synchronously, blocking until synthesis completes.
+    #[allow(clippy::too_many_arguments)]
     fn speak_sync(
         &self,
         text: &str,
@@ -26,6 +33,8 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
         rate: f32,
         pitch: f32,
         volume: f32,
+        on_audio: Option<OnAudioCallback>,
+        on_boundary: Option<OnBoundaryCallback>,
     ) -> TtsResult<()>;
 
     /// Stop any in-progress speech.

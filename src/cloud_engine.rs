@@ -255,6 +255,8 @@ impl TtsEngine for CloudEngine {
         _rate: f32,
         _pitch: f32,
         _volume: f32,
+        mut on_audio: Option<crate::engine::OnAudioCallback>,
+        _on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         let voice_to_use = voice
             .map(std::string::ToString::to_string)
@@ -302,9 +304,24 @@ impl TtsEngine for CloudEngine {
             return Err(TtsError(format!("API error {status}: {body_text}")));
         }
 
-        let _audio_bytes = resp
-            .bytes()
-            .map_err(|e| TtsError(format!("Read error: {e}")))?;
+        if let Some(cb) = on_audio.as_mut() {
+            use std::io::Read;
+            let mut resp = resp;
+            let mut buffer = [0u8; 8192];
+            loop {
+                let n = resp
+                    .read(&mut buffer)
+                    .map_err(|e| TtsError(format!("Read error: {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                cb(&buffer[..n]);
+            }
+        } else {
+            let _audio_bytes = resp
+                .bytes()
+                .map_err(|e| TtsError(format!("Read error: {e}")))?;
+        }
         Ok(())
     }
 
@@ -315,8 +332,10 @@ impl TtsEngine for CloudEngine {
         rate: f32,
         pitch: f32,
         volume: f32,
+        on_audio: Option<crate::engine::OnAudioCallback>,
+        on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume)
+        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
     }
 
     fn stop(&self) -> TtsResult<()> {
@@ -324,6 +343,8 @@ impl TtsEngine for CloudEngine {
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
+        // Since we don't fetch voices, we return an empty list or fake one.
+        // For a full implementation, this should fetch voices from the respective APIs.
         Ok(vec![])
     }
 
