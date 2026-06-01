@@ -15,6 +15,7 @@ use crate::system_engine::SystemEngine;
 ///
 /// `credentials_json` is a JSON object with engine-specific credentials
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
+#[must_use]
 pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>> {
     match engine_id {
         #[cfg(feature = "system")]
@@ -32,11 +33,13 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
 }
 
 /// Return the number of registered engines.
+#[must_use]
 pub fn engine_count() -> usize {
     engine_list().len()
 }
 
 /// Return a list of all registered engine descriptors.
+#[must_use]
 pub fn engine_list() -> Vec<EngineDescriptor> {
     let mut engines = Vec::new();
 

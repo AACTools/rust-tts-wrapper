@@ -1,0 +1,2 @@
+[build]
+target-dir = "/mnt/usb-build/rust-tts-wrapper"
