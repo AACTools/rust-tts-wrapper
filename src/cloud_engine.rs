@@ -1,7 +1,11 @@
 //! Generic cloud TTS engine supporting 19 providers via HTTP APIs.
+//!
+//! Handles Azure (SSML body), Google (base64 REST), and all other JSON-body
+//! providers. Includes voice fetching for engines with list endpoints and
+//! word boundary support where APIs provide timing data.
 
-use crate::engine::TtsEngine;
-use crate::types::{TtsError, TtsResult, Voice};
+use crate::engine::{estimate_word_boundaries, TtsEngine};
+use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
 
 /// Configuration for a single cloud TTS provider.
@@ -16,6 +20,16 @@ struct CloudConfig {
     default_voice: Option<String>,
     text_field: String,
     extra_body: HashMap<String, serde_json::Value>,
+    /// Whether this engine requires SSML in the request body (Azure).
+    body_is_ssml: bool,
+    /// Content-Type header override for the synthesis request.
+    content_type: Option<String>,
+    /// Additional headers to send with synthesis requests.
+    extra_headers: HashMap<String, String>,
+    /// URL for the voice listing endpoint, if available.
+    voices_url: Option<String>,
+    /// Provider ID string for voice mapping.
+    provider_id: String,
 }
 
 /// A TTS engine that synthesises speech by calling a cloud HTTP API.
@@ -23,6 +37,7 @@ struct CloudConfig {
 pub struct CloudEngine {
     config: CloudConfig,
     api_key: String,
+    credentials: HashMap<String, String>,
     client: reqwest::blocking::Client,
 }
 
@@ -41,6 +56,7 @@ impl CloudEngine {
         Some(CloudEngine {
             config,
             api_key,
+            credentials: credentials.clone(),
             client: reqwest::blocking::Client::new(),
         })
     }
@@ -58,6 +74,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             model_default: Some("gpt-4o-mini-tts".into()),
             default_voice: Some("alloy".into()),
             text_field: "input".into(),
+            provider_id: "openai".into(),
             ..Default::default()
         }),
         "elevenlabs" => {
@@ -68,10 +85,11 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             Some(CloudConfig {
                 synth_url: format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"),
                 auth_header: "xi-api-key".into(),
-                voice_param: String::new(),
                 model_param: Some("model_id".into()),
                 model_default: Some("eleven_multilingual_v2".into()),
                 text_field: "text".into(),
+                voices_url: Some("https://api.elevenlabs.io/v1/voices".into()),
+                provider_id: "elevenlabs".into(),
                 ..Default::default()
             })
         }
@@ -80,30 +98,51 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 .get("region")
                 .cloned()
                 .unwrap_or_else(|| "eastus".into());
+            let mut extra = HashMap::new();
+            extra.insert(
+                "X-Microsoft-OutputFormat".into(),
+                "audio-24khz-96kbitrate-mono-mp3".into(),
+            );
+            extra.insert("User-Agent".into(), "rust-tts-wrapper".into());
             Some(CloudConfig {
                 synth_url: format!(
                     "https://{region}.tts.speech.microsoft.com/cognitiveservices/v1"
                 ),
                 auth_header: "Ocp-Apim-Subscription-Key".into(),
-                voice_param: String::new(),
-                text_field: String::new(),
+                default_voice: Some("en-US-AriaNeural".into()),
+                body_is_ssml: true,
+                content_type: Some("application/ssml+xml".into()),
+                extra_headers: extra,
+                voices_url: Some(format!(
+                    "https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
+                )),
+                provider_id: "azure".into(),
                 ..Default::default()
             })
         }
-        "google" => Some(CloudConfig {
-            synth_url: "https://texttospeech.googleapis.com/v1/text:synthesize".into(),
-            voice_param: String::new(),
-            text_field: String::new(),
-            ..Default::default()
-        }),
+        "google" => {
+            let api_key = creds.get("apiKey").cloned().unwrap_or_default();
+            Some(CloudConfig {
+                synth_url: format!(
+                    "https://texttospeech.googleapis.com/v1/text:synthesize?key={api_key}"
+                ),
+                text_field: "text".into(),
+                voices_url: Some(format!(
+                    "https://texttospeech.googleapis.com/v1/voices?key={api_key}"
+                )),
+                provider_id: "google".into(),
+                ..Default::default()
+            })
+        }
         "cartesia" => Some(CloudConfig {
             synth_url: "https://api.cartesia.ai/tts/bytes".into(),
             auth_header: "X-API-Key".into(),
             voice_param: "voice_id".into(),
             model_param: Some("model_id".into()),
             model_default: Some("sonic-2".into()),
-            default_voice: None,
             text_field: "text".into(),
+            voices_url: Some("https://api.cartesia.ai/voices".into()),
+            provider_id: "cartesia".into(),
             ..Default::default()
         }),
         "deepgram" => Some(CloudConfig {
@@ -113,6 +152,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             voice_param: "voice".into(),
             default_voice: Some("aura-asteria-en".into()),
             text_field: "text".into(),
+            provider_id: "deepgram".into(),
             ..Default::default()
         }),
         "playht" => {
@@ -126,6 +166,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 voice_param: "voice".into(),
                 text_field: "text".into(),
                 extra_body: extra,
+                provider_id: "playht".into(),
                 ..Default::default()
             })
         }
@@ -135,6 +176,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Bearer ".into(),
             voice_param: "reference_id".into(),
             text_field: "text".into(),
+            provider_id: "fishaudio".into(),
             ..Default::default()
         }),
         "hume" => Some(CloudConfig {
@@ -143,6 +185,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Bearer ".into(),
             voice_param: "voice".into(),
             text_field: "text".into(),
+            provider_id: "hume".into(),
             ..Default::default()
         }),
         "mistral" => Some(CloudConfig {
@@ -151,6 +194,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Bearer ".into(),
             voice_param: "voice".into(),
             text_field: "text".into(),
+            provider_id: "mistral".into(),
             ..Default::default()
         }),
         "murf" => Some(CloudConfig {
@@ -158,6 +202,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_header: "api-key".into(),
             voice_param: "voice_id".into(),
             text_field: "text".into(),
+            provider_id: "murf".into(),
             ..Default::default()
         }),
         "resemble" => Some(CloudConfig {
@@ -166,6 +211,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Token ".into(),
             voice_param: "voice_uuid".into(),
             text_field: "text".into(),
+            provider_id: "resemble".into(),
             ..Default::default()
         }),
         "unrealspeech" => Some(CloudConfig {
@@ -175,6 +221,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             voice_param: "voice_id".into(),
             default_voice: Some("Scarlett".into()),
             text_field: "text".into(),
+            provider_id: "unrealspeech".into(),
             ..Default::default()
         }),
         "upliftai" => Some(CloudConfig {
@@ -183,6 +230,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Bearer ".into(),
             voice_param: "voice".into(),
             text_field: "text".into(),
+            provider_id: "upliftai".into(),
             ..Default::default()
         }),
         "watson" => {
@@ -198,10 +246,11 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 auth_header: "Authorization".into(),
                 auth_prefix: format!(
                     "Basic {}:",
-                    base64_encode("apikey", &creds.get("apiKey").cloned().unwrap_or_default())
+                    base64_encode(&creds.get("apiKey").cloned().unwrap_or_default())
                 ),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
+                provider_id: "watson".into(),
                 ..Default::default()
             })
         }
@@ -209,7 +258,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             synth_url: "https://api.wit.ai/synthesize?v=20240304".into(),
             auth_header: "Authorization".into(),
             auth_prefix: "Bearer ".into(),
-            text_field: String::new(),
+            provider_id: "witai".into(),
             ..Default::default()
         }),
         "xai" => Some(CloudConfig {
@@ -218,12 +267,14 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Bearer ".into(),
             voice_param: "voice".into(),
             text_field: "input".into(),
+            provider_id: "xai".into(),
             ..Default::default()
         }),
         "modelslab" => Some(CloudConfig {
             synth_url: "https://modelslab.com/api/v1/text_to_speech".into(),
             voice_param: "voice".into(),
             text_field: "text".into(),
+            provider_id: "modelslab".into(),
             ..Default::default()
         }),
         "polly" => Some(CloudConfig {
@@ -231,72 +282,297 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             voice_param: "VoiceId".into(),
             default_voice: Some("Joanna".into()),
             text_field: "Text".into(),
+            provider_id: "polly".into(),
             ..Default::default()
         }),
         _ => None,
     }
 }
 
-/// Hex-encode bytes for basic-auth style tokens.
-fn base64_encode(_prefix: &str, data: &str) -> String {
-    use std::fmt::Write;
-    let mut result = String::new();
-    for byte in data.as_bytes() {
-        write!(result, "{byte:02x}").unwrap();
-    }
-    result
+/// Base64 encode for auth tokens.
+fn base64_encode(data: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
 }
 
+/// Build SSML for Azure TTS.
+fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32) -> String {
+    let lang = voice.chars().take(5).collect::<String>();
+
+    let escaped = text
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+
+    let mut prosody_attrs = Vec::new();
+    let rate_str = match rate {
+        r if r < 0.7 => "x-slow",
+        r if r < 0.85 => "slow",
+        r if r < 1.15 => "medium",
+        r if r < 1.4 => "fast",
+        _ => "x-fast",
+    };
+    let pitch_str = match pitch {
+        p if p < 0.7 => "x-low",
+        p if p < 0.85 => "low",
+        p if p < 1.15 => "medium",
+        p if p < 1.4 => "high",
+        _ => "x-high",
+    };
+    if (rate - 1.0).abs() > f32::EPSILON {
+        prosody_attrs.push(format!("rate=\"{rate_str}\""));
+    }
+    if (pitch - 1.0).abs() > f32::EPSILON {
+        prosody_attrs.push(format!("pitch=\"{pitch_str}\""));
+    }
+
+    let inner = if prosody_attrs.is_empty() {
+        escaped
+    } else {
+        format!("<prosody {}>{escaped}</prosody>", prosody_attrs.join(" "))
+    };
+
+    format!(
+        "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang}'>\
+         <voice name='{voice}'>{inner}</voice></speak>"
+    )
+}
+
+/// Build JSON body for Google TTS REST API.
+fn build_google_request(
+    text: &str,
+    voice: &str,
+    add_marks: bool,
+) -> (serde_json::Value, Vec<String>) {
+    let lang = voice.chars().take(5).collect::<String>();
+
+    let mut words_list = Vec::new();
+
+    let input = if add_marks {
+        let words: Vec<&str> = text.split_whitespace().filter(|w| !w.is_empty()).collect();
+        let mut ssml = String::from("<speak>");
+        for (i, w) in words.iter().enumerate() {
+            if i > 0 {
+                ssml.push(' ');
+            }
+            let _ = std::fmt::Write::write_fmt(&mut ssml, format_args!("<mark name=\"{i}\"/>{w}"));
+            words_list = words.iter().map(|w| (*w).to_string()).collect();
+        }
+        ssml.push_str("</speak>");
+        serde_json::json!({ "ssml": ssml })
+    } else {
+        serde_json::json!({ "text": text })
+    };
+
+    let mut body = serde_json::json!({
+        "input": input,
+        "voice": { "languageCode": lang, "name": voice },
+        "audioConfig": { "audioEncoding": "MP3" }
+    });
+
+    if add_marks {
+        body["enableTimePointing"] = serde_json::json!(["SSML_MARK"]);
+    }
+
+    (body, words_list)
+}
+
+/// Parse Google timepoints into word boundaries.
+fn parse_google_timepoints(
+    timepoints: &[serde_json::Value],
+    words: &[String],
+) -> Vec<WordBoundary> {
+    #[derive(Clone)]
+    struct RawTp {
+        index: usize,
+        time_ms: u64,
+    }
+
+    let mut raw: Vec<RawTp> = Vec::new();
+    for tp in timepoints {
+        let mark = tp.get("markName").and_then(|v| v.as_str()).unwrap_or("");
+        let idx: usize = mark.parse().unwrap_or(usize::MAX);
+        let secs = tp
+            .get("timeSeconds")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
+        if idx < words.len() {
+            raw.push(RawTp {
+                index: idx,
+                time_ms: (secs * 1000.0) as u64,
+            });
+        }
+    }
+    raw.sort_by_key(|r| r.time_ms);
+
+    let mut boundaries = Vec::with_capacity(raw.len());
+    for (i, tp) in raw.iter().enumerate() {
+        let word = &words[tp.index];
+        let duration = if i + 1 < raw.len() {
+            raw[i + 1].time_ms.saturating_sub(tp.time_ms)
+        } else {
+            ((word.len() as u64) * 80).max(50)
+        };
+        boundaries.push(WordBoundary {
+            text: word.clone(),
+            offset: tp.time_ms,
+            duration,
+        });
+    }
+    boundaries
+}
+
+/// Map Azure voices JSON array to unified voices.
+fn map_azure_voices(json: &[serde_json::Value]) -> Vec<Voice> {
+    let mut voices = Vec::new();
+    for v in json {
+        let Some(short_name) = v.get("ShortName").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = v
+            .get("DisplayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or(short_name)
+            .to_string();
+        let gender_raw = v.get("Gender").and_then(|v| v.as_str()).unwrap_or("");
+        let locale = v.get("Locale").and_then(|v| v.as_str()).unwrap_or("en-US");
+
+        voices.push(Voice {
+            id: short_name.to_string(),
+            name,
+            gender: normalize_gender(gender_raw).to_string(),
+            provider: "azure".to_string(),
+            language_codes: vec![LanguageCode {
+                bcp47: locale.to_string(),
+                iso639_3: locale.split('-').next().unwrap_or("en").to_string(),
+                display: v
+                    .get("LocaleName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(locale)
+                    .to_string(),
+            }],
+        });
+    }
+    voices
+}
+
+/// Map Google voices JSON array to unified voices.
+fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
+    let mut voices = Vec::new();
+    for v in json {
+        let Some(name) = v.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let gender_raw = v.get("ssmlGender").and_then(|v| v.as_str()).unwrap_or("");
+        let lang_codes = v
+            .get("languageCodes")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| {
+                        let code = c.as_str()?;
+                        Some(LanguageCode {
+                            iso639_3: code.split('-').next()?.to_string(),
+                            bcp47: code.to_string(),
+                            display: code.to_string(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        voices.push(Voice {
+            id: name.to_string(),
+            name: name.to_string(),
+            gender: normalize_gender(gender_raw).to_string(),
+            provider: "google".to_string(),
+            language_codes: lang_codes,
+        });
+    }
+    voices
+}
+
+#[allow(
+    clippy::too_many_lines,
+    clippy::cast_precision_loss,
+    clippy::map_unwrap_or
+)]
 impl TtsEngine for CloudEngine {
     fn speak(
         &self,
         text: &str,
         voice: Option<&str>,
-        _rate: f32,
-        _pitch: f32,
+        rate: f32,
+        pitch: f32,
         _volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
-        _on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         let voice_to_use = voice
             .map(std::string::ToString::to_string)
             .or_else(|| self.config.default_voice.clone())
             .unwrap_or_default();
 
-        let mut body = serde_json::Map::new();
-        body.insert(
-            self.config.text_field.clone(),
-            serde_json::Value::String(text.to_string()),
-        );
+        let mut req = self.client.post(&self.config.synth_url);
 
-        if !self.config.voice_param.is_empty() && !voice_to_use.is_empty() {
-            body.insert(
-                self.config.voice_param.clone(),
-                serde_json::Value::String(voice_to_use),
-            );
-        }
-        if let Some(ref model_param) = self.config.model_param {
-            if let Some(ref model) = self.config.model_default {
-                body.insert(
-                    model_param.clone(),
-                    serde_json::Value::String(model.clone()),
-                );
-            }
-        }
-        for (k, v) in &self.config.extra_body {
-            body.insert(k.clone(), v.clone());
-        }
-
-        let mut req = self.client.post(&self.config.synth_url).json(&body);
-
+        // Auth header
         if !self.config.auth_header.is_empty() {
             let val = format!("{}{}", self.config.auth_prefix, self.api_key);
             req = req.header(&self.config.auth_header, val);
         }
 
-        let resp = req
-            .send()
-            .map_err(|e| TtsError(format!("HTTP error: {e}")))?;
+        // Extra headers
+        for (k, v) in &self.config.extra_headers {
+            req = req.header(k.as_str(), v.as_str());
+        }
+
+        // Body depends on engine type
+        let resp = if self.config.body_is_ssml {
+            // Azure: send SSML XML body
+            let ssml = build_azure_ssml(text, &voice_to_use, rate, pitch);
+            let ct = self
+                .config
+                .content_type
+                .as_deref()
+                .unwrap_or("application/ssml+xml");
+            req = req.header("Content-Type", ct);
+            req.body(ssml).send()
+        } else if self.config.provider_id == "google" {
+            // Google: build JSON body with proper structure
+            let (body, _words) = build_google_request(text, &voice_to_use, on_boundary.is_some());
+            req = req.json(&body);
+            req.send()
+        } else {
+            // Standard JSON body for all other engines
+            let mut body = serde_json::Map::new();
+            if !self.config.text_field.is_empty() {
+                body.insert(
+                    self.config.text_field.clone(),
+                    serde_json::Value::String(text.to_string()),
+                );
+            }
+            if !self.config.voice_param.is_empty() && !voice_to_use.is_empty() {
+                body.insert(
+                    self.config.voice_param.clone(),
+                    serde_json::Value::String(voice_to_use.clone()),
+                );
+            }
+            if let Some(ref model_param) = self.config.model_param {
+                if let Some(ref model) = self.config.model_default {
+                    body.insert(
+                        model_param.clone(),
+                        serde_json::Value::String(model.clone()),
+                    );
+                }
+            }
+            for (k, v) in &self.config.extra_body {
+                body.insert(k.clone(), v.clone());
+            }
+            req = req.json(&serde_json::Value::Object(body));
+            req.send()
+        };
+
+        let resp = resp.map_err(|e| TtsError(format!("HTTP error: {e}")))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -304,7 +580,49 @@ impl TtsEngine for CloudEngine {
             return Err(TtsError(format!("API error {status}: {body_text}")));
         }
 
-        if let Some(cb) = on_audio.as_mut() {
+        if self.config.provider_id == "google" && on_boundary.is_some() {
+            // Google returns base64-encoded audio in JSON
+            let resp_text = resp
+                .text()
+                .map_err(|e| TtsError(format!("Read error: {e}")))?;
+            let json: serde_json::Value = serde_json::from_str(&resp_text)
+                .map_err(|e| TtsError(format!("JSON parse: {e}")))?;
+
+            if let Some(b64) = json.get("audioContent").and_then(|v| v.as_str()) {
+                use base64::Engine;
+                let audio_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
+                if let Some(cb) = on_audio.as_mut() {
+                    for chunk in audio_bytes.chunks(8192) {
+                        cb(chunk);
+                    }
+                }
+            }
+
+            if let Some(cb) = on_boundary.as_mut() {
+                let (_, words) = build_google_request(text, &voice_to_use, true);
+                if let Some(tps) = json.get("timepoints").and_then(|v| v.as_array()) {
+                    let boundaries = parse_google_timepoints(tps, &words);
+                    for b in &boundaries {
+                        cb(
+                            &b.text,
+                            b.offset as f32 / 1000.0,
+                            (b.offset + b.duration) as f32 / 1000.0,
+                        );
+                    }
+                } else {
+                    let estimated = estimate_word_boundaries(text);
+                    for b in &estimated {
+                        cb(
+                            &b.text,
+                            b.offset as f32 / 1000.0,
+                            (b.offset + b.duration) as f32 / 1000.0,
+                        );
+                    }
+                }
+            }
+        } else if let Some(cb) = on_audio.as_mut() {
             use std::io::Read;
             let mut resp = resp;
             let mut buffer = [0u8; 8192];
@@ -316,6 +634,17 @@ impl TtsEngine for CloudEngine {
                     break;
                 }
                 cb(&buffer[..n]);
+            }
+
+            if let Some(cb) = on_boundary.as_mut() {
+                let estimated = estimate_word_boundaries(text);
+                for b in &estimated {
+                    cb(
+                        &b.text,
+                        b.offset as f32 / 1000.0,
+                        (b.offset + b.duration) as f32 / 1000.0,
+                    );
+                }
             }
         } else {
             let _audio_bytes = resp
@@ -343,13 +672,98 @@ impl TtsEngine for CloudEngine {
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
-        // Since we don't fetch voices, we return an empty list or fake one.
-        // For a full implementation, this should fetch voices from the respective APIs.
-        Ok(vec![])
+        let Some(ref voices_url) = self.config.voices_url else {
+            return Ok(vec![]);
+        };
+
+        let mut req = self.client.get(voices_url.as_str());
+
+        if !self.config.auth_header.is_empty() {
+            let val = format!("{}{}", self.config.auth_prefix, self.api_key);
+            req = req.header(&self.config.auth_header, val);
+        }
+
+        let resp = req
+            .send()
+            .map_err(|e| TtsError(format!("Voice list HTTP error: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Ok(vec![]);
+        }
+
+        let json: serde_json::Value = resp
+            .json()
+            .map_err(|e| TtsError(format!("Voice list parse error: {e}")))?;
+
+        match self.config.provider_id.as_str() {
+            "azure" => json
+                .as_array()
+                .map_or_else(|| Ok(vec![]), |arr| Ok(map_azure_voices(arr))),
+            "google" => json
+                .get("voices")
+                .and_then(|v| v.as_array())
+                .map_or_else(|| Ok(vec![]), |arr| Ok(map_google_voices(arr))),
+            _ => {
+                // Generic: try to parse as array of objects with id/name fields
+                json.as_array().map_or_else(
+                    || Ok(vec![]),
+                    |arr| {
+                        Ok(arr
+                            .iter()
+                            .filter_map(|v| {
+                                let id = v
+                                    .get("id")
+                                    .or(v.get("voice_id"))
+                                    .or(v.get("name"))?
+                                    .as_str()?;
+                                Some(Voice {
+                                    id: id.to_string(),
+                                    name: v
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(id)
+                                        .to_string(),
+                                    gender: normalize_gender(
+                                        v.get("gender")
+                                            .or(v.get("labels"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or(""),
+                                    )
+                                    .to_string(),
+                                    provider: self.config.provider_id.clone(),
+                                    language_codes: vec![],
+                                })
+                            })
+                            .collect())
+                    },
+                )
+            }
+        }
     }
 
     fn engine_id(&self) -> &'static str {
-        "cloud"
+        match self.config.provider_id.as_str() {
+            "openai" => "openai",
+            "elevenlabs" => "elevenlabs",
+            "azure" => "azure",
+            "google" => "google",
+            "cartesia" => "cartesia",
+            "deepgram" => "deepgram",
+            "playht" => "playht",
+            "fishaudio" => "fishaudio",
+            "hume" => "hume",
+            "mistral" => "mistral",
+            "murf" => "murf",
+            "resemble" => "resemble",
+            "unrealspeech" => "unrealspeech",
+            "upliftai" => "upliftai",
+            "watson" => "watson",
+            "witai" => "witai",
+            "xai" => "xai",
+            "modelslab" => "modelslab",
+            "polly" => "polly",
+            _ => "cloud",
+        }
     }
 }
 
@@ -361,4 +775,126 @@ pub fn create_cloud_engine(id: &str, credentials_json: &str) -> Option<Box<dyn T
         serde_json::from_str(credentials_json).unwrap_or_default()
     };
     CloudEngine::new(id, &creds).map(|e| Box::new(e) as Box<dyn TtsEngine>)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_azure_ssml() {
+        let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.0, 1.0);
+        assert!(ssml.contains("<speak"));
+        assert!(ssml.contains("en-US-AriaNeural"));
+        assert!(ssml.contains("Hello world"));
+        assert!(!ssml.contains("<prosody"));
+    }
+
+    #[test]
+    fn test_build_azure_ssml_with_prosody() {
+        let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.5, 0.8);
+        assert!(ssml.contains("<prosody"));
+        assert!(ssml.contains("rate="));
+        assert!(ssml.contains("pitch="));
+    }
+
+    #[test]
+    fn test_build_google_request_basic() {
+        let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", false);
+        assert!(body["input"]["text"].as_str().unwrap() == "Hello world");
+        assert!(words.is_empty());
+    }
+
+    #[test]
+    fn test_build_google_request_with_marks() {
+        let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", true);
+        let ssml = body["input"]["ssml"].as_str().unwrap();
+        assert!(ssml.contains("<mark name=\"0\"/>"));
+        assert!(ssml.contains("<mark name=\"1\"/>"));
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0], "Hello");
+        assert_eq!(words[1], "world");
+        assert!(body.get("enableTimePointing").is_some());
+    }
+
+    #[test]
+    fn test_parse_google_timepoints() {
+        let tps = vec![
+            serde_json::json!({"markName": "0", "timeSeconds": 0.125}),
+            serde_json::json!({"markName": "1", "timeSeconds": 0.450}),
+        ];
+        let words = vec!["Hello".to_string(), "world".to_string()];
+        let boundaries = parse_google_timepoints(&tps, &words);
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0].text, "Hello");
+        assert_eq!(boundaries[0].offset, 125);
+        assert_eq!(boundaries[0].duration, 325);
+        assert_eq!(boundaries[1].text, "world");
+        assert_eq!(boundaries[1].offset, 450);
+    }
+
+    #[test]
+    fn test_estimate_word_boundaries() {
+        let boundaries = estimate_word_boundaries("Hello world this is a test");
+        assert_eq!(boundaries.len(), 6);
+        assert_eq!(boundaries[0].text, "Hello");
+        assert_eq!(boundaries[0].offset, 0);
+        assert!(boundaries[0].duration > 0);
+    }
+
+    #[test]
+    fn test_normalize_gender() {
+        assert_eq!(normalize_gender("Female"), "Female");
+        assert_eq!(normalize_gender("female"), "Female");
+        assert_eq!(normalize_gender("Male"), "Male");
+        assert_eq!(normalize_gender("male"), "Male");
+        assert_eq!(normalize_gender(""), "Unknown");
+        assert_eq!(normalize_gender("other"), "Unknown");
+    }
+
+    #[test]
+    fn test_build_config_all_engines() {
+        let engines = [
+            "openai",
+            "elevenlabs",
+            "azure",
+            "google",
+            "cartesia",
+            "deepgram",
+            "playht",
+            "fishaudio",
+            "hume",
+            "mistral",
+            "murf",
+            "resemble",
+            "unrealspeech",
+            "upliftai",
+            "watson",
+            "witai",
+            "xai",
+            "modelslab",
+            "polly",
+        ];
+        let creds = HashMap::new();
+        for id in &engines {
+            assert!(
+                build_config(id, &creds).is_some(),
+                "Failed for engine: {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_config_unknown() {
+        let creds = HashMap::new();
+        assert!(build_config("nonexistent", &creds).is_none());
+    }
+
+    #[test]
+    fn test_azure_ssml_escapes_special_chars() {
+        let ssml = build_azure_ssml("A & B < C > D", "en-US-AriaNeural", 1.0, 1.0);
+        assert!(ssml.contains("&amp;"));
+        assert!(ssml.contains("&lt;"));
+        assert!(ssml.contains("&gt;"));
+    }
 }

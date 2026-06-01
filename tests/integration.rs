@@ -1,4 +1,4 @@
-//! Integration tests for the engine factory.
+//! Integration tests for the TTS wrapper.
 
 use rust_tts_wrapper::factory;
 
@@ -117,4 +117,121 @@ fn test_system_engine_stop_graceful() {
             "Expected 'not connected' error, got: {err}"
         );
     }
+}
+
+#[test]
+fn test_create_all_cloud_engines() {
+    let cloud_ids = [
+        "openai",
+        "elevenlabs",
+        "azure",
+        "google",
+        "cartesia",
+        "deepgram",
+        "playht",
+        "fishaudio",
+        "hume",
+        "mistral",
+        "murf",
+        "resemble",
+        "unrealspeech",
+        "upliftai",
+        "xai",
+        "modelslab",
+    ];
+    for id in &cloud_ids {
+        let engine = factory::create_engine(id, r#"{"apiKey":"test-key"}"#);
+        assert!(engine.is_some(), "Engine '{id}' should be creatable");
+    }
+}
+
+#[test]
+fn test_create_azure_with_region() {
+    let engine = factory::create_engine(
+        "azure",
+        r#"{"subscriptionKey":"test-key","region":"eastus"}"#,
+    );
+    assert!(engine.is_some());
+}
+
+#[test]
+fn test_create_watson_with_all_creds() {
+    let engine = factory::create_engine(
+        "watson",
+        r#"{"apiKey":"test-key","region":"us-east","instanceId":"test-id"}"#,
+    );
+    assert!(engine.is_some());
+}
+
+#[test]
+fn test_create_polly_with_all_creds() {
+    let engine = factory::create_engine(
+        "polly",
+        r#"{"accessKeyId":"test","secretAccessKey":"test","region":"us-east-1"}"#,
+    );
+    assert!(engine.is_some());
+}
+
+#[test]
+fn test_sherpaonnx_engine_has_voices() {
+    let engine = factory::create_engine("sherpaonnx", "").expect("sherpaonnx engine");
+    let voices = engine.get_voices().expect("voices");
+    assert!(!voices.is_empty(), "SherpaONNX should have voices");
+    assert_eq!(voices[0].provider, "sherpaonnx");
+}
+
+#[test]
+fn test_engine_id_matches() {
+    let engine = factory::create_engine("openai", r#"{"apiKey":"test-key"}"#).unwrap();
+    assert_eq!(engine.engine_id(), "openai");
+}
+
+#[test]
+fn test_normalize_gender() {
+    use rust_tts_wrapper::types::normalize_gender;
+    assert_eq!(normalize_gender("Female"), "Female");
+    assert_eq!(normalize_gender("female"), "Female");
+    assert_eq!(normalize_gender("Male"), "Male");
+    assert_eq!(normalize_gender("male"), "Male");
+    assert_eq!(normalize_gender(""), "Unknown");
+    assert_eq!(normalize_gender("other"), "Unknown");
+}
+
+#[test]
+fn test_voice_struct_fields() {
+    use rust_tts_wrapper::types::{LanguageCode, Voice};
+    let voice = Voice {
+        id: "test-voice".to_string(),
+        name: "Test Voice".to_string(),
+        gender: "Female".to_string(),
+        provider: "test".to_string(),
+        language_codes: vec![LanguageCode {
+            bcp47: "en-US".to_string(),
+            iso639_3: "eng".to_string(),
+            display: "English (United States)".to_string(),
+        }],
+    };
+    assert_eq!(voice.primary_language(), "en-US");
+    assert_eq!(voice.language_codes.len(), 1);
+}
+
+#[test]
+fn test_word_boundary_estimation() {
+    use rust_tts_wrapper::engine::estimate_word_boundaries;
+    let boundaries = estimate_word_boundaries("Hello world this is a test");
+    assert_eq!(boundaries.len(), 6);
+    assert_eq!(boundaries[0].text, "Hello");
+    assert_eq!(boundaries[0].offset, 0);
+    assert!(boundaries[0].duration > 0);
+    // Offsets should be monotonically increasing
+    for i in 1..boundaries.len() {
+        assert!(boundaries[i].offset > boundaries[i - 1].offset);
+    }
+}
+
+#[test]
+fn test_word_boundary_empty_text() {
+    use rust_tts_wrapper::engine::estimate_word_boundaries;
+    let boundaries = estimate_word_boundaries("");
+    assert!(boundaries.is_empty());
 }

@@ -14,7 +14,7 @@ crate-type = ["cdylib", "staticlib", "lib"]
 [features]
 default = ["system", "cloud", "sherpaonnx"]
 system = ["speech-dispatcher"]
-cloud = ["reqwest", "serde_json"]
+cloud = ["reqwest", "serde_json", "base64"]
 sherpaonnx = ["sherpa-onnx"]
 
 [dependencies]
@@ -23,6 +23,7 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "1.13", optional = true }
+base64 = { version = "0.22", optional = true }
 anyhow = "1"
 
 [build-dependencies]

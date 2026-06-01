@@ -3,19 +3,48 @@
 use std::fmt;
 use std::os::raw::c_char;
 
-/// A single voice offered by an engine.
+/// A language code entry with BCP-47, ISO 639-3, and display name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageCode {
+    /// BCP-47 language tag (e.g. `"en-US"`).
+    pub bcp47: String,
+    /// ISO 639-3 language code (e.g. `"eng"`).
+    pub iso639_3: String,
+    /// Human-readable language name (e.g. `"English (United States)"`).
+    pub display: String,
+}
+
+/// A single voice offered by an engine, unified across all providers.
 #[derive(Debug, Clone)]
 pub struct Voice {
     /// Unique voice identifier within the engine.
     pub id: String,
     /// Human-readable voice name.
     pub name: String,
-    /// BCP-47 language tag (e.g. `"en-US"`).
-    pub language: String,
-    /// Gender string (e.g. `"male"`, `"female"`, or empty).
+    /// Gender: `"Male"`, `"Female"`, or `"Unknown"`.
     pub gender: String,
-    /// The engine that provides this voice.
-    pub engine: String,
+    /// The engine/provider that provides this voice (e.g. `"azure"`, `"google"`).
+    pub provider: String,
+    /// Language codes supported by this voice.
+    pub language_codes: Vec<LanguageCode>,
+}
+
+impl Voice {
+    /// Convenience: return the primary (first) BCP-47 language code, or empty string.
+    #[must_use]
+    pub fn primary_language(&self) -> &str {
+        self.language_codes.first().map_or("", |l| l.bcp47.as_str())
+    }
+}
+
+/// Normalize a raw gender string to `"Male"`, `"Female"`, or `"Unknown"`.
+#[must_use]
+pub fn normalize_gender(value: &str) -> &'static str {
+    match value.to_lowercase().as_str() {
+        "female" => "Female",
+        "male" => "Male",
+        _ => "Unknown",
+    }
 }
 
 /// Describes a registered engine for introspection.
@@ -63,6 +92,17 @@ pub struct SherpaLanguage {
     pub language_name: String,
     /// Country code.
     pub country: String,
+}
+
+/// A word boundary event with timing information.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordBoundary {
+    /// The spoken word text.
+    pub text: String,
+    /// Offset from start of audio in milliseconds.
+    pub offset: u64,
+    /// Duration of the word in milliseconds.
+    pub duration: u64,
 }
 
 /// C-compatible voice descriptor returned by [`tts_get_voices`](crate::tts_get_voices).
