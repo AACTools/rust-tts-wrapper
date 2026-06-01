@@ -1,0 +1,34 @@
+[package]
+name = "rust-tts-wrapper"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Cross-platform TTS wrapper with C API — mirrors js-tts-wrapper / SwiftTTSWrapper"
+repository = "https://github.com/AACTools/rust-tts-wrapper"
+keywords = ["tts", "text-to-speech", "speech", "accessibility", "assistive-technology"]
+categories = ["accessibility", "api-bindings", "multimedia::audio"]
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[features]
+default = ["system", "cloud", "sherpaonnx"]
+system = ["speech-dispatcher"]
+cloud = ["reqwest", "serde_json"]
+sherpaonnx = ["sherpa-onnx"]
+
+[dependencies]
+speech-dispatcher = { version = "0.16", optional = true }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+sherpa-onnx = { version = "1.13", optional = true }
+anyhow = "1"
+
+[build-dependencies]
+cbindgen = "0.28"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+cargo = "warn"

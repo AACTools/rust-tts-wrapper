@@ -1,0 +1,5 @@
+language = "C"
+include_guard = "TTS_WRAPPER_H"
+autogen_warning = "/* Auto-generated. Do not edit. */"
+no_includes = true
+sys_includes = ["stdint.h", "stdbool.h"]
