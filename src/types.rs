@@ -1,7 +1,36 @@
 //! Shared types used across the crate.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::os::raw::c_char;
+
+/// Voice gender, matching Swift's `UnifiedVoice.Gender`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gender {
+    Male,
+    Female,
+    Unknown,
+}
+
+impl fmt::Display for Gender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Male => write!(f, "Male"),
+            Self::Female => write!(f, "Female"),
+            Self::Unknown => write!(f, "Unknown"),
+        }
+    }
+}
+
+/// Normalize a raw gender string to a typed [`Gender`].
+#[must_use]
+pub fn normalize_gender(value: &str) -> Gender {
+    match value.to_lowercase().as_str() {
+        "female" => Gender::Female,
+        "male" => Gender::Male,
+        _ => Gender::Unknown,
+    }
+}
 
 /// A language code entry with BCP-47, ISO 639-3, and display name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,14 +44,15 @@ pub struct LanguageCode {
 }
 
 /// A single voice offered by an engine, unified across all providers.
+/// Mirrors Swift's `UnifiedVoice`.
 #[derive(Debug, Clone)]
 pub struct Voice {
     /// Unique voice identifier within the engine.
     pub id: String,
     /// Human-readable voice name.
     pub name: String,
-    /// Gender: `"Male"`, `"Female"`, or `"Unknown"`.
-    pub gender: String,
+    /// Gender of the voice.
+    pub gender: Gender,
     /// The engine/provider that provides this voice (e.g. `"azure"`, `"google"`).
     pub provider: String,
     /// Language codes supported by this voice.
@@ -37,14 +67,141 @@ impl Voice {
     }
 }
 
-/// Normalize a raw gender string to `"Male"`, `"Female"`, or `"Unknown"`.
-#[must_use]
-pub fn normalize_gender(value: &str) -> &'static str {
-    match value.to_lowercase().as_str() {
-        "female" => "Female",
-        "male" => "Male",
-        _ => "Unknown",
+/// Audio output format, matching Swift's `AudioFormat`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioFormat {
+    Mp3,
+    Wav,
+    Ogg,
+    Opus,
+    Aac,
+    Flac,
+    Pcm,
+}
+
+impl fmt::Display for AudioFormat {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Mp3 => write!(f, "mp3"),
+            Self::Wav => write!(f, "wav"),
+            Self::Ogg => write!(f, "ogg"),
+            Self::Opus => write!(f, "opus"),
+            Self::Aac => write!(f, "aac"),
+            Self::Flac => write!(f, "flac"),
+            Self::Pcm => write!(f, "pcm"),
+        }
     }
+}
+
+/// Named speech rate presets, matching Swift's `SpeechRate`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpeechRate {
+    XSlow,
+    Slow,
+    Medium,
+    Fast,
+    XFast,
+}
+
+impl SpeechRate {
+    /// Convert to a float multiplier (1.0 = normal).
+    #[must_use]
+    pub fn rate_value(self) -> f32 {
+        match self {
+            Self::XSlow => 0.5,
+            Self::Slow => 0.75,
+            Self::Medium => 1.0,
+            Self::Fast => 1.25,
+            Self::XFast => 1.5,
+        }
+    }
+}
+
+/// Named speech pitch presets, matching Swift's `SpeechPitch`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SpeechPitch {
+    XLow,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+impl SpeechPitch {
+    /// Convert to a float multiplier (1.0 = normal).
+    #[must_use]
+    pub fn pitch_value(self) -> f32 {
+        match self {
+            Self::XLow => 0.5,
+            Self::Low => 0.75,
+            Self::Medium => 1.0,
+            Self::High => 1.25,
+            Self::XHigh => 1.5,
+        }
+    }
+}
+
+/// Options for speak/synth calls, matching Swift's `SpeakOptions`.
+#[derive(Debug, Clone, Default)]
+pub struct SpeakOptions {
+    /// Speech rate as a float multiplier (1.0 = normal). Overrides `speech_rate`.
+    pub rate: Option<f32>,
+    /// Speech rate as a named preset.
+    pub speech_rate: Option<SpeechRate>,
+    /// Speech pitch as a float multiplier (1.0 = normal). Overrides `speech_pitch`.
+    pub pitch: Option<f32>,
+    /// Speech pitch as a named preset.
+    pub speech_pitch: Option<SpeechPitch>,
+    /// Volume (0.0–1.0).
+    pub volume: Option<f32>,
+    /// Voice identifier.
+    pub voice: Option<String>,
+    /// Desired audio output format.
+    pub format: Option<AudioFormat>,
+    /// Whether to preprocess SpeechMarkdown to SSML.
+    pub use_speech_markdown: bool,
+    /// Whether to request real word boundary events from the API.
+    pub use_word_boundary: bool,
+    /// If true, pass SSML directly to the engine without wrapping.
+    pub raw_ssml: bool,
+    /// Engine-specific extra options.
+    pub extra: HashMap<String, String>,
+}
+
+impl SpeakOptions {
+    /// Resolve the effective rate value.
+    #[must_use]
+    pub fn effective_rate(&self) -> f32 {
+        self.rate
+            .or_else(|| self.speech_rate.map(SpeechRate::rate_value))
+            .unwrap_or(1.0)
+    }
+
+    /// Resolve the effective pitch value.
+    #[must_use]
+    pub fn effective_pitch(&self) -> f32 {
+        self.pitch
+            .or_else(|| self.speech_pitch.map(SpeechPitch::pitch_value))
+            .unwrap_or(1.0)
+    }
+
+    /// Resolve the effective volume value.
+    #[must_use]
+    pub fn effective_volume(&self) -> f32 {
+        self.volume.unwrap_or(1.0)
+    }
+}
+
+/// A word boundary event with timing information.
+/// Mirrors Swift's `WordBoundary`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WordBoundary {
+    /// The spoken word text.
+    pub text: String,
+    /// Offset from start of audio in milliseconds.
+    pub offset: u64,
+    /// Duration of the word in milliseconds.
+    pub duration: u64,
 }
 
 /// Describes a registered engine for introspection.
@@ -92,17 +249,6 @@ pub struct SherpaLanguage {
     pub language_name: String,
     /// Country code.
     pub country: String,
-}
-
-/// A word boundary event with timing information.
-#[derive(Debug, Clone, PartialEq)]
-pub struct WordBoundary {
-    /// The spoken word text.
-    pub text: String,
-    /// Offset from start of audio in milliseconds.
-    pub offset: u64,
-    /// Duration of the word in milliseconds.
-    pub duration: u64,
 }
 
 /// C-compatible voice descriptor returned by [`tts_get_voices`](crate::tts_get_voices).

@@ -1,7 +1,9 @@
 //! Sherpa-ONNX offline TTS engine with model registry.
 
 use crate::engine::{estimate_word_boundaries, TtsEngine};
-use crate::types::{LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice};
+use crate::types::{
+    Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -274,7 +276,7 @@ impl TtsEngine for SherpaOnnxEngine {
             voices.push(Voice {
                 id: format!("{i}"),
                 name: format!("Speaker {i}"),
-                gender: "Unknown".to_string(),
+                gender: Gender::Unknown,
                 provider: "sherpaonnx".to_string(),
                 language_codes: vec![LanguageCode {
                     bcp47: lang.clone(),

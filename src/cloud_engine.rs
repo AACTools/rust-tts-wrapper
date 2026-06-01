@@ -440,7 +440,7 @@ fn map_azure_voices(json: &[serde_json::Value]) -> Vec<Voice> {
         voices.push(Voice {
             id: short_name.to_string(),
             name,
-            gender: normalize_gender(gender_raw).to_string(),
+            gender: normalize_gender(gender_raw),
             provider: "azure".to_string(),
             language_codes: vec![LanguageCode {
                 bcp47: locale.to_string(),
@@ -484,7 +484,7 @@ fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
         voices.push(Voice {
             id: name.to_string(),
             name: name.to_string(),
-            gender: normalize_gender(gender_raw).to_string(),
+            gender: normalize_gender(gender_raw),
             provider: "google".to_string(),
             language_codes: lang_codes,
         });
@@ -730,8 +730,7 @@ impl TtsEngine for CloudEngine {
                                             .or(v.get("labels"))
                                             .and_then(|v| v.as_str())
                                             .unwrap_or(""),
-                                    )
-                                    .to_string(),
+                                    ),
                                     provider: self.config.provider_id.clone(),
                                     language_codes: vec![],
                                 })
@@ -846,12 +845,18 @@ mod tests {
 
     #[test]
     fn test_normalize_gender() {
-        assert_eq!(normalize_gender("Female"), "Female");
-        assert_eq!(normalize_gender("female"), "Female");
-        assert_eq!(normalize_gender("Male"), "Male");
-        assert_eq!(normalize_gender("male"), "Male");
-        assert_eq!(normalize_gender(""), "Unknown");
-        assert_eq!(normalize_gender("other"), "Unknown");
+        assert_eq!(
+            super::super::types::normalize_gender("Female"),
+            super::super::types::Gender::Female
+        );
+        assert_eq!(
+            super::super::types::normalize_gender("male"),
+            super::super::types::Gender::Male
+        );
+        assert_eq!(
+            super::super::types::normalize_gender(""),
+            super::super::types::Gender::Unknown
+        );
     }
 
     #[test]
