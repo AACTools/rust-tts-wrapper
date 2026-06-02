@@ -8,6 +8,13 @@ use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEng
 use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
 
+#[cfg(feature = "cloud")]
+use {
+    tungstenite::{connect, Message},
+    url::Url,
+    uuid::Uuid,
+};
+
 /// Configuration for a single cloud TTS provider.
 #[derive(Debug, Clone, Default)]
 struct CloudConfig {
@@ -497,6 +504,28 @@ fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
     clippy::cast_precision_loss,
     clippy::map_unwrap_or
 )]
+#[cfg(feature = "cloud")]
+fn compute_durations(boundaries: &mut [WordBoundary]) {
+    if boundaries.is_empty() {
+        return;
+    }
+    if boundaries.len() == 1 {
+        boundaries[0].duration = boundaries[0].duration.max(500);
+        return;
+    }
+    let len = boundaries.len();
+    for i in 0..(len - 1) {
+        if boundaries[i].duration == 0 {
+            boundaries[i].duration = boundaries[i + 1]
+                .offset
+                .saturating_sub(boundaries[i].offset);
+        }
+    }
+    if boundaries[len - 1].duration == 0 {
+        boundaries[len - 1].duration = 500;
+    }
+}
+
 impl TtsEngine for CloudEngine {
     fn speak(
         &self,
@@ -515,7 +544,165 @@ impl TtsEngine for CloudEngine {
 
         let (text, _is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
 
-        let mut req = self.client.post(&self.config.synth_url);
+        // Azure WebSocket approach if word boundaries are requested
+        #[cfg(feature = "cloud")]
+        if self.config.provider_id == "azure" && on_boundary.is_some() {
+            let Some(on_boundary) = on_boundary.as_mut() else {
+                return Ok(());
+            };
+            let region = self
+                .credentials
+                .get("region")
+                .cloned()
+                .unwrap_or_else(|| "eastus".into());
+            let request_id = Uuid::new_v4().to_string().to_lowercase();
+            let ws_url_str = format!(
+                "wss://{}.tts.speech.microsoft.com/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={}",
+                region, self.api_key
+            );
+
+            let ws_url = Url::parse(&ws_url_str)
+                .map_err(|e| TtsError(format!("Invalid Azure WS URL: {e}")))?;
+            let (mut socket, _) = connect(ws_url.as_str())
+                .map_err(|e| TtsError(format!("Azure WS Connect error: {e}")))?;
+
+            let output_format = "audio-24khz-96kbitrate-mono-mp3"; // Or another default
+
+            // Send config
+            let config_headers = format!("X-RequestId:{request_id}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n");
+            let config_body = format!(
+                r#"{{"context":{{"synthesis":{{"audio":{{"metadataOptions":{{"sentenceBoundaryEnabled":false,"wordBoundaryEnabled":true}},"outputFormat":"{output_format}"}}}}}}}}"#
+            );
+            let config_msg = format!("{config_headers}{config_body}");
+            socket
+                .send(Message::Text(config_msg.into()))
+                .map_err(|e| TtsError(format!("WS config send error: {e}")))?;
+
+            // Send SSML
+            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch);
+            let ssml_msg = format!(
+                "X-RequestId:{request_id}\r\nContent-Type:application/ssml+xml\r\nX-StreamId:{request_id}\r\nPath:ssml\r\n\r\n{ssml}"
+            );
+            socket
+                .send(Message::Text(ssml_msg.into()))
+                .map_err(|e| TtsError(format!("WS ssml send error: {e}")))?;
+
+            let mut collected_boundaries = Vec::new();
+
+            loop {
+                let msg = match socket.read() {
+                    Ok(m) => m,
+                    Err(
+                        tungstenite::error::Error::ConnectionClosed
+                        | tungstenite::error::Error::AlreadyClosed,
+                    ) => break,
+                    Err(e) => return Err(TtsError(format!("WS receive error: {e}"))),
+                };
+
+                match msg {
+                    Message::Text(t) => {
+                        let text_msg = t.as_str();
+                        let path_line = text_msg.lines().find(|l| l.starts_with("Path:"));
+                        let path = path_line.map_or("", |l| l[5..].trim());
+
+                        if path == "turn.end" {
+                            let _ = socket.close(None);
+                            break;
+                        }
+
+                        if path == "audio.metadata" || path == "word-boundary" {
+                            let body = if let Some(idx) = text_msg.find("\r\n\r\n") {
+                                &text_msg[idx + 4..]
+                            } else if let Some(idx) = text_msg.find("\n\n") {
+                                &text_msg[idx + 2..]
+                            } else {
+                                text_msg
+                            };
+
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                                if let Some(metadata) =
+                                    json.get("Metadata").and_then(|v| v.as_array())
+                                {
+                                    for item in metadata {
+                                        if item.get("Type").and_then(|v| v.as_str())
+                                            == Some("WordBoundary")
+                                        {
+                                            if let Some(data) = item.get("Data") {
+                                                let offset_ticks = data
+                                                    .get("Offset")
+                                                    .and_then(serde_json::Value::as_i64)
+                                                    .unwrap_or(0);
+                                                let duration_ticks = data
+                                                    .get("Duration")
+                                                    .and_then(serde_json::Value::as_i64)
+                                                    .unwrap_or(0);
+
+                                                let word = if let Some(text_obj) =
+                                                    data.get("text").and_then(|v| v.as_object())
+                                                {
+                                                    text_obj
+                                                        .get("Text")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                } else if let Some(text_obj) =
+                                                    data.get("Text").and_then(|v| v.as_object())
+                                                {
+                                                    text_obj
+                                                        .get("Text")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                } else {
+                                                    data.get("text")
+                                                        .and_then(|v| v.as_str())
+                                                        .unwrap_or("")
+                                                };
+
+                                                if !word.is_empty() {
+                                                    collected_boundaries.push(WordBoundary {
+                                                        text: word.to_string(),
+                                                        offset: (offset_ticks / 10_000) as u64,
+                                                        duration: (duration_ticks / 10_000) as u64,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Message::Binary(b) => {
+                        if b.len() > 2 {
+                            let header_length = ((b[0] as usize) << 8) | (b[1] as usize);
+                            if b.len() > 2 + header_length {
+                                let audio_start = 2 + header_length;
+                                if let Some(cb) = on_audio.as_mut() {
+                                    cb(&b[audio_start..]);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            compute_durations(&mut collected_boundaries);
+            for b in &collected_boundaries {
+                on_boundary(
+                    &b.text,
+                    b.offset as f32 / 1000.0,
+                    (b.offset + b.duration) as f32 / 1000.0,
+                );
+            }
+
+            return Ok(());
+        }
+
+        let mut synth_url = self.config.synth_url.clone();
+        if self.config.provider_id == "elevenlabs" && on_boundary.is_some() {
+            synth_url.push_str("/with-timestamps");
+        }
+        let mut req = self.client.post(&synth_url);
 
         // Auth header
         if !self.config.auth_header.is_empty() {
@@ -582,7 +769,65 @@ impl TtsEngine for CloudEngine {
             return Err(TtsError(format!("API error {status}: {body_text}")));
         }
 
-        if self.config.provider_id == "google" && on_boundary.is_some() {
+
+        if self.config.provider_id == "elevenlabs" && on_boundary.is_some() {
+            let resp_text = resp
+                .text()
+                .map_err(|e| TtsError(format!("Read error: {e}")))?;
+            let json: serde_json::Value = serde_json::from_str(&resp_text)
+                .map_err(|e| TtsError(format!("JSON parse: {e}")))?;
+
+            if let Some(b64) = json.get("audio_base64").and_then(|v| v.as_str()) {
+                use base64::Engine;
+                let audio_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
+                if let Some(cb) = on_audio.as_mut() {
+                    for chunk in audio_bytes.chunks(8192) {
+                        cb(chunk);
+                    }
+                }
+            }
+
+            if let Some(cb) = on_boundary.as_mut() {
+                if let Some(alignment) = json.get("alignment").and_then(|v| v.as_object()) {
+                    let chars = alignment.get("characters").and_then(|v| v.as_array());
+                    let starts = alignment.get("character_start_times_seconds").and_then(|v| v.as_array());
+                    let ends = alignment.get("character_end_times_seconds").and_then(|v| v.as_array());
+
+                    if let (Some(chars), Some(starts), Some(ends)) = (chars, starts, ends) {
+                        let mut current_word = String::new();
+                        let mut word_start: f32 = 0.0;
+                        let mut has_started = false;
+
+                        for i in 0..chars.len() {
+                            let char_str = chars[i].as_str().unwrap_or("");
+                            let start_time = starts[i].as_f64().unwrap_or(0.0) as f32;
+                            let end_time = ends[i].as_f64().unwrap_or(0.0) as f32;
+
+                            if char_str.trim().is_empty() {
+                                if has_started {
+                                    cb(&current_word, word_start, end_time);
+                                    current_word.clear();
+                                    has_started = false;
+                                }
+                            } else {
+                                if !has_started {
+                                    word_start = start_time;
+                                    has_started = true;
+                                }
+                                current_word.push_str(char_str);
+                            }
+                        }
+
+                        if has_started {
+                            let end_time = ends.last().and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+                            cb(&current_word, word_start, end_time);
+                        }
+                    }
+                }
+            }
+        } else if self.config.provider_id == "google" && on_boundary.is_some() {
             // Google returns base64-encoded audio in JSON
             let resp_text = resp
                 .text()
