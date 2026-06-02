@@ -1,0 +1,6 @@
+[target.aarch64-unknown-linux-gnu]
+pre-build = [
+  "dpkg --add-architecture arm64",
+  "apt-get update",
+  "apt-get install -y libspeechd-dev:arm64 libclang-dev:arm64 gcc-aarch64-linux-gnu",
+]
