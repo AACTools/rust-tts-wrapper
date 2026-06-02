@@ -41,6 +41,7 @@ pub fn engine_count() -> usize {
 
 /// Return a list of all registered engine descriptors.
 #[must_use]
+#[allow(clippy::vec_init_then_push)]
 pub fn engine_list() -> Vec<EngineDescriptor> {
     let mut engines = Vec::new();
 

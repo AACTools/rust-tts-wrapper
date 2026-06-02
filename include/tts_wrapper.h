@@ -5,9 +5,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#ifdef __cplusplus
-extern "C" {
-#endif
 
 typedef struct tts_ctx tts_ctx;
 
@@ -65,6 +62,10 @@ typedef struct tts_engine_info {
    */
   char *credential_keys_json;
 } tts_engine_info;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
 
 /**
  * Create a new TTS engine instance.

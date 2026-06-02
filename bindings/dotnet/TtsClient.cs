@@ -11,6 +11,10 @@ public static class Native
     [DllImport("rust_tts_wrapper")] public static extern int tts_speak(IntPtr ctx, string text);
     [DllImport("rust_tts_wrapper")] public static extern int tts_speak_sync(IntPtr ctx, string text);
     [DllImport("rust_tts_wrapper")] public static extern void tts_stop(IntPtr ctx);
+    [DllImport("rust_tts_wrapper")] public static extern void tts_pause(IntPtr ctx);
+    [DllImport("rust_tts_wrapper")] public static extern void tts_resume(IntPtr ctx);
+    [DllImport("rust_tts_wrapper")] public static extern int tts_synth_to_bytes(IntPtr ctx, string text, out IntPtr outBytes, out UIntPtr outLen);
+    [DllImport("rust_tts_wrapper")] public static extern void tts_free_bytes(IntPtr bytes, UIntPtr len);
     [DllImport("rust_tts_wrapper")] public static extern void tts_set_voice(IntPtr ctx, string voiceId);
     [DllImport("rust_tts_wrapper")] public static extern void tts_set_rate(IntPtr ctx, float rate);
     [DllImport("rust_tts_wrapper")] public static extern void tts_set_pitch(IntPtr ctx, float pitch);
@@ -46,6 +50,21 @@ public class TtsClient : IDisposable
         Native.tts_speak_sync(_ctx, text);
 
     public void Stop() => Native.tts_stop(_ctx);
+    public void Pause() => Native.tts_pause(_ctx);
+    public void Resume() => Native.tts_resume(_ctx);
+
+    public byte[] SynthToBytes(string text)
+    {
+        IntPtr bufPtr;
+        UIntPtr len;
+        int result = Native.tts_synth_to_bytes(_ctx, text, out bufPtr, out len);
+        if (result != 0) throw new InvalidOperationException("Synthesis to bytes failed");
+        byte[] data = new byte[len.ToUInt32()];
+        if (data.Length > 0) Marshal.Copy(bufPtr, data, 0, data.Length);
+        Native.tts_free_bytes(bufPtr, len);
+        return data;
+    }
+
     public void SetVoice(string voiceId) => Native.tts_set_voice(_ctx, voiceId);
     public void SetRate(float rate) => Native.tts_set_rate(_ctx, rate);
     public void SetPitch(float pitch) => Native.tts_set_pitch(_ctx, pitch);

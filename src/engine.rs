@@ -42,6 +42,7 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
 }
 
 #[cfg(not(feature = "cloud"))]
+#[must_use]
 pub fn preprocess_speech_markdown(text: &str, _platform: &str) -> (String, bool) {
     (text.to_string(), false)
 }

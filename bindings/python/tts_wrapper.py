@@ -33,6 +33,14 @@ def _load_lib():
     _lib.tts_speak_sync.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _lib.tts_stop.restype = None
     _lib.tts_stop.argtypes = [ctypes.c_void_p]
+    _lib.tts_pause.restype = None
+    _lib.tts_pause.argtypes = [ctypes.c_void_p]
+    _lib.tts_resume.restype = None
+    _lib.tts_resume.argtypes = [ctypes.c_void_p]
+    _lib.tts_synth_to_bytes.restype = ctypes.c_int32
+    _lib.tts_synth_to_bytes.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)), ctypes.POINTER(ctypes.c_size_t)]
+    _lib.tts_free_bytes.restype = None
+    _lib.tts_free_bytes.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
     _lib.tts_set_voice.restype = None
     _lib.tts_set_voice.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
     _lib.tts_set_rate.restype = None
@@ -101,6 +109,23 @@ class TTSClient:
 
     def stop(self) -> None:
         self._lib.tts_stop(self._ctx)
+
+    def pause(self) -> None:
+        self._lib.tts_pause(self._ctx)
+
+    def resume(self) -> None:
+        self._lib.tts_resume(self._ctx)
+
+    def synth_to_bytes(self, text: str) -> bytes:
+        buf = ctypes.POINTER(ctypes.c_uint8)()
+        length = ctypes.c_size_t()
+        result = self._lib.tts_synth_to_bytes(self._ctx, text.encode(), ctypes.byref(buf), ctypes.byref(length))
+        if result != 0:
+            raise RuntimeError("Synthesis to bytes failed")
+        data = ctypes.string_at(buf, length.value) if buf and length.value > 0 else b""
+        if buf:
+            self._lib.tts_free_bytes(buf, length.value)
+        return data
 
     def set_voice(self, voice_id: str) -> None:
         self._lib.tts_set_voice(self._ctx, voice_id.encode())

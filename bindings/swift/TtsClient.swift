@@ -55,6 +55,28 @@ public class TTSClient {
         rust_tts_wrapper.tts_stop(ctx)
     }
 
+    public func pause() {
+        guard let ctx else { return }
+        rust_tts_wrapper.tts_pause(ctx)
+    }
+
+    public func resume() {
+        guard let ctx else { return }
+        rust_tts_wrapper.tts_resume(ctx)
+    }
+
+    public func synthToBytes(_ text: String) -> Data? {
+        guard let ctx else { return nil }
+        var bufPtr: UnsafeMutablePointer<UInt8>?
+        var length: Int = 0
+        let result = text.withCString { textPtr in
+            rust_tts_wrapper.tts_synth_to_bytes(ctx, textPtr, &bufPtr, &length)
+        }
+        guard result == 0, let buf = bufPtr, length > 0 else { return nil }
+        defer { rust_tts_wrapper.tts_free_bytes(buf, UInt(length)) }
+        return Data(bytes: buf, count: length)
+    }
+
     public func setVoice(_ voiceId: String) {
         guard let ctx else { return }
         voiceId.withCString { ptr in

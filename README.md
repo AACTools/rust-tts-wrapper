@@ -150,6 +150,10 @@ All functions are `extern "C"`, `#[no_mangle]`:
 | `tts_speak(ctx, text)` | Speak async, returns 0/-1 |
 | `tts_speak_sync(ctx, text)` | Speak sync (blocking) |
 | `tts_stop(ctx)` | Stop speech |
+| `tts_pause(ctx)` | Pause in-progress speech |
+| `tts_resume(ctx)` | Resume paused speech |
+| `tts_synth_to_bytes(ctx, text, out_bytes, out_len)` | Synth to buffer (returns 0/-1) |
+| `tts_free_bytes(bytes, len)` | Free buffer from tts_synth_to_bytes |
 | `tts_get_voices(ctx, out_voices, out_count)` | Get voice list |
 | `tts_free_voices(voices, count)` | Free voice array |
 | `tts_set_voice(ctx, voice_id)` | Set voice |
