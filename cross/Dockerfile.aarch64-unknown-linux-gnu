@@ -4,6 +4,7 @@ RUN dpkg --add-architecture arm64 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
     libspeechd-dev:arm64 \
+    && ln -sf /usr/include/aarch64-linux-gnu/speech-dispatcher /usr/include/speech-dispatcher \
     && rm -rf /var/lib/apt/lists/*
 
-ENV BINDGEN_EXTRA_CLANG_ARGS="-I/usr/include/aarch64-linux-gnu"
+ENV BINDGEN_EXTRA_CLANG_ARGS="-I/usr/include -I/usr/include/aarch64-linux-gnu"
