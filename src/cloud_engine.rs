@@ -672,14 +672,12 @@ impl TtsEngine for CloudEngine {
                             }
                         }
                     }
-                    Message::Binary(b) => {
-                        if b.len() > 2 {
-                            let header_length = ((b[0] as usize) << 8) | (b[1] as usize);
-                            if b.len() > 2 + header_length {
-                                let audio_start = 2 + header_length;
-                                if let Some(cb) = on_audio.as_mut() {
-                                    cb(&b[audio_start..]);
-                                }
+                    Message::Binary(b) if b.len() > 2 => {
+                        let header_length = ((b[0] as usize) << 8) | (b[1] as usize);
+                        if b.len() > 2 + header_length {
+                            let audio_start = 2 + header_length;
+                            if let Some(cb) = on_audio.as_mut() {
+                                cb(&b[audio_start..]);
                             }
                         }
                     }
