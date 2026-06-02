@@ -57,59 +57,44 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "--no-default-features --features system"
+            features: "system"
             label: "system-x86_64-linux"
-            lib_ext: so
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            features: "--no-default-features --features system"
-            label: "system-aarch64-linux"
             lib_ext: so
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "--no-default-features --features system,cloud"
+            features: "system,cloud"
             label: "system-cloud-x86_64-linux"
             lib_ext: so
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "--no-default-features --features system,cloud"
-            label: "system-cloud-aarch64-linux"
-            lib_ext: so
-            use_cross: true
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            features: "--no-default-features --features system"
-            label: "system-x86_64-linux"
-            lib_ext: so
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            features: "--no-default-features --features system"
+            features: "system"
             label: "system-aarch64-linux"
             lib_ext: so
-            use_cross: true
+            cross: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "--no-default-features --features system,cloud"
+            features: "system,cloud"
             label: "system-cloud-aarch64-linux"
             lib_ext: so
+            cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            features: "--no-default-features --features cloud"
+            features: "cloud"
             label: "cloud-x86_64-macos"
             lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
-            features: "--no-default-features --features cloud"
+            features: "cloud"
             label: "cloud-aarch64-macos"
             lib_ext: dylib
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "--no-default-features --features cloud"
+            features: "cloud"
             label: "cloud-x86_64-windows"
             lib_ext: dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            features: "--no-default-features --features cloud"
+            features: "cloud"
             label: "cloud-aarch64-windows"
             lib_ext: dll
     runs-on: ${{ matrix.os }}
@@ -122,17 +107,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Install cross
-        if: matrix.use_cross
+        if: matrix.cross == true
         run: cargo install cross --locked
       - name: Install native deps (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
-      - name: Build release (native)
-        if: "!matrix.use_cross"
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Build release (cargo)
+        if: matrix.cross != true
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Build release (cross)
-        if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }} ${{ matrix.features }}
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Rename artifacts
         shell: bash
         run: |
