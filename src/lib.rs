@@ -557,3 +557,99 @@ pub extern "C" fn tts_get_last_error() -> *const c_char {
         Err(_) => ptr::null(),
     }
 }
+
+/// Pause in-progress speech.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_pause(ctx: *mut tts_ctx) {
+    if ctx.is_null() {
+        return;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    let engine = ctx_ref.engine.lock().unwrap();
+    let _ = engine.pause();
+}
+
+/// Resume paused speech.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_resume(ctx: *mut tts_ctx) {
+    if ctx.is_null() {
+        return;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    let engine = ctx_ref.engine.lock().unwrap();
+    let _ = engine.resume();
+}
+
+/// Synthesize text to audio bytes without playback.
+/// Writes a heap-allocated buffer to `*out_bytes` and its length to `*out_len`.
+/// Caller must free with [`tts_free_bytes`].
+/// Returns 0 on success, -1 on failure.
+///
+/// # Safety
+/// `ctx` must be valid. `out_bytes` and `out_len` must be non-null.
+#[no_mangle]
+pub extern "C" fn tts_synth_to_bytes(
+    ctx: *mut tts_ctx,
+    text: *const c_char,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    if ctx.is_null() || text.is_null() || out_bytes.is_null() || out_len.is_null() {
+        return -1;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    let text_str = unsafe { CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned();
+    let voice = ctx_ref.voice_id.lock().unwrap().clone();
+    let rate = *ctx_ref.rate.lock().unwrap();
+    let pitch = *ctx_ref.pitch.lock().unwrap();
+    let volume = *ctx_ref.volume.lock().unwrap();
+
+    let engine = ctx_ref.engine.lock().unwrap();
+    match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
+        Ok(data) => {
+            if data.is_empty() {
+                unsafe {
+                    *out_bytes = ptr::null_mut();
+                    *out_len = 0;
+                }
+                return 0;
+            }
+            let len = data.len();
+            let layout = std::alloc::Layout::array::<u8>(len).unwrap();
+            let ptr = unsafe { std::alloc::alloc(layout) };
+            unsafe {
+                ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
+                *out_bytes = ptr;
+                *out_len = len;
+            }
+            0
+        }
+        Err(e) => {
+            *ctx_ref.last_error.lock().unwrap() = e.to_string();
+            -1
+        }
+    }
+}
+
+/// Free a byte buffer returned by [`tts_synth_to_bytes`].
+///
+/// # Safety
+/// `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
+#[no_mangle]
+pub extern "C" fn tts_free_bytes(bytes: *mut u8, len: usize) {
+    if bytes.is_null() || len == 0 {
+        return;
+    }
+    let layout = std::alloc::Layout::array::<u8>(len).unwrap();
+    unsafe {
+        std::alloc::dealloc(bytes, layout);
+    }
+}

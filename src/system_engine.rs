@@ -1,17 +1,13 @@
-//! System TTS engine via speech-dispatcher (Linux).
-
 use crate::engine::{estimate_word_boundaries, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
-/// TTS engine that uses the system's speech-dispatcher daemon.
 #[derive(Debug)]
 pub struct SystemEngine {
     conn: Mutex<Option<speech_dispatcher::Connection>>,
 }
 
 impl SystemEngine {
-    /// Create a new system engine, connecting to speech-dispatcher.
     pub fn new() -> Self {
         let conn = speech_dispatcher::Connection::open(
             "rust-tts-wrapper",
@@ -26,14 +22,26 @@ impl SystemEngine {
     }
 }
 
+fn rate_to_spd(rate: f32) -> i32 {
+    ((rate.clamp(0.1, 10.0) - 1.0) * 100.0).round() as i32
+}
+
+fn pitch_to_spd(pitch: f32) -> i32 {
+    ((pitch.clamp(0.1, 10.0) - 1.0) * 100.0).round() as i32
+}
+
+fn volume_to_spd(volume: f32) -> i32 {
+    ((volume.clamp(0.0, 2.0) - 1.0) * 100.0).round() as i32
+}
+
 impl TtsEngine for SystemEngine {
     fn speak(
         &self,
         text: &str,
         voice: Option<&str>,
-        _rate: f32,
-        _pitch: f32,
-        _volume: f32,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
         _on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
@@ -45,6 +53,11 @@ impl TtsEngine for SystemEngine {
         if let Some(v) = voice {
             let _ = conn.set_synthesis_voice_all(v);
         }
+
+        let _ = conn.set_voice_rate_all(rate_to_spd(rate));
+        let _ = conn.set_voice_pitch_all(pitch_to_spd(pitch));
+        let _ = conn.set_volume_all(volume_to_spd(volume));
+
         conn.say(speech_dispatcher::Priority::Important, text);
 
         if let Some(cb) = on_boundary.as_mut() {
@@ -81,6 +94,22 @@ impl TtsEngine for SystemEngine {
             .ok_or_else(|| TtsError("Speech dispatcher not connected".into()))?;
         conn.cancel()
             .map_err(|e| TtsError(format!("Stop failed: {e}")))
+    }
+
+    fn pause(&self) -> TtsResult<()> {
+        let guard = self.conn.lock().unwrap();
+        if let Some(conn) = guard.as_ref() {
+            let _ = conn.pause_all();
+        }
+        Ok(())
+    }
+
+    fn resume(&self) -> TtsResult<()> {
+        let guard = self.conn.lock().unwrap();
+        if let Some(conn) = guard.as_ref() {
+            let _ = conn.resume_all();
+        }
+        Ok(())
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {

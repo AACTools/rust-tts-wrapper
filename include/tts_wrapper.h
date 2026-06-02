@@ -5,7 +5,6 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -231,8 +230,46 @@ void tts_free_engine_info(struct tts_engine_info *engines, int32_t count);
  */
 const char *tts_get_last_error(void);
 
+/**
+ * Pause in-progress speech.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_pause(struct tts_ctx *ctx);
+
+/**
+ * Resume paused speech.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_resume(struct tts_ctx *ctx);
+
+/**
+ * Synthesize text to audio bytes without playback.
+ * Writes a heap-allocated buffer to `*out_bytes` and its length to `*out_len`.
+ * Caller must free with [`tts_free_bytes`].
+ * Returns 0 on success, -1 on failure.
+ *
+ * # Safety
+ * `ctx` must be valid. `out_bytes` and `out_len` must be non-null.
+ */
+int32_t tts_synth_to_bytes(struct tts_ctx *ctx,
+                           const char *text,
+                           uint8_t **out_bytes,
+                           uintptr_t *out_len);
+
+/**
+ * Free a byte buffer returned by [`tts_synth_to_bytes`].
+ *
+ * # Safety
+ * `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
+ */
+void tts_free_bytes(uint8_t *bytes, uintptr_t len);
+
 #ifdef __cplusplus
-}
-#endif
+}  // extern "C"
+#endif  // __cplusplus
 
 #endif  /* TTS_WRAPPER_H */

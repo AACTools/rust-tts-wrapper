@@ -16,7 +16,7 @@ use crate::system_engine::SystemEngine;
 /// `credentials_json` is a JSON object with engine-specific credentials
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
 #[must_use]
-pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>> {
+pub fn create_engine(engine_id: &str, _credentials_json: &str) -> Option<Box<dyn TtsEngine>> {
     match engine_id {
         #[cfg(feature = "system")]
         "system" => Some(Box::new(SystemEngine::new())),
