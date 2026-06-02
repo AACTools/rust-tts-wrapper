@@ -29,6 +29,7 @@
     dead_code
 )]
 
+#[cfg(feature = "cloud")]
 mod cloud_engine;
 pub mod engine;
 pub mod factory;
