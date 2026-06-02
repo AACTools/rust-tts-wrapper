@@ -527,6 +527,7 @@ fn compute_durations(boundaries: &mut [WordBoundary]) {
 }
 
 impl TtsEngine for CloudEngine {
+    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn speak(
         &self,
         text: &str,
@@ -769,7 +770,6 @@ impl TtsEngine for CloudEngine {
             return Err(TtsError(format!("API error {status}: {body_text}")));
         }
 
-
         if self.config.provider_id == "elevenlabs" && on_boundary.is_some() {
             let resp_text = resp
                 .text()
@@ -792,8 +792,12 @@ impl TtsEngine for CloudEngine {
             if let Some(cb) = on_boundary.as_mut() {
                 if let Some(alignment) = json.get("alignment").and_then(|v| v.as_object()) {
                     let chars = alignment.get("characters").and_then(|v| v.as_array());
-                    let starts = alignment.get("character_start_times_seconds").and_then(|v| v.as_array());
-                    let ends = alignment.get("character_end_times_seconds").and_then(|v| v.as_array());
+                    let starts = alignment
+                        .get("character_start_times_seconds")
+                        .and_then(|v| v.as_array());
+                    let ends = alignment
+                        .get("character_end_times_seconds")
+                        .and_then(|v| v.as_array());
 
                     if let (Some(chars), Some(starts), Some(ends)) = (chars, starts, ends) {
                         let mut current_word = String::new();
@@ -821,7 +825,10 @@ impl TtsEngine for CloudEngine {
                         }
 
                         if has_started {
-                            let end_time = ends.last().and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+                            let end_time = ends
+                                .last()
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.0) as f32;
                             cb(&current_word, word_start, end_time);
                         }
                     }
