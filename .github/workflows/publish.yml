@@ -48,41 +48,53 @@ jobs:
       - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
 
-  build-native:
-    name: Build ${{ matrix.features.label }} (${{ matrix.target }})
+  build:
+    name: Build ${{ matrix.label }}
     needs: test
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-pc-windows-msvc
-          - aarch64-pc-windows-msvc
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
-        features:
-          - { args: "--no-default-features --features system", label: "system", suffix: "-system" }
-          - { args: "--no-default-features --features system,cloud", label: "system+cloud", suffix: "-system-cloud" }
         include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            lib_ext: dll
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            lib_ext: dll
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            lib_ext: dylib
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            lib_ext: dylib
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            features: "--no-default-features --features system"
+            label: "system-x86_64-linux"
             lib_ext: so
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            features: "--no-default-features --features system"
+            label: "system-aarch64-linux"
             lib_ext: so
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "--no-default-features --features system,cloud"
+            label: "system-cloud-x86_64-linux"
+            lib_ext: so
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "--no-default-features --features system,cloud"
+            label: "system-cloud-aarch64-linux"
+            lib_ext: so
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "--no-default-features --features cloud"
+            label: "cloud-x86_64-macos"
+            lib_ext: dylib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "--no-default-features --features cloud"
+            label: "cloud-aarch64-macos"
+            lib_ext: dylib
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: "--no-default-features --features cloud"
+            label: "cloud-x86_64-windows"
+            lib_ext: dll
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            features: "--no-default-features --features cloud"
+            label: "cloud-aarch64-windows"
+            lib_ext: dll
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -96,63 +108,51 @@ jobs:
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu libclang-dev
+          sudo apt-get install -y libspeechd-dev:arm64 || {
+            sudo dpkg --add-architecture arm64
+            sudo apt-get update
+            sudo apt-get install -y libspeechd-dev:arm64
+          }
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
-      - name: Install speech-dispatcher dev (Linux)
-        if: runner.os == 'Linux'
+      - name: Install speech-dispatcher dev (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
-      - name: Install macOS dependencies
-        if: runner.os == 'macOS'
-        run: |
-          brew install speech-dispatcher
-          echo "DYLD_LIBRARY_PATH=$(brew --prefix speech-dispatcher)/lib" >> "$GITHUB_ENV"
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features.args }}
-      - name: Set library names
-        id: libnames
-        shell: bash
-        run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            echo "shared=rust_tts_wrapper.dll" >> "$GITHUB_OUTPUT"
-            echo "static=rust_tts_wrapper.lib" >> "$GITHUB_OUTPUT"
-          else
-            echo "shared=librust_tts_wrapper.${{ matrix.lib_ext }}" >> "$GITHUB_OUTPUT"
-            echo "static=librust_tts_wrapper.a" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Rename artifacts with platform suffix
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
+      - name: Rename artifacts
         shell: bash
         run: |
           cd target/${{ matrix.target }}/release
-          SUFFIX="${{ matrix.features.suffix }}"
-          TARGET="${{ matrix.target }}"
+          LABEL="${{ matrix.label }}"
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp rust_tts_wrapper.dll "rust_tts_wrapper${SUFFIX}-${TARGET}.dll" 2>/dev/null || true
-            cp rust_tts_wrapper.lib "rust_tts_wrapper${SUFFIX}-${TARGET}.lib" 2>/dev/null || true
+            cp rust_tts_wrapper.dll "rust_tts_wrapper-${LABEL}.dll" 2>/dev/null || true
+            cp rust_tts_wrapper.lib "rust_tts_wrapper-${LABEL}.lib" 2>/dev/null || true
           else
-            cp librust_tts_wrapper.${{ matrix.lib_ext }} "librust_tts_wrapper${SUFFIX}-${TARGET}.${{ matrix.lib_ext }}" 2>/dev/null || true
-            cp librust_tts_wrapper.a "librust_tts_wrapper${SUFFIX}-${TARGET}.a" 2>/dev/null || true
+            cp librust_tts_wrapper.${{ matrix.lib_ext }} "librust_tts_wrapper-${LABEL}.${{ matrix.lib_ext }}" 2>/dev/null || true
+            cp librust_tts_wrapper.a "librust_tts_wrapper-${LABEL}.a" 2>/dev/null || true
           fi
       - name: Upload shared library
         uses: actions/upload-artifact@v4
         with:
-          name: shared-${{ matrix.features.label }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/*${{ matrix.features.suffix }}-${{ matrix.target }}.${{ matrix.lib_ext }}
-      - name: Upload static library
-        uses: actions/upload-artifact@v4
-        with:
-          name: static-${{ matrix.features.label }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/*${{ matrix.features.suffix }}-${{ matrix.target }}.a
+          name: lib-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.${{ matrix.lib_ext }}
+      - name: Upload static library (non-Windows)
         if: runner.os != 'Windows'
-      - name: Upload MSVC import library
         uses: actions/upload-artifact@v4
         with:
-          name: static-${{ matrix.features.label }}-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/*${{ matrix.features.suffix }}-${{ matrix.target }}.lib
+          name: static-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.a
+      - name: Upload import library (Windows)
         if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.lib
 
-  publish-github-release:
+  release:
     name: GitHub Release
-    needs: [build-native]
+    needs: [build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -161,7 +161,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: "{shared-*,static-*}"
+          pattern: "{lib-*,static-*}"
           merge-multiple: true
       - name: Organize release assets
         run: |
