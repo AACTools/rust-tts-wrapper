@@ -3,3 +3,6 @@ include_guard = "TTS_WRAPPER_H"
 autogen_warning = "/* Auto-generated. Do not edit. */"
 no_includes = true
 sys_includes = ["stdint.h", "stdbool.h"]
+cpp_compat = true
+after_includes = "#ifdef __cplusplus\nextern \"C\" {\n#endif"
+trailer = "#ifdef __cplusplus\n}\n#endif"

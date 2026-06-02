@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct tts_ctx tts_ctx;
 
 /**
@@ -226,5 +230,9 @@ void tts_free_engine_info(struct tts_engine_info *engines, int32_t count);
  * The returned pointer is valid until the next call to any TTS function.
  */
 const char *tts_get_last_error(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif  /* TTS_WRAPPER_H */
