@@ -107,11 +107,6 @@ jobs:
             features: "cloud,sherpaonnx"
             label: "cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            features: "cloud,sherpaonnx"
-            label: "cloud-sherpaonnx-aarch64-windows"
-            lib_ext: dll
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
