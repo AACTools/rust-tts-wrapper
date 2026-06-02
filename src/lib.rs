@@ -30,9 +30,11 @@
 )]
 
 mod cloud_engine;
-mod engine;
+pub mod engine;
 pub mod factory;
+#[cfg(feature = "sherpaonnx")]
 mod sherpaonnx_engine;
+#[cfg(feature = "system")]
 mod system_engine;
 pub mod types;
 
@@ -323,9 +325,11 @@ pub extern "C" fn tts_get_voices(
                         types::tts_voice {
                             id: CString::new(v.id.clone()).unwrap().into_raw(),
                             name: CString::new(v.name.clone()).unwrap().into_raw(),
-                            language: CString::new(v.language.clone()).unwrap().into_raw(),
-                            gender: CString::new(v.gender.clone()).unwrap().into_raw(),
-                            engine: CString::new(v.engine.clone()).unwrap().into_raw(),
+                            language: CString::new(v.primary_language().to_string())
+                                .unwrap()
+                                .into_raw(),
+                            gender: CString::new(v.gender.to_string()).unwrap().into_raw(),
+                            engine: CString::new(v.provider.clone()).unwrap().into_raw(),
                         },
                     );
                 }

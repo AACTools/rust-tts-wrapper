@@ -1,14 +1,10 @@
 //! System TTS engine via speech-dispatcher (Linux).
 
-use crate::engine::TtsEngine;
+use crate::engine::{estimate_word_boundaries, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
 /// TTS engine that uses the system's speech-dispatcher daemon.
-///
-/// On Linux this connects to speech-dispatcher via its IPC protocol.
-/// On creation it attempts to open a connection; if speech-dispatcher
-/// is not running, subsequent calls will return errors.
 #[derive(Debug)]
 pub struct SystemEngine {
     conn: Mutex<Option<speech_dispatcher::Connection>>,
@@ -16,9 +12,6 @@ pub struct SystemEngine {
 
 impl SystemEngine {
     /// Create a new system engine, connecting to speech-dispatcher.
-    ///
-    /// If the connection fails (e.g. speech-dispatcher not running),
-    /// the engine is still created but speak/stop calls will return errors.
     pub fn new() -> Self {
         let conn = speech_dispatcher::Connection::open(
             "rust-tts-wrapper",
@@ -42,7 +35,7 @@ impl TtsEngine for SystemEngine {
         _pitch: f32,
         _volume: f32,
         _on_audio: Option<crate::engine::OnAudioCallback>,
-        _on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         let guard = self.conn.lock().unwrap();
         let conn = guard
@@ -53,6 +46,18 @@ impl TtsEngine for SystemEngine {
             let _ = conn.set_synthesis_voice_all(v);
         }
         conn.say(speech_dispatcher::Priority::Important, text);
+
+        if let Some(cb) = on_boundary.as_mut() {
+            let estimated = estimate_word_boundaries(text);
+            for b in &estimated {
+                #[allow(clippy::cast_precision_loss)]
+                let start = b.offset as f32 / 1000.0;
+                #[allow(clippy::cast_precision_loss)]
+                let end = (b.offset + b.duration) as f32 / 1000.0;
+                cb(&b.text, start, end);
+            }
+        }
+
         Ok(())
     }
 

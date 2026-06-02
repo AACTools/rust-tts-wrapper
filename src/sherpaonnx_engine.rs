@@ -1,7 +1,9 @@
-//! Sherpa-ONNX offline TTS engine with 191-model registry.
+//! Sherpa-ONNX offline TTS engine with model registry.
 
-use crate::engine::TtsEngine;
-use crate::types::{SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice};
+use crate::engine::{estimate_word_boundaries, TtsEngine};
+use crate::types::{
+    Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -9,10 +11,6 @@ use std::path::PathBuf;
 static MERGED_MODELS_JSON: &str = include_str!("merged_models.json");
 
 /// Offline TTS engine using [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx).
-///
-/// Models are looked up from the compiled-in registry and loaded from
-/// `~/.rust-tts-wrapper/sherpaonnx/<model_id>/`. Audio is synthesised
-/// offline and played via `aplay` (Linux).
 #[derive(Debug)]
 pub struct SherpaOnnxEngine {
     models: HashMap<String, SherpaModelInfo>,
@@ -22,10 +20,6 @@ pub struct SherpaOnnxEngine {
 
 impl SherpaOnnxEngine {
     /// Create a new Sherpa-ONNX engine.
-    ///
-    /// `credentials_json` may contain `"modelPath"` and `"modelId"` keys.
-    /// If empty, defaults to `~/.rust-tts-wrapper/sherpaonnx/` and the
-    /// `kokoro-en-en-19` model.
     pub fn new(credentials_json: &str) -> Self {
         let mut model_dir = default_model_dir();
         let mut model_id = String::new();
@@ -151,7 +145,7 @@ impl TtsEngine for SherpaOnnxEngine {
         _pitch: f32,
         _volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
-        _on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         let model_info = self.models.get(&self.loaded_model_id).ok_or_else(|| {
             TtsError(format!(
@@ -221,9 +215,6 @@ impl TtsEngine for SherpaOnnxEngine {
             .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
 
         if let Some(cb) = on_audio.as_mut() {
-            // SherpaOnnx C API does not currently easily support streaming inside the progress callback without
-            // borrowing issues, because the closure requires `'static`.
-            // So we stream all at once right after generation, to still simulate stream interface.
             let samples = audio.samples();
             let mut pcm_bytes = Vec::with_capacity(samples.len() * 2);
             for &s in samples {
@@ -235,6 +226,17 @@ impl TtsEngine for SherpaOnnxEngine {
             let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
             if audio.save(filename.to_string_lossy().as_ref()) {
                 play_wav_file(&filename);
+            }
+        }
+
+        if let Some(cb) = on_boundary.as_mut() {
+            let estimated = estimate_word_boundaries(text);
+            for b in &estimated {
+                #[allow(clippy::cast_precision_loss)]
+                let start = b.offset as f32 / 1000.0;
+                #[allow(clippy::cast_precision_loss)]
+                let end = (b.offset + b.duration) as f32 / 1000.0;
+                cb(&b.text, start, end);
             }
         }
 
@@ -265,14 +267,22 @@ impl TtsEngine for SherpaOnnxEngine {
             .and_then(|m| m.language.first())
             .map(|l| l.language_name.clone())
             .unwrap_or_default();
+        let lang_code = model_info
+            .and_then(|m| m.language.first())
+            .map(|l| l.lang_code.clone())
+            .unwrap_or_default();
         let mut voices = Vec::new();
         for i in 0..num_speakers {
             voices.push(Voice {
                 id: format!("{i}"),
                 name: format!("Speaker {i}"),
-                language: lang.clone(),
-                gender: String::new(),
-                engine: "sherpaonnx".to_string(),
+                gender: Gender::Unknown,
+                provider: "sherpaonnx".to_string(),
+                language_codes: vec![LanguageCode {
+                    bcp47: lang.clone(),
+                    iso639_3: lang_code.clone(),
+                    display: lang.clone(),
+                }],
             });
         }
         Ok(voices)
