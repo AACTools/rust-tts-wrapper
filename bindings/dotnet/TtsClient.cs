@@ -15,8 +15,16 @@ public static class Native
     [DllImport("rust_tts_wrapper")] public static extern void tts_set_rate(IntPtr ctx, float rate);
     [DllImport("rust_tts_wrapper")] public static extern void tts_set_pitch(IntPtr ctx, float pitch);
     [DllImport("rust_tts_wrapper")] public static extern void tts_set_volume(IntPtr ctx, float volume);
+    [DllImport("rust_tts_wrapper")] public static extern void tts_set_on_audio(IntPtr ctx, IntPtr cb, IntPtr userdata);
+    [DllImport("rust_tts_wrapper")] public static extern void tts_set_on_boundary(IntPtr ctx, IntPtr cb, IntPtr userdata);
+    [DllImport("rust_tts_wrapper")] public static extern int tts_get_voices(IntPtr ctx, out IntPtr voices, out int count);
+    [DllImport("rust_tts_wrapper")] public static extern void tts_free_voices(IntPtr voices, int count);
     [DllImport("rust_tts_wrapper")] public static extern int tts_get_engine_count();
+    [DllImport("rust_tts_wrapper")] public static extern IntPtr tts_get_last_error();
 }
+
+public delegate void AudioCallback(byte[] chunk);
+public delegate void BoundaryCallback(string word, float startTime, float endTime);
 
 public class TtsClient : IDisposable
 {
