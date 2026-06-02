@@ -39,38 +39,50 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
-      - name: Clippy
+      - name: Clippy (all features)
         run: cargo clippy --all-features -- -D warnings
-      - name: Test
+      - name: Test (all features)
         run: cargo test --all-features
+      - name: Build system-only
+        run: cargo build --no-default-features --features system
       - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
 
   build-native:
-    name: Build native (${{ matrix.target }})
+    name: Build ${{ matrix.features.label }} (${{ matrix.target }})
     needs: test
     strategy:
       fail-fast: false
       matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+          - x86_64-apple-darwin
+          - aarch64-apple-darwin
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+        features:
+          - { args: "--no-default-features --features system", label: "system", suffix: "-system" }
+          - { args: "--no-default-features --features system,cloud", label: "system+cloud", suffix: "-system-cloud" }
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            lib: rust_tts_wrapper.dll
+            lib_ext: dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            lib: rust_tts_wrapper.dll
+            lib_ext: dll
           - target: x86_64-apple-darwin
             os: macos-latest
-            lib: librust_tts_wrapper.dylib
+            lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
-            lib: librust_tts_wrapper.dylib
+            lib_ext: dylib
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            lib: librust_tts_wrapper.so
+            lib_ext: so
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            lib: librust_tts_wrapper.so
+            lib_ext: so
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -89,41 +101,54 @@ jobs:
       - name: Install speech-dispatcher dev (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew install speech-dispatcher
+          echo "DYLD_LIBRARY_PATH=$(brew --prefix speech-dispatcher)/lib" >> "$GITHUB_ENV"
       - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features.args }}
+      - name: Set library names
+        id: libnames
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            echo "shared=rust_tts_wrapper.dll" >> "$GITHUB_OUTPUT"
+            echo "static=rust_tts_wrapper.lib" >> "$GITHUB_OUTPUT"
+          else
+            echo "shared=librust_tts_wrapper.${{ matrix.lib_ext }}" >> "$GITHUB_OUTPUT"
+            echo "static=librust_tts_wrapper.a" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Rename artifacts with platform suffix
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          SUFFIX="${{ matrix.features.suffix }}"
+          TARGET="${{ matrix.target }}"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp rust_tts_wrapper.dll "rust_tts_wrapper${SUFFIX}-${TARGET}.dll" 2>/dev/null || true
+            cp rust_tts_wrapper.lib "rust_tts_wrapper${SUFFIX}-${TARGET}.lib" 2>/dev/null || true
+          else
+            cp librust_tts_wrapper.${{ matrix.lib_ext }} "librust_tts_wrapper${SUFFIX}-${TARGET}.${{ matrix.lib_ext }}" 2>/dev/null || true
+            cp librust_tts_wrapper.a "librust_tts_wrapper${SUFFIX}-${TARGET}.a" 2>/dev/null || true
+          fi
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
         with:
-          name: native-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/${{ matrix.lib }}
+          name: shared-${{ matrix.features.label }}-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/*${{ matrix.features.suffix }}-${{ matrix.target }}.${{ matrix.lib_ext }}
       - name: Upload static library
         uses: actions/upload-artifact@v4
         with:
-          name: static-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/librust_tts_wrapper.a
+          name: static-${{ matrix.features.label }}-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/*${{ matrix.features.suffix }}-${{ matrix.target }}.a
         if: runner.os != 'Windows'
       - name: Upload MSVC import library
         uses: actions/upload-artifact@v4
         with:
-          name: static-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/rust_tts_wrapper.lib
+          name: static-${{ matrix.features.label }}-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/*${{ matrix.features.suffix }}-${{ matrix.target }}.lib
         if: runner.os == 'Windows'
-
-  publish-crate:
-    name: crates.io
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: version-sync
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
-      - name: Publish
-        run: cargo publish --allow-dirty
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   publish-github-release:
     name: GitHub Release
@@ -136,20 +161,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          pattern: "{native-*,static-*}"
+          pattern: "{shared-*,static-*}"
           merge-multiple: true
       - name: Organize release assets
         run: |
           mkdir -p release-assets
-          # Shared libraries
-          for f in artifacts/rust_tts_wrapper.dll artifacts/librust_tts_wrapper.dylib artifacts/librust_tts_wrapper.so; do
-            [ -f "$f" ] && cp "$f" release-assets/ 2>/dev/null || true
-          done
-          # Static libraries / import libs
-          for f in artifacts/librust_tts_wrapper.a artifacts/rust_tts_wrapper.lib; do
-            [ -f "$f" ] && cp "$f" release-assets/ 2>/dev/null || true
-          done
-          # C header
+          cp artifacts/* release-assets/ 2>/dev/null || true
           cp include/tts_wrapper.h release-assets/
           ls -la release-assets/
       - name: Create GitHub Release
