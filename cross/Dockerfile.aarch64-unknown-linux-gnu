@@ -4,7 +4,12 @@ RUN dpkg --add-architecture arm64 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
     libspeechd-dev:arm64 \
-    && ln -sf /usr/include/aarch64-linux-gnu/speech-dispatcher /usr/include/speech-dispatcher \
+    && echo "=== Looking for speech-dispatcher headers ===" \
+    && find / -name "libspeechd.h" 2>/dev/null || true \
+    && echo "=== /usr/include ===" \
+    && ls /usr/include/speech-dispatcher 2>/dev/null || echo "no /usr/include/speech-dispatcher" \
+    && echo "=== /usr/include/aarch64-linux-gnu ===" \
+    && ls /usr/include/aarch64-linux-gnu/speech-dispatcher 2>/dev/null || echo "no aarch64 path" \
+    && ln -sf /usr/include/aarch64-linux-gnu/speech-dispatcher /usr/include/speech-dispatcher || \
+       (find / -path "*/speech-dispatcher" -type d 2>/dev/null | head -3 && echo "ERROR: no speech-dispatcher dir found") \
     && rm -rf /var/lib/apt/lists/*
-
-ENV BINDGEN_EXTRA_CLANG_ARGS="-I/usr/include -I/usr/include/aarch64-linux-gnu"
