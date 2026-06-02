@@ -14,8 +14,11 @@ crate-type = ["cdylib", "staticlib", "lib"]
 [features]
 default = ["system", "cloud", "sherpaonnx"]
 system = ["speech-dispatcher"]
-cloud = ["reqwest", "serde_json", "base64", "speechmarkdown-rust"]
+cloud = ["reqwest", "serde_json", "base64", "speechmarkdown-rust", "tungstenite", "uuid", "url"]
 sherpaonnx = ["sherpa-onnx"]
+tungstenite = ["dep:tungstenite"]
+uuid = ["dep:uuid"]
+url = ["dep:url"]
 
 [dependencies]
 speech-dispatcher = { version = "0.16", optional = true }
@@ -26,6 +29,9 @@ sherpa-onnx = { version = "1.13", optional = true }
 base64 = { version = "0.22", optional = true }
 speechmarkdown-rust = { version = "0.1", optional = true }
 anyhow = "1"
+tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"], optional = true }
+uuid = { version = "1.23.2", features = ["v4"], optional = true }
+url = { version = "2.5.8", optional = true }
 
 [build-dependencies]
 cbindgen = "0.28"
