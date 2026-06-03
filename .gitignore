@@ -1,3 +1,5 @@
 /target
 **/*.orig
 Cargo.lock
+.env
+.env.*

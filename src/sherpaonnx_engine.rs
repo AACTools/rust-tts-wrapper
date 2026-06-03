@@ -1,25 +1,42 @@
 //! Sherpa-ONNX offline TTS engine with model registry.
+//!
+//! Supports Kokoro, VITS (Piper/Coqui), Matcha, Kitten, ZipVoice, Pocket, and
+//! Supertonic model families. Audio is streamed in PCM chunks via the
+//! `generate_with_config` progress callback. Word boundary events are estimated
+//! (not provided by the Sherpa-ONNX API).
 
 use crate::engine::{estimate_word_boundaries, TtsEngine};
 use crate::types::{
     Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
 };
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
-/// Embedded model registry compiled from `merged_models.json`.
 static MERGED_MODELS_JSON: &str = include_str!("merged_models.json");
 
-/// Offline TTS engine using [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx).
-#[derive(Debug)]
+const PCM_CHUNK_SAMPLES: usize = 4096;
+
 pub struct SherpaOnnxEngine {
     models: HashMap<String, SherpaModelInfo>,
     model_dir: PathBuf,
     loaded_model_id: String,
+    tts: Option<Mutex<sherpa_onnx::OfflineTts>>,
+}
+
+impl fmt::Debug for SherpaOnnxEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SherpaOnnxEngine")
+            .field("loaded_model_id", &self.loaded_model_id)
+            .field("model_dir", &self.model_dir)
+            .field("models_count", &self.models.len())
+            .field("tts_loaded", &self.tts.is_some())
+            .finish()
+    }
 }
 
 impl SherpaOnnxEngine {
-    /// Create a new Sherpa-ONNX engine.
     pub fn new(credentials_json: &str) -> Self {
         let mut model_dir = default_model_dir();
         let mut model_id = String::new();
@@ -41,20 +58,94 @@ impl SherpaOnnxEngine {
             model_id = "kokoro-en-en-19".to_string();
         }
 
+        let tts = try_create_tts(&models, &model_dir, &model_id);
+
         SherpaOnnxEngine {
             models,
             model_dir,
             loaded_model_id: model_id,
+            tts: tts.map(Mutex::new),
         }
     }
 
-    /// Return the map of available models from the registry.
     pub fn available_models(&self) -> &HashMap<String, SherpaModelInfo> {
         &self.models
     }
 }
 
-/// Default directory for downloaded Sherpa-ONNX models.
+fn try_create_tts(
+    models: &HashMap<String, SherpaModelInfo>,
+    model_dir: &std::path::Path,
+    model_id: &str,
+) -> Option<sherpa_onnx::OfflineTts> {
+    let model_info = models.get(model_id)?;
+    let dir = model_dir.join(model_id);
+    if !dir.exists() {
+        return None;
+    }
+
+    let model_config = build_model_config(model_info, &dir)?;
+    let config = sherpa_onnx::OfflineTtsConfig {
+        model: model_config,
+        ..Default::default()
+    };
+
+    sherpa_onnx::OfflineTts::create(&config)
+}
+
+fn build_model_config(
+    info: &SherpaModelInfo,
+    dir: &std::path::Path,
+) -> Option<sherpa_onnx::OfflineTtsModelConfig> {
+    let p = |name: &str| {
+        let path = dir.join(name);
+        if path.exists() {
+            Some(path.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    };
+
+    match info.model_type.as_str() {
+        "kokoro" => Some(sherpa_onnx::OfflineTtsModelConfig {
+            kokoro: sherpa_onnx::OfflineTtsKokoroModelConfig {
+                model: p("model.onnx"),
+                voices: p("voices.bin"),
+                tokens: p("tokens.txt"),
+                data_dir: p("espeak-ng-data"),
+                ..Default::default()
+            },
+            num_threads: 2,
+            ..Default::default()
+        }),
+        "vits" => Some(sherpa_onnx::OfflineTtsModelConfig {
+            vits: sherpa_onnx::OfflineTtsVitsModelConfig {
+                model: p("model.onnx"),
+                tokens: p("tokens.txt"),
+                data_dir: p("espeak-ng-data"),
+                lexicon: p("lexicon.txt"),
+                dict_dir: p("dict"),
+                ..Default::default()
+            },
+            num_threads: 2,
+            ..Default::default()
+        }),
+        "matcha" => Some(sherpa_onnx::OfflineTtsModelConfig {
+            matcha: sherpa_onnx::OfflineTtsMatchaModelConfig {
+                acoustic_model: p("model.onnx.stripped").or_else(|| p("model.onnx")),
+                vocoder: p("hifigan-v2/model.onnx").or_else(|| p("vocoder.onnx")),
+                lexicon: p("lexicon.txt"),
+                tokens: p("tokens.txt"),
+                data_dir: p("espeak-ng-data"),
+                ..Default::default()
+            },
+            num_threads: 2,
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
 fn default_model_dir() -> PathBuf {
     let home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
@@ -65,7 +156,6 @@ fn default_model_dir() -> PathBuf {
     dir
 }
 
-/// Parse the embedded `merged_models.json` into a hashmap.
 fn load_models() -> HashMap<String, SherpaModelInfo> {
     let raw: HashMap<String, serde_json::Value> = match serde_json::from_str(MERGED_MODELS_JSON) {
         Ok(v) => v,
@@ -81,7 +171,6 @@ fn load_models() -> HashMap<String, SherpaModelInfo> {
     models
 }
 
-/// Parse a single model entry from the JSON registry.
 fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
     let obj = val.as_object()?;
     Some(SherpaModelInfo {
@@ -136,6 +225,20 @@ fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
     })
 }
 
+fn samples_to_pcm_i16(samples: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(samples.len() * 2);
+    for &s in samples {
+        let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        bytes.extend_from_slice(&s16.to_ne_bytes());
+    }
+    bytes
+}
+
+struct StreamState {
+    samples_sent: usize,
+    chunks: Vec<Vec<u8>>,
+}
+
 impl TtsEngine for SherpaOnnxEngine {
     fn speak(
         &self,
@@ -147,57 +250,13 @@ impl TtsEngine for SherpaOnnxEngine {
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
-        let model_info = self.models.get(&self.loaded_model_id).ok_or_else(|| {
+        let tts_guard = self.tts.as_ref().ok_or_else(|| {
             TtsError(format!(
-                "Model '{}' not found in registry ({} models available)",
-                self.loaded_model_id,
-                self.models.len()
+                "Sherpa-ONNX engine not initialised (model '{}' not loaded)",
+                self.loaded_model_id
             ))
         })?;
-
-        let model_dir = self.model_dir.join(&self.loaded_model_id);
-        if !model_dir.exists() {
-            return Err(TtsError(format!(
-                "Model directory not found: {}. Download from: {}",
-                model_dir.display(),
-                model_info.url
-            )));
-        }
-
-        let kokoro = sherpa_onnx::OfflineTtsKokoroModelConfig {
-            model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
-            voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
-            tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-            data_dir: Some(
-                model_dir
-                    .join("espeak-ng-data")
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            length_scale: 1.0 / rate.max(0.1),
-            ..Default::default()
-        };
-
-        let model_config = sherpa_onnx::OfflineTtsModelConfig {
-            kokoro,
-            vits: sherpa_onnx::OfflineTtsVitsModelConfig::default(),
-            matcha: sherpa_onnx::OfflineTtsMatchaModelConfig::default(),
-            kitten: sherpa_onnx::OfflineTtsKittenModelConfig::default(),
-            zipvoice: sherpa_onnx::OfflineTtsZipvoiceModelConfig::default(),
-            pocket: sherpa_onnx::OfflineTtsPocketModelConfig::default(),
-            supertonic: sherpa_onnx::OfflineTtsSupertonicModelConfig::default(),
-            num_threads: 2,
-            debug: false,
-            provider: None,
-        };
-
-        let config = sherpa_onnx::OfflineTtsConfig {
-            model: model_config,
-            ..Default::default()
-        };
-
-        let tts = sherpa_onnx::OfflineTts::create(&config)
-            .ok_or_else(|| TtsError("Failed to create SherpaOnnx TTS engine".into()))?;
+        let tts = tts_guard.lock().unwrap();
 
         let sid = voice.and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
         let gen_config = sherpa_onnx::GenerationConfig {
@@ -206,22 +265,51 @@ impl TtsEngine for SherpaOnnxEngine {
             ..Default::default()
         };
 
+        let stream_audio = on_audio.is_some();
+        let state = Arc::new(Mutex::new(StreamState {
+            samples_sent: 0,
+            chunks: Vec::new(),
+        }));
+        let state_clone = Arc::clone(&state);
+
         let audio = tts
             .generate_with_config(
                 text,
                 &gen_config,
-                Some(|_samples: &[f32], _progress: f32| -> bool { true }),
+                Some(move |samples: &[f32], _progress: f32| -> bool {
+                    if !stream_audio || samples.is_empty() {
+                        return true;
+                    }
+                    let mut st = state_clone.lock().unwrap();
+                    if samples.len() > st.samples_sent {
+                        let new_samples = &samples[st.samples_sent..];
+                        let pcm = samples_to_pcm_i16(new_samples);
+                        for chunk in pcm.chunks(PCM_CHUNK_SAMPLES * 2) {
+                            st.chunks.push(chunk.to_vec());
+                        }
+                        st.samples_sent = samples.len();
+                    }
+                    true
+                }),
             )
             .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
 
         if let Some(cb) = on_audio.as_mut() {
-            let samples = audio.samples();
-            let mut pcm_bytes = Vec::with_capacity(samples.len() * 2);
-            for &s in samples {
-                let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                pcm_bytes.extend_from_slice(&s16.to_ne_bytes());
+            let st = state.lock().unwrap();
+            let samples_sent = st.samples_sent;
+            for chunk in &st.chunks {
+                cb(chunk);
             }
-            cb(&pcm_bytes);
+            drop(st);
+
+            let final_samples = audio.samples();
+            if final_samples.len() > samples_sent {
+                let remaining = &final_samples[samples_sent..];
+                let pcm = samples_to_pcm_i16(remaining);
+                for chunk in pcm.chunks(PCM_CHUNK_SAMPLES * 2) {
+                    cb(chunk);
+                }
+            }
         } else {
             let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
             if audio.save(filename.to_string_lossy().as_ref()) {
@@ -262,7 +350,11 @@ impl TtsEngine for SherpaOnnxEngine {
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         let model_info = self.models.get(&self.loaded_model_id);
-        let num_speakers = model_info.map_or(1, |m| m.num_speakers);
+        let num_speakers = if let Some(ref tts_mutex) = self.tts {
+            tts_mutex.lock().unwrap().num_speakers() as u32
+        } else {
+            model_info.map_or(1, |m| m.num_speakers)
+        };
         let lang = model_info
             .and_then(|m| m.language.first())
             .map(|l| l.language_name.clone())
@@ -291,9 +383,12 @@ impl TtsEngine for SherpaOnnxEngine {
     fn engine_id(&self) -> &'static str {
         "sherpaonnx"
     }
+
+    fn check_credentials(&self) -> TtsResult<bool> {
+        Ok(self.tts.is_some())
+    }
 }
 
-/// Play a WAV file using `aplay` (Linux).
 fn play_wav_file(path: &std::path::Path) {
     let _ = std::process::Command::new("aplay")
         .arg("-q")

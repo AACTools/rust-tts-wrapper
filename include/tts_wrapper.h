@@ -199,6 +199,19 @@ void tts_set_on_audio(struct tts_ctx *ctx, CAudioCb cb, void *userdata);
 void tts_set_on_boundary(struct tts_ctx *ctx, CBoundaryCb cb, void *userdata);
 
 /**
+ * Validate credentials for a given engine without creating a persistent context.
+ *
+ * Returns 1 if valid, 0 if invalid, -1 on error.
+ * On error, call [`tts_get_last_error`] for details.
+ *
+ * # Safety
+ *
+ * `engine_id` must be a valid null-terminated C string.
+ * `credentials_json` may be null or a valid null-terminated JSON string.
+ */
+int32_t tts_validate_credentials(const char *engine_id, const char *credentials_json);
+
+/**
  * Return the number of registered engines.
  */
 int32_t tts_get_engine_count(void);
@@ -230,6 +243,17 @@ void tts_free_engine_info(struct tts_engine_info *engines, int32_t count);
  * The returned pointer is valid until the next call to any TTS function.
  */
 const char *tts_get_last_error(void);
+
+/**
+ * Check whether the configured credentials are valid.
+ *
+ * Returns 1 if valid, 0 if invalid, -1 on error.
+ * On error, call [`tts_get_last_error`] for details.
+ *
+ * # Safety
+ * `ctx` must be a valid pointer from [`tts_create`].
+ */
+int32_t tts_check_credentials(struct tts_ctx *ctx);
 
 /**
  * Pause in-progress speech.

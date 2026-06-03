@@ -14,7 +14,7 @@ crate-type = ["cdylib", "staticlib", "lib"]
 [features]
 default = ["system", "cloud", "sherpaonnx"]
 system = ["speech-dispatcher"]
-cloud = ["reqwest", "serde_json", "base64", "speechmarkdown-rust", "tungstenite", "uuid", "url"]
+cloud = ["reqwest", "serde_json", "base64", "speechmarkdown-rust", "tungstenite", "uuid", "url", "ring"]
 sherpaonnx = ["sherpa-onnx", "serde_json"]
 tungstenite = ["dep:tungstenite"]
 uuid = ["dep:uuid"]
@@ -27,6 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "1.13", optional = true }
 base64 = { version = "0.22", optional = true }
+ring = { version = "0.17", optional = true }
 speechmarkdown-rust = { version = "0.1", optional = true }
 anyhow = "1"
 tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"], optional = true }
@@ -35,6 +36,21 @@ url = { version = "2.5.8", optional = true }
 
 [build-dependencies]
 cbindgen = "0.28"
+
+[dev-dependencies]
+dotenv = "0.15"
+
+[[example]]
+name = "validate_credentials"
+path = "examples/validate_credentials.rs"
+
+[[example]]
+name = "speak_test"
+path = "examples/speak_test.rs"
+
+[[example]]
+name = "sherpaonnx_test"
+path = "examples/sherpaonnx_test.rs"
 
 [lints.clippy]
 all = "warn"

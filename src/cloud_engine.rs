@@ -164,15 +164,22 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
         }),
         "playht" => {
             let user_id = creds.get("userId").cloned().unwrap_or_default();
-            let mut extra = HashMap::new();
-            extra.insert("user_id".into(), serde_json::Value::String(user_id));
+            let mut extra_headers = HashMap::new();
+            extra_headers.insert("X-USER-ID".into(), user_id);
+            extra_headers.insert("accept".into(), "audio/mpeg".into());
             Some(CloudConfig {
-                synth_url: "https://api.play.ht/api/v2/tts".into(),
-                auth_header: "Authorization".into(),
-                auth_prefix: "Bearer ".into(),
+                synth_url: "https://api.play.ht/api/v2/tts/stream".into(),
+                auth_header: "AUTHORIZATION".into(),
                 voice_param: "voice".into(),
+                default_voice: Some("s3://voice-cloning-zero-shot/d9ff78ba-d016524e6e58c32d8769b7d67e4f0a68a6b42a20d758c15b1d452bf60e83b03b/manifest.json".into()),
                 text_field: "text".into(),
-                extra_body: extra,
+                extra_body: {
+                    let mut m = HashMap::new();
+                    m.insert("output_format".into(), serde_json::Value::String("mp3".into()));
+                    m.insert("voice_engine".into(), serde_json::Value::String("PlayHT2.0".into()));
+                    m
+                },
+                extra_headers,
                 provider_id: "playht".into(),
                 ..Default::default()
             })
@@ -232,11 +239,20 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             ..Default::default()
         }),
         "upliftai" => Some(CloudConfig {
-            synth_url: "https://api.upliftai.org/v1/tts".into(),
+            synth_url: "https://api.upliftai.org/v1/synthesis/text-to-speech/stream".into(),
             auth_header: "Authorization".into(),
             auth_prefix: "Bearer ".into(),
-            voice_param: "voice".into(),
+            voice_param: "voiceId".into(),
+            default_voice: Some("v_8eelc901".into()),
             text_field: "text".into(),
+            extra_body: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "outputFormat".into(),
+                    serde_json::Value::String("MP3_22050_128".into()),
+                );
+                m
+            },
             provider_id: "upliftai".into(),
             ..Default::default()
         }),
@@ -262,9 +278,17 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             })
         }
         "witai" => Some(CloudConfig {
-            synth_url: "https://api.wit.ai/synthesize?v=20240304".into(),
+            synth_url: "https://api.wit.ai/synthesize?v=20240601".into(),
             auth_header: "Authorization".into(),
             auth_prefix: "Bearer ".into(),
+            voice_param: "voice".into(),
+            default_voice: Some("Colin".into()),
+            text_field: "q".into(),
+            extra_body: {
+                let mut m = HashMap::new();
+                m.insert("style".into(), serde_json::Value::String("default".into()));
+                m
+            },
             provider_id: "witai".into(),
             ..Default::default()
         }),
@@ -284,14 +308,28 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             provider_id: "modelslab".into(),
             ..Default::default()
         }),
-        "polly" => Some(CloudConfig {
-            synth_url: "https://polly.us-east-1.amazonaws.com/v1/speech".into(),
-            voice_param: "VoiceId".into(),
-            default_voice: Some("Joanna".into()),
-            text_field: "Text".into(),
-            provider_id: "polly".into(),
-            ..Default::default()
-        }),
+        "polly" => {
+            let region = creds
+                .get("region")
+                .cloned()
+                .unwrap_or_else(|| "us-east-1".into());
+            Some(CloudConfig {
+                synth_url: format!("https://polly.{region}.amazonaws.com/v1/speech"),
+                voice_param: "VoiceId".into(),
+                default_voice: Some("Joanna".into()),
+                text_field: "Text".into(),
+                extra_body: {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "OutputFormat".into(),
+                        serde_json::Value::String("mp3".into()),
+                    );
+                    m
+                },
+                provider_id: "polly".into(),
+                ..Default::default()
+            })
+        }
         _ => None,
     }
 }
@@ -526,6 +564,153 @@ fn compute_durations(boundaries: &mut [WordBoundary]) {
     }
 }
 
+#[cfg(feature = "cloud")]
+mod aws_sigv4 {
+    use std::fmt::Write;
+
+    fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+        let signing_key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, key);
+        ring::hmac::sign(&signing_key, data).as_ref().to_vec()
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        let digest = ring::digest::digest(&ring::digest::SHA256, data);
+        hex_encode(digest.as_ref())
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn hmac_hex(key: &[u8], data: &[u8]) -> String {
+        hex_encode(&hmac_sha256(key, data))
+    }
+
+    fn format_utc_now() -> (String, String) {
+        let secs = std::time::SystemTime::UNIX_EPOCH
+            .elapsed()
+            .unwrap_or_default()
+            .as_secs();
+        let days_since_epoch = secs / 86400;
+        let time_of_day = secs % 86400;
+        let hours = time_of_day / 3600;
+        let minutes = (time_of_day % 3600) / 60;
+        let seconds = time_of_day % 60;
+
+        let (y, m, d) = days_to_ymd(days_since_epoch);
+        let amz_date = format!("{y:04}{m:02}{d:02}T{hours:02}{minutes:02}{seconds:02}Z");
+        let date_stamp = format!("{y:04}{m:02}{d:02}");
+        (amz_date, date_stamp)
+    }
+
+    fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+        let mut y = 1970;
+        loop {
+            let dy = if is_leap(y) { 366 } else { 365 };
+            if days < dy {
+                break;
+            }
+            days -= dy;
+            y += 1;
+        }
+        let leap = is_leap(y);
+        let mdays = [
+            31,
+            if leap { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ];
+        let mut m = 0;
+        for &dm in &mdays {
+            if days < dm {
+                break;
+            }
+            days -= dm;
+            m += 1;
+        }
+        (y, m + 1, days + 1)
+    }
+
+    fn is_leap(y: u64) -> bool {
+        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn sign_request(
+        method: &str,
+        url: &str,
+        body: &[u8],
+        region: &str,
+        service: &str,
+        access_key: &str,
+        secret_key: &str,
+    ) -> std::collections::HashMap<String, String> {
+        let (amz_date, date_stamp) = format_utc_now();
+
+        let parsed =
+            url::Url::parse(url).unwrap_or_else(|_| url::Url::parse("http://localhost").unwrap());
+        let host = parsed.host_str().unwrap_or("localhost");
+
+        let mut signed_headers_list = vec!["content-type", "host", "x-amz-date"];
+        signed_headers_list.sort();
+
+        let mut canonical_headers = String::new();
+        for h in &signed_headers_list {
+            let val = match *h {
+                "content-type" => "application/json",
+                "host" => host,
+                "x-amz-date" => &amz_date,
+                _ => "",
+            };
+            let _ = writeln!(canonical_headers, "{h}:{val}");
+        }
+        let signed_headers = signed_headers_list.join(";");
+
+        let canonical_querystring = parsed.query().unwrap_or("");
+        let canonical_uri = parsed.path();
+
+        let payload_hash = sha256_hex(body);
+
+        let canonical_request = format!(
+            "{method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+        );
+
+        let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+        let string_to_sign = format!(
+            "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+            sha256_hex(canonical_request.as_bytes())
+        );
+
+        let k_date = hmac_sha256(
+            format!("AWS4{secret_key}").as_bytes(),
+            date_stamp.as_bytes(),
+        );
+        let k_region = hmac_sha256(&k_date, region.as_bytes());
+        let k_service = hmac_sha256(&k_region, service.as_bytes());
+        let k_signing = hmac_sha256(&k_service, b"aws4_request");
+        let signature = hmac_hex(&k_signing, string_to_sign.as_bytes());
+
+        let auth = format!(
+            "AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+        );
+
+        let mut result = std::collections::HashMap::new();
+        result.insert("Content-Type".into(), "application/json".into());
+        result.insert("Host".into(), host.into());
+        result.insert("X-Amz-Date".into(), amz_date);
+        result.insert("Authorization".into(), auth);
+        result
+    }
+}
+
 impl TtsEngine for CloudEngine {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn speak(
@@ -692,6 +877,94 @@ impl TtsEngine for CloudEngine {
                     b.offset as f32 / 1000.0,
                     (b.offset + b.duration) as f32 / 1000.0,
                 );
+            }
+
+            return Ok(());
+        }
+
+        // Polly: AWS SigV4 signed request
+        #[cfg(feature = "cloud")]
+        if self.config.provider_id == "polly" {
+            let region = self
+                .credentials
+                .get("region")
+                .cloned()
+                .unwrap_or_else(|| "us-east-1".into());
+            let access_key = self
+                .credentials
+                .get("accessKeyId")
+                .cloned()
+                .unwrap_or_default();
+            let secret_key = self
+                .credentials
+                .get("secretAccessKey")
+                .cloned()
+                .unwrap_or_default();
+
+            let mut body = serde_json::Map::new();
+            body.insert("Text".into(), serde_json::Value::String(text.clone()));
+            body.insert(
+                "VoiceId".into(),
+                serde_json::Value::String(voice_to_use.clone()),
+            );
+            body.insert(
+                "OutputFormat".into(),
+                serde_json::Value::String("mp3".into()),
+            );
+            let body_json = serde_json::Value::Object(body);
+            let body_bytes = serde_json::to_string(&body_json)
+                .unwrap_or_default()
+                .into_bytes();
+
+            let signed = aws_sigv4::sign_request(
+                "POST",
+                &self.config.synth_url,
+                &body_bytes,
+                &region,
+                "polly",
+                &access_key,
+                &secret_key,
+            );
+
+            let mut req = self.client.post(&self.config.synth_url);
+            for (k, v) in &signed {
+                req = req.header(k.as_str(), v.as_str());
+            }
+            let resp = req
+                .body(body_bytes)
+                .send()
+                .map_err(|e| TtsError(format!("Polly HTTP error: {e}")))?;
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body_text = resp.text().unwrap_or_default();
+                return Err(TtsError(format!("Polly API error {status}: {body_text}")));
+            }
+
+            if let Some(cb) = on_audio.as_mut() {
+                use std::io::Read;
+                let mut resp = resp;
+                let mut buffer = [0u8; 8192];
+                loop {
+                    let n = resp
+                        .read(&mut buffer)
+                        .map_err(|e| TtsError(format!("Read error: {e}")))?;
+                    if n == 0 {
+                        break;
+                    }
+                    cb(&buffer[..n]);
+                }
+            }
+
+            if let Some(cb) = on_boundary.as_mut() {
+                let estimated = estimate_word_boundaries(&text);
+                for b in &estimated {
+                    cb(
+                        &b.text,
+                        b.offset as f32 / 1000.0,
+                        (b.offset + b.duration) as f32 / 1000.0,
+                    );
+                }
             }
 
             return Ok(());

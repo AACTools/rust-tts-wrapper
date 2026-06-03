@@ -476,6 +476,50 @@ pub extern "C" fn tts_set_on_boundary(
     *ctx_ref.on_boundary_userdata.lock().unwrap() = userdata;
 }
 
+/// Validate credentials for a given engine without creating a persistent context.
+///
+/// Returns 1 if valid, 0 if invalid, -1 on error.
+/// On error, call [`tts_get_last_error`] for details.
+///
+/// # Safety
+///
+/// `engine_id` must be a valid null-terminated C string.
+/// `credentials_json` may be null or a valid null-terminated JSON string.
+#[no_mangle]
+pub extern "C" fn tts_validate_credentials(
+    engine_id: *const c_char,
+    credentials_json: *const c_char,
+) -> i32 {
+    if engine_id.is_null() {
+        set_error("engine_id is null");
+        return -1;
+    }
+    let engine_id_str = unsafe { CStr::from_ptr(engine_id) }
+        .to_string_lossy()
+        .into_owned();
+    let creds = if credentials_json.is_null() {
+        String::new()
+    } else {
+        unsafe { CStr::from_ptr(credentials_json) }
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    let Some(engine) = create_engine(&engine_id_str, &creds) else {
+        set_error(&format!("Unknown engine: {engine_id_str}"));
+        return -1;
+    };
+
+    match engine.check_credentials() {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            set_error(&e.to_string());
+            -1
+        }
+    }
+}
+
 /// Return the number of registered engines.
 #[no_mangle]
 pub extern "C" fn tts_get_engine_count() -> i32 {
@@ -555,6 +599,30 @@ pub extern "C" fn tts_get_last_error() -> *const c_char {
             None => ptr::null(),
         },
         Err(_) => ptr::null(),
+    }
+}
+
+/// Check whether the configured credentials are valid.
+///
+/// Returns 1 if valid, 0 if invalid, -1 on error.
+/// On error, call [`tts_get_last_error`] for details.
+///
+/// # Safety
+/// `ctx` must be a valid pointer from [`tts_create`].
+#[no_mangle]
+pub extern "C" fn tts_check_credentials(ctx: *mut tts_ctx) -> i32 {
+    if ctx.is_null() {
+        return -1;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    let engine = ctx_ref.engine.lock().unwrap();
+    match engine.check_credentials() {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(e) => {
+            *ctx_ref.last_error.lock().unwrap() = e.to_string();
+            -1
+        }
     }
 }
 
