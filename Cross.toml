@@ -1,5 +1,7 @@
 [target.aarch64-unknown-linux-gnu]
 pre-build = [
-    "apt-get update",
+    "apt-get update || true",
     "apt-get install -y libspeechd-dev libclang-dev",
+    "mkdir -p /usr/aarch64-linux-gnu/include/speech-dispatcher || true",
+    "cp -r /usr/include/speech-dispatcher/* /usr/aarch64-linux-gnu/include/speech-dispatcher/ || true",
 ]
