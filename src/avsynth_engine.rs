@@ -4,7 +4,7 @@
 
 use crate::engine::{estimate_word_boundaries, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
-use objc::runtime::Object;
+use objc::runtime::{Class, Object};
 use objc::{class, msg_send, sel, sel_impl};
 use objc_exception::r#try as objc_try;
 use std::ffi::c_void;
@@ -42,14 +42,18 @@ unsafe impl Sync for AvSynthEngine {}
 
 impl AvSynthEngine {
     pub fn new() -> Self {
-        let synth = unsafe {
-            let _pool = AutoreleasePool::new();
-            objc_try(|| {
-                let cls = class!(AVSpeechSynthesizer);
-                let obj: *mut Object = msg_send![cls, alloc];
-                let obj: *mut Object = msg_send![obj, init];
-                if obj.is_null() { None } else { Some(obj) }
-            }).ok().flatten()
+        let synth = if unsafe { Class::get("AVSpeechSynthesizer").is_none() } {
+            None
+        } else {
+            unsafe {
+                let _pool = AutoreleasePool::new();
+                objc_try(|| {
+                    let cls = class!(AVSpeechSynthesizer);
+                    let obj: *mut Object = msg_send![cls, alloc];
+                    let obj: *mut Object = msg_send![obj, init];
+                    if obj.is_null() { None } else { Some(obj) }
+                }).ok().flatten()
+            }
         };
         AvSynthEngine {
             synth: Arc::new(Mutex::new(synth)),
