@@ -269,6 +269,34 @@ int32_t tts_synth_to_bytes(struct tts_ctx *ctx,
  */
 void tts_free_bytes(uint8_t *bytes, uintptr_t len);
 
+extern void *avsynth_create(void);
+
+extern void avsynth_destroy(void *handle);
+
+extern void avsynth_speak(void *handle,
+                          const uint8_t *text,
+                          const uint8_t *voice_id,
+                          float rate,
+                          float pitch,
+                          float volume);
+
+extern void avsynth_stop(void *handle);
+
+extern void avsynth_pause(void *handle);
+
+extern void avsynth_resume(void *handle);
+
+extern int32_t avsynth_voice_count(void *handle);
+
+extern int32_t avsynth_get_voice(void *handle,
+                                 int32_t index,
+                                 uint8_t *id_buf,
+                                 int32_t id_buf_len,
+                                 uint8_t *name_buf,
+                                 int32_t name_buf_len,
+                                 uint8_t *lang_buf,
+                                 int32_t lang_buf_len);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif  // __cplusplus

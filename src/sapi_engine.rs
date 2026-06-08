@@ -5,11 +5,7 @@ use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
 #[cfg(feature = "sapi")]
-use windows::{
-    core::*,
-    Win32::Media::Speech::*,
-    Win32::System::Com::*,
-};
+use windows::{core::*, Win32::Media::Speech::*, Win32::System::Com::*};
 
 #[derive(Debug)]
 pub struct SapiEngine {
@@ -37,7 +33,7 @@ impl SapiEngine {
     unsafe fn find_voice_by_id(voice_id: &str) -> Option<ISpObjectToken> {
         let target = HSTRING::from(voice_id);
         let enum_tokens = SpEnumTokens(
-            w"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices",
+            &HSTRING::from("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices"),
             None,
             None,
         )
@@ -104,7 +100,11 @@ impl TtsEngine for SapiEngine {
                 let pitch_val = pitch_to_sapi(pitch);
                 let pitch_str = format!(
                     "<pitch absmiddle=\"{}\"/>",
-                    if pitch >= 1.0 { pitch_val as i32 } else { -(pitch_val as i32) }
+                    if pitch >= 1.0 {
+                        pitch_val as i32
+                    } else {
+                        -(pitch_val as i32)
+                    }
                 );
                 let wrapped = format!("{pitch_str}{text}");
                 let wtext = HSTRING::from(&wrapped);
@@ -175,7 +175,7 @@ impl TtsEngine for SapiEngine {
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         let tokens = unsafe {
             SpEnumTokens(
-                w"HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices",
+                &HSTRING::from("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices"),
                 None,
                 None,
             )
@@ -183,7 +183,8 @@ impl TtsEngine for SapiEngine {
         };
 
         let count = unsafe { tokens.GetCount() }
-            .map_err(|e| TtsError(format!("Failed to get voice count: {e}")))? as usize;
+            .map_err(|e| TtsError(format!("Failed to get voice count: {e}")))?
+            as usize;
 
         let mut voices = Vec::with_capacity(count);
         for i in 0..count {
@@ -193,19 +194,22 @@ impl TtsEngine for SapiEngine {
                     .unwrap_or_default();
 
                 let name = unsafe {
-                    token.GetStringValue(w"Name")
+                    token
+                        .GetStringValue(&HSTRING::from("Name"))
                         .map(|h| h.to_string_lossy())
                         .unwrap_or_else(|_| id.clone())
                 };
 
                 let lang = unsafe {
-                    token.GetStringValue(w"Language")
+                    token
+                        .GetStringValue(&HSTRING::from("Language"))
                         .map(|h| h.to_string_lossy())
                         .unwrap_or_else(|_| "en-US".into())
                 };
 
                 let gender_str = unsafe {
-                    token.GetStringValue(w"Gender")
+                    token
+                        .GetStringValue(&HSTRING::from("Gender"))
                         .map(|h| h.to_string_lossy())
                         .unwrap_or_default()
                 };

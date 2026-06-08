@@ -13,8 +13,7 @@ void* avsynth_create(void) {
 void avsynth_destroy(void *handle) {
     if (!handle) return;
     @try {
-        AVSpeechSynthesizer *synth = (__bridge_transfer AVSpeechSynthesizer *)handle;
-        synth = nil;
+        CFRelease(handle);
     } @catch (NSException *e) {}
 }
 

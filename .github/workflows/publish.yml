@@ -39,16 +39,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
-      - name: Clippy (all features)
-        run: cargo clippy --all-features -- -D warnings
-      - name: Test (all features)
-        run: cargo test --all-features
+      - name: Clippy (Linux features)
+        run: cargo clippy --no-default-features --features system,cloud,sherpaonnx -- -D warnings
+      - name: Test (Linux features)
+        run: cargo test --no-default-features --features system,cloud,sherpaonnx
       - name: Build system-only
         run: cargo build --no-default-features --features system
       - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
-      - name: Build with sherpaonnx
-        run: cargo build --no-default-features --features system,sherpaonnx
 
   build:
     name: Build ${{ matrix.label }}
@@ -59,11 +57,6 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "system"
-            label: "system-x86_64-linux"
-            lib_ext: so
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
             features: "system,cloud"
             label: "system-cloud-x86_64-linux"
             lib_ext: so
@@ -72,40 +65,46 @@ jobs:
             features: "system,cloud,sherpaonnx"
             label: "system-cloud-sherpaonnx-x86_64-linux"
             lib_ext: so
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud"
+            label: "system-cloud-aarch64-linux"
+            lib_ext: so
+            cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
-            features: "cloud"
-            label: "cloud-x86_64-macos"
+            features: "avsynth,cloud"
+            label: "avsynth-cloud-x86_64-macos"
             lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
-            features: "cloud"
-            label: "cloud-aarch64-macos"
+            features: "avsynth,cloud"
+            label: "avsynth-cloud-aarch64-macos"
             lib_ext: dylib
           - target: x86_64-apple-darwin
             os: macos-latest
-            features: "cloud,sherpaonnx"
-            label: "cloud-sherpaonnx-x86_64-macos"
+            features: "avsynth,cloud,sherpaonnx"
+            label: "avsynth-cloud-sherpaonnx-x86_64-macos"
             lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
-            features: "cloud,sherpaonnx"
-            label: "cloud-sherpaonnx-aarch64-macos"
+            features: "avsynth,cloud,sherpaonnx"
+            label: "avsynth-cloud-sherpaonnx-aarch64-macos"
             lib_ext: dylib
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "cloud"
-            label: "cloud-x86_64-windows"
+            features: "sapi,cloud"
+            label: "sapi-cloud-x86_64-windows"
             lib_ext: dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            features: "cloud"
-            label: "cloud-aarch64-windows"
+            features: "sapi,cloud"
+            label: "sapi-cloud-aarch64-windows"
             lib_ext: dll
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "cloud,sherpaonnx"
-            label: "cloud-sherpaonnx-x86_64-windows"
+            features: "sapi,cloud,sherpaonnx"
+            label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
     runs-on: ${{ matrix.os }}
     steps:

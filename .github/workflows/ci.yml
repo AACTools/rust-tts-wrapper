@@ -20,16 +20,16 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Clippy (all features)
-        run: cargo clippy --all-features -- -D warnings
+      - name: Clippy (Linux features)
+        run: cargo clippy --no-default-features --features system,cloud,sherpaonnx -- -D warnings
 
-      - name: Build (all features)
-        run: cargo build --all-features
+      - name: Build (Linux features)
+        run: cargo build --no-default-features --features system,cloud,sherpaonnx
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --no-default-features --features system,cloud,sherpaonnx
 
-      - name: Build without default features (cloud only)
+      - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
 
       - name: Upload C header
@@ -37,3 +37,37 @@ jobs:
         with:
           name: tts_wrapper_header
           path: include/tts_wrapper.h
+
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy (macOS features)
+        run: cargo clippy --no-default-features --features avsynth,cloud -- -D warnings
+
+      - name: Build (macOS features)
+        run: cargo build --no-default-features --features avsynth,cloud
+
+      - name: Run tests
+        run: cargo test --no-default-features --features avsynth,cloud
+
+  windows-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy (Windows features)
+        run: cargo clippy --no-default-features --features sapi,cloud -- -D warnings
+
+      - name: Build (Windows features)
+        run: cargo build --no-default-features --features sapi,cloud
+
+      - name: Run tests
+        run: cargo test --no-default-features --features sapi,cloud

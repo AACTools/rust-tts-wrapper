@@ -4,16 +4,16 @@ use crate::engine::TtsEngine;
 use crate::types::EngineDescriptor;
 
 // The unused-import warning is a false positive — TtsEngine is a trait used as a dyn bound.
+#[cfg(all(feature = "avsynth", target_os = "macos"))]
+use crate::avsynth_engine::AvSynthEngine;
 #[cfg(feature = "cloud")]
 use crate::cloud_engine;
+#[cfg(all(feature = "sapi", target_os = "windows"))]
+use crate::sapi_engine::SapiEngine;
 #[cfg(feature = "sherpaonnx")]
 use crate::sherpaonnx_engine::SherpaOnnxEngine;
 #[cfg(feature = "system")]
 use crate::system_engine::SystemEngine;
-#[cfg(feature = "avsynth")]
-use crate::avsynth_engine::AvSynthEngine;
-#[cfg(feature = "sapi")]
-use crate::sapi_engine::SapiEngine;
 
 /// Create an engine by its string identifier.
 ///
@@ -26,10 +26,10 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
         #[cfg(feature = "system")]
         "system" => Some(Box::new(SystemEngine::new())),
 
-        #[cfg(feature = "avsynth")]
+        #[cfg(all(feature = "avsynth", target_os = "macos"))]
         "avsynth" => Some(Box::new(AvSynthEngine::new())),
 
-        #[cfg(feature = "sapi")]
+        #[cfg(all(feature = "sapi", target_os = "windows"))]
         "sapi" => Some(Box::new(SapiEngine::new())),
 
         #[cfg(feature = "sherpaonnx")]
@@ -63,7 +63,7 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         credential_keys_json: "[]".into(),
     });
 
-    #[cfg(feature = "avsynth")]
+    #[cfg(all(feature = "avsynth", target_os = "macos"))]
     engines.push(EngineDescriptor {
         id: "avsynth".into(),
         name: "macOS AVSpeechSynthesizer".into(),
@@ -71,7 +71,7 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         credential_keys_json: "[]".into(),
     });
 
-    #[cfg(feature = "sapi")]
+    #[cfg(all(feature = "sapi", target_os = "windows"))]
     engines.push(EngineDescriptor {
         id: "sapi".into(),
         name: "Windows SAPI".into(),

@@ -29,18 +29,18 @@
     dead_code
 )]
 
+#[cfg(all(feature = "avsynth", target_os = "macos"))]
+mod avsynth_engine;
 #[cfg(feature = "cloud")]
 mod cloud_engine;
 pub mod engine;
 pub mod factory;
+#[cfg(all(feature = "sapi", target_os = "windows"))]
+mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 mod sherpaonnx_engine;
 #[cfg(feature = "system")]
 mod system_engine;
-#[cfg(feature = "avsynth")]
-mod avsynth_engine;
-#[cfg(feature = "sapi")]
-mod sapi_engine;
 pub mod types;
 
 use std::ffi::{CStr, CString};
@@ -97,19 +97,15 @@ pub extern "C" fn tts_create(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tts_create_inner(engine_id, credentials_json)
     }));
-    match result {
-        Ok(ptr) => ptr,
-        Err(_) => {
-            set_error("engine creation panicked");
-            ptr::null_mut()
-        }
+    if let Ok(ptr) = result {
+        ptr
+    } else {
+        set_error("engine creation panicked");
+        ptr::null_mut()
     }
 }
 
-fn tts_create_inner(
-    engine_id: *const c_char,
-    credentials_json: *const c_char,
-) -> *mut tts_ctx {
+fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -> *mut tts_ctx {
     if engine_id.is_null() {
         set_error("engine_id is null");
         return ptr::null_mut();
@@ -324,10 +320,7 @@ pub extern "C" fn tts_get_voices(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tts_get_voices_inner(ctx, out_voices, out_count)
     }));
-    match result {
-        Ok(r) => r,
-        Err(_) => -1,
-    }
+    result.unwrap_or(-1)
 }
 
 fn tts_get_voices_inner(
