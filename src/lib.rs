@@ -321,6 +321,20 @@ pub extern "C" fn tts_get_voices(
     out_voices: *mut *mut types::tts_voice,
     out_count: *mut i32,
 ) -> i32 {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tts_get_voices_inner(ctx, out_voices, out_count)
+    }));
+    match result {
+        Ok(r) => r,
+        Err(_) => -1,
+    }
+}
+
+fn tts_get_voices_inner(
+    ctx: *mut tts_ctx,
+    out_voices: *mut *mut types::tts_voice,
+    out_count: *mut i32,
+) -> i32 {
     if ctx.is_null() || out_voices.is_null() || out_count.is_null() {
         return -1;
     }
