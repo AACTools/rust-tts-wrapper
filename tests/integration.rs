@@ -1,15 +1,4 @@
-//! Integration tests for the TTS wrapper.
-
 use rust_tts_wrapper::factory;
-
-#[test]
-fn test_engine_list_contains_system() {
-    let engines = factory::engine_list();
-    assert!(
-        engines.iter().any(|e| e.id == "system"),
-        "System engine must be registered"
-    );
-}
 
 #[test]
 fn test_engine_list_contains_cloud() {
@@ -47,8 +36,8 @@ fn test_engine_list_contains_cloud() {
 fn test_engine_count() {
     let engines = factory::engine_list();
     assert!(
-        engines.len() >= 21,
-        "Must have at least 21 engines, got {}",
+        engines.len() >= 19,
+        "Must have at least 19 engines, got {}",
         engines.len()
     );
 }
@@ -64,6 +53,7 @@ fn test_cloud_engine_needs_credentials() {
     assert!(openai.credential_keys_json.contains("apiKey"));
 }
 
+#[cfg(feature = "system")]
 #[test]
 fn test_system_engine_no_credentials() {
     let engines = factory::engine_list();
@@ -74,6 +64,7 @@ fn test_system_engine_no_credentials() {
     assert!(!system.needs_credentials);
 }
 
+#[cfg(feature = "sherpaonnx")]
 #[test]
 fn test_sherpaonnx_no_credentials() {
     let engines = factory::engine_list();
@@ -84,6 +75,7 @@ fn test_sherpaonnx_no_credentials() {
     assert!(!sherpa.needs_credentials);
 }
 
+#[cfg(feature = "system")]
 #[test]
 fn test_create_system_engine() {
     let engine = factory::create_engine("system", "");
@@ -106,6 +98,7 @@ fn test_create_unknown_engine() {
     assert!(engine.is_none(), "Unknown engines should return None");
 }
 
+#[cfg(feature = "system")]
 #[test]
 fn test_system_engine_stop_graceful() {
     let engine = factory::create_engine("system", "").expect("system engine");
@@ -172,6 +165,7 @@ fn test_create_polly_with_all_creds() {
     assert!(engine.is_some());
 }
 
+#[cfg(feature = "sherpaonnx")]
 #[test]
 fn test_sherpaonnx_engine_has_voices() {
     let engine = factory::create_engine("sherpaonnx", "").expect("sherpaonnx engine");
@@ -224,7 +218,6 @@ fn test_word_boundary_estimation() {
     assert_eq!(boundaries[0].text, "Hello");
     assert_eq!(boundaries[0].offset, 0);
     assert!(boundaries[0].duration > 0);
-    // Offsets should be monotonically increasing
     for i in 1..boundaries.len() {
         assert!(boundaries[i].offset > boundaries[i - 1].offset);
     }
