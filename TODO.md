@@ -1,5 +1,10 @@
 # rust-tts-wrapper TODO
 
+## Done this session
+
+- Separated sherpaonnx clippy step with `continue-on-error` so 504s don't block publish workflow
+- Created `Dockerfile.cross-aarch64` and `Cross.toml` to attempt aarch64-linux cross builds (got past headers/libclang, hit upstream bug)
+
 ## Blocked
 
 ### Windows SAPI engine (`sapi` feature)
@@ -12,10 +17,10 @@
 ### aarch64-linux cross-compilation
 - **Status**: `system-cloud-aarch64-linux` fails on CI
 - **Root cause**: Upstream `speech-dispatcher` crate has type mismatches when bindgen runs with newer libclang (e.g., `u32` vs `i32` for `spd_set_voice_type_uid` parameter)
-- **CI fix history**: 
-  - Fixed headers copied into cross sysroot (Dockerfile.cross-aarch64)
-  - Fixed old libclang 3.8 (upgraded to `:main` cross image with clang 10)
-  - Bindgen now succeeds but compilation of `speech-dispatcher` crate fails
+- **Progress so far**: 
+  - Headers now copied into cross sysroot via Dockerfile.cross-aarch64
+  - Upgraded from libclang 3.8 (xenial image) to clang 10 (`:main` cross image)
+  - Bindgen succeeds but compilation of `speech-dispatcher` crate fails due to type mismatches
 - **Options**:
   1. Pin libclang version that generates types matching what `speech-dispatcher` expects
   2. Patch/override `speech-dispatcher` crate locally
@@ -23,13 +28,13 @@
   4. Skip `system` feature on aarch64, only ship `cloud` variant
 - **Files**: `Dockerfile.cross-aarch64`, `Cross.toml`
 
-## Transient
+## Known transient issues
 
 ### sherpa-onnx 504 downloads
 - sherpa-onnx GitHub release server intermittently returns 504 for `.tar.bz2` archive downloads
-- CI already uses `continue-on-error: true` on build matrix so this doesn't block releases
+- CI uses `continue-on-error: true` on build matrix so this doesn't block releases
 - Re-running the workflow usually succeeds on the next attempt
-- Not fixable on our side
+- Not fixable on our side — their server issue
 
 ## Future
 
