@@ -10,6 +10,10 @@ use crate::cloud_engine;
 use crate::sherpaonnx_engine::SherpaOnnxEngine;
 #[cfg(feature = "system")]
 use crate::system_engine::SystemEngine;
+#[cfg(feature = "avsynth")]
+use crate::avsynth_engine::AvSynthEngine;
+#[cfg(feature = "sapi")]
+use crate::sapi_engine::SapiEngine;
 
 /// Create an engine by its string identifier.
 ///
@@ -21,6 +25,12 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
     match engine_id {
         #[cfg(feature = "system")]
         "system" => Some(Box::new(SystemEngine::new())),
+
+        #[cfg(feature = "avsynth")]
+        "avsynth" => Some(Box::new(AvSynthEngine::new())),
+
+        #[cfg(feature = "sapi")]
+        "sapi" => Some(Box::new(SapiEngine::new())),
 
         #[cfg(feature = "sherpaonnx")]
         "sherpaonnx" => Some(Box::new(SherpaOnnxEngine::new(credentials_json))),
@@ -48,7 +58,23 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
     #[cfg(feature = "system")]
     engines.push(EngineDescriptor {
         id: "system".into(),
-        name: "System".into(),
+        name: "System (Speech Dispatcher)".into(),
+        needs_credentials: false,
+        credential_keys_json: "[]".into(),
+    });
+
+    #[cfg(feature = "avsynth")]
+    engines.push(EngineDescriptor {
+        id: "avsynth".into(),
+        name: "macOS AVSpeechSynthesizer".into(),
+        needs_credentials: false,
+        credential_keys_json: "[]".into(),
+    });
+
+    #[cfg(feature = "sapi")]
+    engines.push(EngineDescriptor {
+        id: "sapi".into(),
+        name: "Windows SAPI".into(),
         needs_credentials: false,
         credential_keys_json: "[]".into(),
     });

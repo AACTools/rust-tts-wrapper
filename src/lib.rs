@@ -37,6 +37,10 @@ pub mod factory;
 mod sherpaonnx_engine;
 #[cfg(feature = "system")]
 mod system_engine;
+#[cfg(feature = "avsynth")]
+mod avsynth_engine;
+#[cfg(feature = "sapi")]
+mod sapi_engine;
 pub mod types;
 
 use std::ffi::{CStr, CString};
