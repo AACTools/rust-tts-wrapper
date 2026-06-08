@@ -94,6 +94,22 @@ pub extern "C" fn tts_create(
     engine_id: *const c_char,
     credentials_json: *const c_char,
 ) -> *mut tts_ctx {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tts_create_inner(engine_id, credentials_json)
+    }));
+    match result {
+        Ok(ptr) => ptr,
+        Err(_) => {
+            set_error("engine creation panicked");
+            ptr::null_mut()
+        }
+    }
+}
+
+fn tts_create_inner(
+    engine_id: *const c_char,
+    credentials_json: *const c_char,
+) -> *mut tts_ctx {
     if engine_id.is_null() {
         set_error("engine_id is null");
         return ptr::null_mut();
