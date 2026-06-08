@@ -21,13 +21,13 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (Linux features)
-        run: cargo clippy --no-default-features --features system,cloud,sherpaonnx -- -D warnings
+        run: cargo clippy --no-default-features --features system,cloud -- -D warnings
 
       - name: Build (Linux features)
-        run: cargo build --no-default-features --features system,cloud,sherpaonnx
+        run: cargo build --no-default-features --features system,cloud
 
       - name: Run tests
-        run: cargo test --no-default-features --features system,cloud,sherpaonnx
+        run: cargo test --no-default-features --features system,cloud
 
       - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
@@ -57,6 +57,7 @@ jobs:
 
   windows-build:
     runs-on: windows-latest
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

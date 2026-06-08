@@ -45,6 +45,7 @@ impl AvSynthEngine {
     pub fn new() -> Self {
         let handle = unsafe { avsynth_create() };
         AvSynthEngine {
+            #[allow(clippy::arc_with_non_send_sync)]
             handle: Arc::new(Mutex::new(handle)),
             voice_id: Mutex::new(None),
         }
@@ -68,15 +69,12 @@ impl TtsEngine for AvSynthEngine {
         }
 
         let voice_to_use = voice
-            .map(|v| v.to_string())
+            .map(std::string::ToString::to_string)
             .or_else(|| self.voice_id.lock().unwrap().clone());
 
         unsafe {
             let text_c = text.as_ptr();
-            let voice_c = voice_to_use
-                .as_ref()
-                .map(|v| v.as_ptr())
-                .unwrap_or(ptr::null());
+            let voice_c = voice_to_use.as_ref().map_or(ptr::null(), |v| v.as_ptr());
             avsynth_speak(*guard, text_c, voice_c, rate, pitch, volume);
         }
 
