@@ -2,7 +2,7 @@ FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:0.2.5
 
 RUN apt-get update && \
     apt-get install -y libspeechd-dev libclang-dev clang && \
-    mkdir -p /usr/aarch64-linux-gnu/include/speech-dispatcher && \
-    cp -r /usr/include/speech-dispatcher/* /usr/aarch64-linux-gnu/include/speech-dispatcher/ || true
+    cp -r /usr/include/speech-dispatcher /usr/aarch64-linux-gnu/include/speech-dispatcher && \
+    cp /usr/include/libspeechd_version.h /usr/aarch64-linux-gnu/include/ || true
 
 ENV BINDGEN_EXTRA_CLANG_ARGS="-isystem /usr/include"
