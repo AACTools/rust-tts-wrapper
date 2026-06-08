@@ -43,7 +43,19 @@ impl AvSynthEngine {
         let synth = unsafe {
             let _pool = AutoreleasePool::new();
             let cls = class!(AVSpeechSynthesizer);
+            if cls.is_null() {
+                return AvSynthEngine {
+                    synth: Arc::new(Mutex::new(None)),
+                    voice_id: Mutex::new(None),
+                };
+            }
             let obj: *mut Object = msg_send![cls, alloc];
+            if obj.is_null() {
+                return AvSynthEngine {
+                    synth: Arc::new(Mutex::new(None)),
+                    voice_id: Mutex::new(None),
+                };
+            }
             let obj: *mut Object = msg_send![obj, init];
             if obj.is_null() {
                 None
@@ -55,6 +67,13 @@ impl AvSynthEngine {
             synth: Arc::new(Mutex::new(synth)),
             voice_id: Mutex::new(None),
         }
+    }
+}
+
+pub fn is_available() -> bool {
+    unsafe {
+        let cls = class!(AVSpeechSynthesizer);
+        !cls.is_null()
     }
 }
 
