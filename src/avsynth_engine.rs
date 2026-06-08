@@ -5,7 +5,29 @@ use crate::types::{TtsError, TtsResult, Voice};
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
 use std::ffi::c_void;
+use std::panic::catch_unwind;
 use std::sync::{Arc, Mutex};
+
+struct AutoreleasePool(*mut Object);
+
+impl AutoreleasePool {
+    unsafe fn new() -> Self {
+        let cls = class!(NSAutoreleasePool);
+        let pool: *mut Object = msg_send![cls, alloc];
+        let pool: *mut Object = msg_send![pool, init];
+        AutoreleasePool(pool)
+    }
+}
+
+impl Drop for AutoreleasePool {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _: () = msg_send![self.0, drain];
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct AvSynthEngine {
@@ -19,6 +41,7 @@ unsafe impl Sync for AvSynthEngine {}
 impl AvSynthEngine {
     pub fn new() -> Self {
         let synth = unsafe {
+            let _pool = AutoreleasePool::new();
             let cls = class!(AVSpeechSynthesizer);
             let obj: *mut Object = msg_send![cls, alloc];
             let obj: *mut Object = msg_send![obj, init];
@@ -96,6 +119,7 @@ impl TtsEngine for AvSynthEngine {
             .ok_or_else(|| TtsError("AVSpeechSynthesizer not initialized".into()))?;
 
         unsafe {
+            let _pool = AutoreleasePool::new();
             let ns_text = to_nsstring(text);
             let utterance_cls = class!(AVSpeechUtterance);
             let u: *mut Object = msg_send![utterance_cls, alloc];
@@ -184,6 +208,7 @@ impl TtsEngine for AvSynthEngine {
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         unsafe {
+            let _pool = AutoreleasePool::new();
             let voice_cls = class!(AVSpeechSynthesisVoice);
             let voices: *mut Object = msg_send![voice_cls, speechVoices];
             if voices.is_null() {
