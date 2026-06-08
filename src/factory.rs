@@ -3,9 +3,6 @@
 use crate::engine::TtsEngine;
 use crate::types::EngineDescriptor;
 
-#[cfg(feature = "avsynth")]
-use std::panic::catch_unwind;
-
 // The unused-import warning is a false positive — TtsEngine is a trait used as a dyn bound.
 #[cfg(feature = "cloud")]
 use crate::cloud_engine;
@@ -30,9 +27,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
         "system" => Some(Box::new(SystemEngine::new())),
 
         #[cfg(feature = "avsynth")]
-        "avsynth" => catch_unwind(AvSynthEngine::new)
-            .ok()
-            .map(|e| Box::new(e) as Box<dyn TtsEngine>),
+        "avsynth" => Some(Box::new(AvSynthEngine::new())),
 
         #[cfg(feature = "sapi")]
         "sapi" => Some(Box::new(SapiEngine::new())),
