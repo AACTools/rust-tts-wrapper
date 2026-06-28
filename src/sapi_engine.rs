@@ -27,23 +27,27 @@ impl SapiEngine {
 
     unsafe fn create_voice() -> Option<ISpVoice> {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().ok()?;
-        CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok()
+        CoCreateInstance::<_, ISpVoice>(&SpVoice, None, CLSCTX_ALL).ok()
+    }
+
+    // windows-rs does not expose the sphelper.h `SpEnumTokens` inline helper, so
+    // enumerate the voice category tokens directly through the COM interface.
+    unsafe fn enum_voice_tokens() -> Result<IEnumSpObjectTokens> {
+        let category: ISpObjectTokenCategory =
+            CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
+        category.SetId(SPCAT_VOICES, false)?;
+        category.EnumTokens(PCWSTR::null(), PCWSTR::null())
     }
 
     unsafe fn find_voice_by_id(voice_id: &str) -> Option<ISpObjectToken> {
-        let target = HSTRING::from(voice_id);
-        let enum_tokens = SpEnumTokens(
-            &HSTRING::from("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices"),
-            None,
-            None,
-        )
-        .ok()?;
+        let enum_tokens = Self::enum_voice_tokens().ok()?;
 
-        let count = unsafe { enum_tokens.GetCount().ok()? } as usize;
+        let mut count = 0u32;
+        enum_tokens.GetCount(&mut count).ok()?;
         for i in 0..count {
-            if let Ok(token) = enum_tokens.Item(i as u32) {
+            if let Ok(token) = enum_tokens.Item(i) {
                 if let Ok(id) = token.GetId() {
-                    if id == target {
+                    if id.to_string().map(|s| s == voice_id).unwrap_or(false) {
                         return Some(token);
                     }
                 }
@@ -108,10 +112,10 @@ impl TtsEngine for SapiEngine {
                 );
                 let wrapped = format!("{pitch_str}{text}");
                 let wtext = HSTRING::from(&wrapped);
-                let _ = sp_voice.Speak(&wtext, SPEAK_FLAGS(0x1 | 0x8), None);
+                let _ = sp_voice.Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None);
             } else {
                 let wtext = HSTRING::from(text);
-                let _ = sp_voice.Speak(&wtext, SPEAK_FLAGS(0x1), None);
+                let _ = sp_voice.Speak(&wtext, SPF_ASYNC.0 as u32, None);
             }
         }
 
@@ -146,7 +150,11 @@ impl TtsEngine for SapiEngine {
         let guard = self.voice.lock().unwrap();
         if let Some(sp_voice) = guard.as_ref() {
             unsafe {
-                let _ = sp_voice.Speak(&HSTRING::new(), SPEAK_FLAGS(0x1 | 0x2), None);
+                let _ = sp_voice.Speak(
+                    &HSTRING::new(),
+                    (SPF_ASYNC.0 | SPF_PURGEBEFORESPEAK.0) as u32,
+                    None,
+                );
             }
         }
         Ok(())
@@ -174,43 +182,39 @@ impl TtsEngine for SapiEngine {
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         let tokens = unsafe {
-            SpEnumTokens(
-                &HSTRING::from("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices"),
-                None,
-                None,
-            )
-            .map_err(|e| TtsError(format!("Failed to enumerate SAPI voices: {e}")))?
+            Self::enum_voice_tokens()
+                .map_err(|e| TtsError(format!("Failed to enumerate SAPI voices: {e}")))?
         };
 
-        let count = unsafe { tokens.GetCount() }
-            .map_err(|e| TtsError(format!("Failed to get voice count: {e}")))?
-            as usize;
+        let mut count = 0u32;
+        unsafe { tokens.GetCount(&mut count) }
+            .map_err(|e| TtsError(format!("Failed to get voice count: {e}")))?;
+        let count = count as usize;
 
         let mut voices = Vec::with_capacity(count);
         for i in 0..count {
             if let Ok(token) = unsafe { tokens.Item(i as u32) } {
-                let id = unsafe { token.GetId() }
-                    .map(|h| h.to_string_lossy())
+                let id = unsafe { token.GetId().map(|h| h.to_hstring().to_string_lossy()) }
                     .unwrap_or_default();
 
                 let name = unsafe {
                     token
-                        .GetStringValue(&HSTRING::from("Name"))
-                        .map(|h| h.to_string_lossy())
+                        .GetStringValue(windows::core::w!("Name"))
+                        .map(|h| h.to_hstring().to_string_lossy())
                         .unwrap_or_else(|_| id.clone())
                 };
 
                 let lang = unsafe {
                     token
-                        .GetStringValue(&HSTRING::from("Language"))
-                        .map(|h| h.to_string_lossy())
+                        .GetStringValue(windows::core::w!("Language"))
+                        .map(|h| h.to_hstring().to_string_lossy())
                         .unwrap_or_else(|_| "en-US".into())
                 };
 
                 let gender_str = unsafe {
                     token
-                        .GetStringValue(&HSTRING::from("Gender"))
-                        .map(|h| h.to_string_lossy())
+                        .GetStringValue(windows::core::w!("Gender"))
+                        .map(|h| h.to_hstring().to_string_lossy())
                         .unwrap_or_default()
                 };
 
