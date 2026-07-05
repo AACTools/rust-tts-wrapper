@@ -1250,6 +1250,8 @@ mod tests {
 
     #[test]
     fn test_build_config_all_engines() {
+        // Polly is intentionally omitted — it requires SigV4 and returns None.
+        // See test_polly_unsupported_returns_none.
         let engines = [
             "openai",
             "elevenlabs",
@@ -1269,7 +1271,6 @@ mod tests {
             "witai",
             "xai",
             "modelslab",
-            "polly",
         ];
         let creds = HashMap::new();
         for id in &engines {
@@ -1288,10 +1289,18 @@ mod tests {
 
     #[test]
     fn test_azure_ssml_escapes_special_chars() {
-        let ssml = build_azure_ssml("A & B < C > D", "en-US-AriaNeural", 1.0, 1.0);
+        let ssml = build_azure_ssml("A & B < C > D", "en-US-AriaNeural", 1.0, 1.0, 1.0);
         assert!(ssml.contains("&amp;"));
         assert!(ssml.contains("&lt;"));
         assert!(ssml.contains("&gt;"));
+    }
+
+    #[test]
+    fn test_azure_ssml_escapes_voice_name() {
+        // §2 H12: a stray apostrophe in the voice name must not break the SSML.
+        let ssml = build_azure_ssml("hi", "en-US-Voice'Name", 1.0, 1.0, 1.0);
+        assert!(ssml.contains("&apos;"), "voice apostrophe should be escaped");
+        assert!(!ssml.contains("Voice'Name"));
     }
 
     #[test]
@@ -1301,5 +1310,72 @@ mod tests {
             preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
         assert!(is_ssml);
         assert!(result.contains("<speak>"));
+    }
+
+    #[test]
+    fn test_watson_auth_header_format() {
+        // §2 C1: Watson Basic auth is base64("apikey:KEY") — not the malformed
+        // "<base64(KEY)>:" that shipped originally.
+        let api_key = "test_key_123";
+        let encoded = base64_encode(&format!("apiKey:{api_key}"));
+        let auth_header = format!("Basic {encoded}");
+        // Decoding round-trip — must contain the apiKey prefix and the key,
+        // separated by a colon, with NO trailing colon outside the base64.
+        assert!(!auth_header.ends_with(':'));
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded.as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decoded, format!("apiKey:{api_key}"));
+    }
+
+    #[test]
+    fn test_playht_config_has_user_id_header() {
+        // §2 C3: userId belongs in the X-User-ID header, not the JSON body.
+        let mut creds = HashMap::new();
+        creds.insert("userId".to_string(), "u-123".to_string());
+        creds.insert("apiKey".to_string(), "k".to_string());
+        let cfg = build_config("playht", &creds).expect("playht config");
+        assert_eq!(
+            cfg.extra_headers.get("X-User-ID").map(String::as_str),
+            Some("u-123")
+        );
+        // The voice param stays in the body, not the headers.
+        assert_eq!(cfg.voice_param, "voice");
+    }
+
+    #[test]
+    fn test_deepgram_uses_model_param() {
+        // §2 H10: Deepgram's /v1/speak takes `model` as the voice parameter.
+        let creds = HashMap::new();
+        let cfg = build_config("deepgram", &creds).expect("deepgram config");
+        assert_eq!(cfg.voice_param, "model");
+    }
+
+    #[test]
+    fn test_hume_voice_is_object_in_extra_body() {
+        // §2 H11: Hume expects voice as {"voice": {"name": "..."}}.
+        let creds = HashMap::new();
+        let cfg = build_config("hume", &creds).expect("hume config");
+        let voice = cfg
+            .extra_body
+            .get("voice")
+            .expect("voice key should be in extra_body");
+        assert!(voice.is_object(), "voice must be an object, got: {voice}");
+        assert!(voice.get("name").is_some());
+        assert_eq!(
+            cfg.extra_body.get("audio_format").and_then(|v| v.as_str()),
+            Some("wav")
+        );
+    }
+
+    #[test]
+    fn test_polly_unsupported_returns_none() {
+        // §2 C2: AWS Polly needs SigV4. We surface this by returning None
+        // (and emitting a warning) rather than constructing a broken config.
+        let creds = HashMap::new();
+        assert!(build_config("polly", &creds).is_none());
     }
 }

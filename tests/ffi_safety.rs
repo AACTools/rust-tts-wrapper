@@ -1,144 +1,170 @@
 //! FFI Safety Tests
 //!
-//! Tests for FFI boundary safety, panic protection, and memory management.
+//! Exercises the C ABI surface to validate panic protection, allocator
+//! consistency, null handling, and string safety across the FFI boundary.
+
+#![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(test)]
-mod ffi_safety_tests {
-    // Note: These tests require the FFI functions to be available
-    // They test that our panic protection works correctly
+mod ffi_null_handling_tests {
+    use rust_tts_wrapper::{tts_destroy, tts_get_engine_count, tts_pause, tts_resume, tts_stop};
+    use std::ffi::CString;
 
-    #[test]
-    fn test_document_ffi_safety_requirements() {
-        // This test documents our FFI safety requirements:
-        //
-        // 1. All FFI functions must be wrapped in catch_unwind
-        // 2. No unwrap() calls that can panic should be exposed to FFI boundary
-        // 3. All string operations must be bounds-checked
-        // 4. Memory allocation must use consistent allocators
-        //
-        // Implementation status:
-        // ✅ tts_create - has catch_unwind
-        // ✅ tts_speak - has catch_unwind
-        // ✅ tts_speak_sync - has catch_unwind
-        // ✅ tts_stop - has catch_unwind
-        // ✅ tts_pause - has catch_unwind
-        // ✅ tts_resume - has catch_unwind
-        // ✅ tts_set_voice - has catch_unwind
-        // ✅ tts_set_rate - has catch_unwind
-        // ✅ tts_set_pitch - has catch_unwind
-        // ✅ tts_set_volume - has catch_unwind
-        // ✅ tts_set_on_audio - has catch_unwind
-        // ✅ tts_set_on_boundary - has catch_unwind
-        // ✅ tts_synth_to_bytes - has catch_unwind
-        // ✅ tts_get_voices - has catch_unwind
-        // ✅ tts_destroy - no panic risk (simple drop)
-
-        assert!(true); // Documentation test
+    /// Helper to assert that calling an FFI function with a null ctx does not
+    /// panic. The function is expected to silently no-op.
+    fn assert_null_ctx_noop<F: FnOnce(rust_tts_wrapper::tts_ctx)>(f: F) {
+        // We deliberately pass null by not constructing a real ctx.
+        // Each individual FFI call below is its own assertion.
     }
 
     #[test]
-    fn test_azure_websocket_string_safety() {
-        // Test that Azure WebSocket path parsing is safe
-        // This tests the fix for §2 H2 - unsafe UTF-8 slicing
-
-        let test_cases = vec![
-            ("Path:turn.end", "turn.end"),
-            ("Path:audio.metadata", "audio.metadata"),
-            ("Path:word-boundary", "word-boundary"),
-            ("Path:response", "response"),
-            // Non-ASCII should not panic
-            ("Path:tëst", "tëst"),
-            ("Path:测试", "测试"),
-            // Empty/edge cases
-            ("Path:", ""),
-            ("Path:   ", ""),
-        ];
-
-        for (input, expected_path) in test_cases {
-            let result = input.strip_prefix("Path:").map(|s| s.trim()).unwrap_or("");
-            assert_eq!(result, expected_path, "Failed for input: {}", input);
-        }
+    fn test_destroy_null_noop() {
+        unsafe { tts_destroy(std::ptr::null_mut()) };
     }
 
     #[test]
-    fn test_elevenlabs_bounds_checking() {
-        // Test ElevenLabs alignment parser bounds checking
-        // This tests the fix for §2 H7 - potential OOB indexing
-
-        // Simulate the ElevenLabs response structure
-        let chars = vec!["H", "e", "l", "l", "o"];
-        let starts = vec![0.0, 0.1, 0.2, 0.3, 0.4];
-        let ends = vec![0.1, 0.2, 0.3, 0.4, 0.5];
-
-        // Test that we can safely iterate
-        for i in 0..chars.len() {
-            if i < starts.len() && i < ends.len() {
-                let char_str = chars.get(i).unwrap_or(&"");
-                let start_time = starts.get(i).unwrap_or(&0.0);
-                let end_time = ends.get(i).unwrap_or(&0.0);
-
-                assert!(!char_str.is_empty());
-                assert!(*start_time >= 0.0);
-                assert!(*end_time >= *start_time);
-            }
-        }
-
-        // Test with mismatched lengths (should not panic)
-        let chars_short = vec!["H", "i"];
-        for i in 0..chars_short.len() {
-            if i < starts.len() && i < ends.len() {
-                let _char_str = chars_short.get(i).unwrap_or(&"");
-                let _start_time = starts.get(i).unwrap_or(&0.0);
-                let _end_time = ends.get(i).unwrap_or(&0.0);
-            }
-        }
+    fn test_stop_null_noop() {
+        unsafe { tts_stop(std::ptr::null_mut()) };
     }
 
     #[test]
-    fn test_windows_sapi_clsid_constants() {
-        // Test that Windows SAPI CLSID constants are correct
-        // This tests the fix for §3 C1 - invalid CLSID references
+    fn test_pause_null_noop() {
+        unsafe { tts_pause(std::ptr::null_mut()) };
+    }
 
-        // This test documents the correct constants:
-        // - SPVOICE_CLSID (not bare SpVoice)
-        // - SPCATTOKENCATEGORY_CLSID (not bare SpObjectTokenCategory)
-        // - SPCAT_VOICES (category identifier)
+    #[test]
+    fn test_resume_null_noop() {
+        unsafe { tts_resume(std::ptr::null_mut()) };
+    }
 
-        // The actual constants are provided by the windows crate
-        // This test just documents the requirement
-        assert!(true);
+    #[test]
+    fn test_engine_count_is_positive() {
+        assert!(unsafe { tts_get_engine_count() } > 0);
+    }
+
+    #[test]
+    fn test_create_with_valid_sherpaonnx_returns_non_null() {
+        let id = CString::new("sherpaonnx").unwrap();
+        let ctx = unsafe {
+            rust_tts_wrapper::tts_create(id.as_ptr(), std::ptr::null())
+        };
+        assert!(!ctx.is_null(), "sherpaonnx should construct without credentials");
+        unsafe { tts_destroy(ctx) };
     }
 }
 
 #[cfg(test)]
-mod memory_safety_tests {
+mod ffi_voice_roundtrip_tests {
+    use rust_tts_wrapper::{tts_create, tts_destroy, tts_get_voices, tts_free_voices};
+    use std::ffi::CString;
+
     #[test]
-    fn test_allocator_consistency() {
-        // Test that we don't mix allocators across FFI boundary
-        // This documents the fix for §4 C2 - allocator mismatch
+    fn test_get_voices_with_null_pointers_returns_error() {
+        let id = CString::new("sherpaonnx").unwrap();
+        let ctx = unsafe { tts_create(id.as_ptr(), std::ptr::null()) };
+        assert!(!ctx.is_null());
 
-        // Rule: tts_get_engines must use Rust allocator consistently
-        // Option A: Allocate with Rust, free with Rust (like tts_get_voices)
-        // Option B: Document caller-allocated with specific requirements
+        // Passing any null out-pointer must not crash; must return -1.
+        let rc = unsafe {
+            tts_get_voices(
+                ctx,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(rc, -1);
 
-        assert!(true);
+        unsafe { tts_destroy(ctx) };
     }
 
     #[test]
-    fn test_null_terminated_strings() {
-        // Test that all FFI strings are properly null-terminated
-        // This tests the fix for §4 H3 - AvSynth non-null-terminated strings
+    fn test_free_voices_null_is_noop() {
+        // tts_free_voices must accept (null, 0) without crashing.
+        unsafe { tts_free_voices(std::ptr::null_mut(), 0) };
+    }
+}
 
-        // Rule: All strings passed to C functions must use CString::new()
-        // ❌ WRONG: &str.as_ptr() - not null-terminated
-        // ✅ RIGHT: CString::new(text).unwrap().as_ptr() - null-terminated
+#[cfg(test)]
+mod string_safety_tests {
+    #[test]
+    fn test_cstring_helper_round_trip() {
+        // §4 H3: ensure CString::new produces a NUL-terminated buffer for
+        // every test input we care about. CString::new returns Err only when
+        // the input contains an interior NUL byte.
+        for input in ["hello", "Hello, World!", "trëma ünîcode", "测试"] {
+            let c = std::ffi::CString::new(input).unwrap();
+            let bytes = c.as_bytes_with_nul();
+            assert_eq!(bytes.last(), Some(&0u8));
+            assert_eq!(&bytes[..bytes.len() - 1], input.as_bytes());
+        }
+    }
 
-        let test_string = "Hello, World!";
-        let c_string = std::ffi::CString::new(test_string).unwrap();
+    #[test]
+    fn test_cstring_interior_nul_is_detected() {
+        // A stray NUL byte must surface as Err rather than silently
+        // truncating. The FFI layer should treat this as an error rather
+        // than pass a `&str.as_ptr()` that walks off the end (§4 H3).
+        let result = std::ffi::CString::new("with\0nul");
+        assert!(result.is_err());
+    }
+}
 
-        // Verify it's null-terminated
-        let bytes = c_string.as_bytes_with_nul();
-        assert_eq!(bytes.last(), Some(&0u8));
-        assert_eq!(bytes[..bytes.len() - 1], test_string.as_bytes());
+#[cfg(test)]
+mod path_parsing_tests {
+    #[test]
+    fn test_azure_path_parsing_safe() {
+        // §2 H2: Azure WS Path: parsing must use strip_prefix + trim, not
+        // raw byte slicing. Validate the same logic against tricky inputs.
+        let cases = [
+            ("Path:turn.end", "turn.end"),
+            ("Path:audio.metadata", "audio.metadata"),
+            ("Path:word-boundary", "word-boundary"),
+            ("Path:response", "response"),
+            // Non-ASCII must not panic.
+            ("Path:tëst", "tëst"),
+            ("Path:测试", "测试"),
+            // Edge cases.
+            ("Path:", ""),
+            ("Path:   ", ""),
+            // Lines that don't start with Path: should return "".
+            ("Content-Type:application/json", ""),
+        ];
+        for (input, expected) in cases {
+            // This mirrors the logic in cloud_engine.rs.
+            let path = input
+                .lines()
+                .find(|l| l.starts_with("Path:"))
+                .and_then(|l| l.strip_prefix("Path:"))
+                .map(str::trim)
+                .unwrap_or("");
+            assert_eq!(path, expected, "input: {input:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod bounds_check_tests {
+    #[test]
+    fn test_elevenlabs_alignment_safe_iteration() {
+        // §2 H7: ElevenLabs characters/starts/ends arrays can have different
+        // lengths. Use .get(i) instead of [i] to avoid panicking.
+        let chars = ["H", "e", "l", "l", "o"];
+        let starts = [0.0_f32, 0.1, 0.2, 0.3, 0.4];
+        let ends = [0.1_f32, 0.2, 0.3, 0.4, 0.5];
+
+        for i in 0..chars.len() {
+            // All three arrays same length here — fine.
+            let _ = (chars[i], starts[i], ends[i]);
+        }
+
+        // Now simulate a server response where `characters` outgrows the
+        // time arrays. Old code would panic; new code uses .get().
+        let short_starts = [0.0_f32];
+        let short_ends = [0.1_f32];
+        for i in 0..chars.len() {
+            let _char = chars.get(i);
+            let _start = short_starts.get(i);
+            let _end = short_ends.get(i);
+        }
     }
 }

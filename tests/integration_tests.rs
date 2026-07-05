@@ -1,174 +1,166 @@
 //! Integration tests for critical fixes
 //!
-//! Tests that validate our Critical issue fixes actually work.
+//! Tests that validate fixes for the Critical/High issues identified in
+//! ISSUES.md. Uses the public API surface so the tests exercise the same
+//! code paths as external consumers.
 
 #[cfg(test)]
-mod critical_fixes_tests {
-    #[test]
-    fn test_ffi_panic_protection() {
-        // Test that FFI functions are protected against panics
-        // This validates §4 C1 fix
+mod factory_tests {
+    use rust_tts_wrapper::factory::{create_engine, engine_count, engine_list};
 
-        // All FFI functions should use catch_unwind
-        // No panics should cross the FFI boundary
-        assert!(true);
+    #[test]
+    fn test_engine_list_contains_builtins() {
+        let list = engine_list();
+        let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
+        // sherpaonnx + cloud + (platform native) are always present in the
+        // default feature set. We don't pin an exact count because the list
+        // varies by platform (avsynth on macOS, sapi on Windows).
+        assert!(
+            ids.contains(&"sherpaonnx"),
+            "missing sherpaonnx; got {ids:?}"
+        );
+        // Cloud engines should always be present in the default build.
+        assert!(ids.contains(&"openai"), "missing openai; got {ids:?}");
+        assert!(ids.contains(&"azure"), "missing azure; got {ids:?}");
     }
 
     #[test]
-    fn test_memory_allocator_consistency() {
-        // Test that memory allocation is consistent
-        // This validates §4 C2 fix
-
-        // tts_get_engines should allocate with Rust
-        // tts_free_engines should free with Rust
-        // No mixed allocators
-        assert!(true);
+    fn test_engine_count_matches_list_len() {
+        assert_eq!(engine_count(), engine_list().len());
     }
 
     #[test]
-    fn test_error_reporting_per_context() {
-        // Test that error reporting works per-context
-        // This validates §4 C3 fix
+    fn test_create_unknown_engine_returns_none() {
+        // §9 H1: should return None with a helpful warning rather than panic.
+        assert!(create_engine("does-not-exist", "").is_none());
+    }
 
-        // tts_get_last_error should return per-context errors
-        // Not stale global errors
-        assert!(true);
+    #[test]
+    fn test_create_sherpaonnx_engine_succeeds() {
+        // §1 H3: with no modelId set, the engine still constructs (it errors
+        // at speak-time, not construction-time).
+        let engine = create_engine("sherpaonnx", "");
+        assert!(engine.is_some(), "sherpaonnx should construct");
+    }
+
+    #[test]
+    fn test_create_sherpaonnx_engine_reads_num_threads() {
+        // §1 H4: numThreads should be parsed from credentials without panicking.
+        let creds = r#"{"numThreads":"4","provider":"cpu"}"#;
+        let engine = create_engine("sherpaonnx", creds);
+        assert!(engine.is_some());
     }
 }
 
-#[cfg(test)]
-mod cloud_auth_tests {
-    #[test]
-    fn test_watson_auth_format() {
-        // Test Watson Basic auth format
-        // This validates §2 C1 fix
-
-        // Format: Basic <base64("apikey:YOUR_KEY")>
-        // NOT: Basic <base64("YOUR_KEY")>: (wrong)
-
-        let api_key = "test_key_123";
-        let expected_auth = format!("Basic {}", base64::encode(&format!("apikey:{}", api_key)));
-
-        assert!(!expected_auth.ends_with(':')); // should not end with colon
-        assert!(expected_auth.contains("apikey:test"));
-    }
+#[cfg(all(test, feature = "cloud"))]
+mod cloud_engine_smoke_tests {
+    use rust_tts_wrapper::factory::create_engine;
 
     #[test]
-    fn test_playht_headers() {
-        // Test PlayHT header placement
-        // This validates §2 C3 fix
-
-        // userId should be in X-User-ID header
-        // NOT in JSON body
-        assert!(true);
-    }
-
-    #[test]
-    fn test_deepgram_api_shape() {
-        // Test Deepgram API shape
-        // This validates §2 H10 fix
-
-        // Should use "model" parameter, not "voice"
-        let correct_params = r#"{"model": "aura-asteria-en", "text": "..."}"#;
-        let wrong_params = r#"{"voice": "aura-asteria-en", "text": "..."}"#;
-
-        assert!(correct_params.contains(r#""model":"#));
-        assert!(!wrong_params.contains(r#""model":"#));
-    }
-
-    #[test]
-    fn test_hume_api_shape() {
-        // Test Hume API shape
-        // This validates §2 H11 fix
-
-        // voice should be object: {"voice": {"name": "..."}}
-        let correct_params = r#"{"voice": {"name": "..."}}"#;
-        let wrong_params = r#"{"voice": "..."}"#;
-
-        assert!(correct_params.contains(r#"{"name":"#));
-        assert!(!wrong_params.contains(r#"{"name":"#));
-    }
-}
-
-#[cfg(test)]
-mod string_safety_tests {
-    #[test]
-    fn test_azure_websocket_safe_parsing() {
-        // Test Azure WebSocket safe parsing
-        // This validates §2 H2 fix
-
-        let test_cases = vec![
-            ("Path:turn.end", "turn.end"),
-            ("Path:tëst", "tëst"),       // non-ASCII
-            ("Path:测试", "测试"),         // Chinese
-        ];
-
-        for (input, expected) in test_cases {
-            let result = input.strip_prefix("Path:").map(|s| s.trim()).unwrap_or("");
-            assert_eq!(result, expected);
+    fn test_cloud_engines_construct_without_panicking() {
+        // All cloud engines should be constructible with dummy credentials.
+        // We don't speak — just ensure the config builds.
+        for id in [
+            "openai",
+            "elevenlabs",
+            "azure",
+            "google",
+            "cartesia",
+            "deepgram",
+            "playht",
+            "fishaudio",
+            "hume",
+            "mistral",
+            "murf",
+            "resemble",
+            "unrealspeech",
+            "upliftai",
+            "watson",
+            "witai",
+            "xai",
+            "modelslab",
+        ] {
+            let creds = match id {
+                "watson" => r#"{"apiKey":"k","region":"us-east","instanceId":"i"}"#,
+                "playht" => r#"{"apiKey":"k","userId":"u"}"#,
+                _ => r#"{"apiKey":"k"}"#,
+            };
+            assert!(
+                create_engine(id, creds).is_some(),
+                "failed to construct cloud engine '{id}'"
+            );
         }
     }
 
     #[test]
-    fn test_elevenlabs_bounds_checking() {
-        // Test ElevenLands bounds checking
-        // This validates §2 H7 fix
+    fn test_polly_is_not_constructable() {
+        // §2 C2: Polly needs SigV4 — engine creation must surface as None.
+        let creds = r#"{"accessKeyId":"a","secretAccessKey":"s","region":"us-east-1"}"#;
+        assert!(create_engine("polly", creds).is_none());
+    }
+}
 
-        let chars = vec!["H", "e", "l", "l", "o"];
-        let starts = vec![0.0, 0.1, 0.2, 0.3, 0.4];
-        let ends = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+#[cfg(test)]
+mod engine_helpers_tests {
+    use rust_tts_wrapper::engine::estimate_word_boundaries;
 
-        // Should not panic with .get(i) instead of [i]
-        for i in 0..chars.len() {
-            let _char = chars.get(i);
-            let _start = starts.get(i);
-            let _end = ends.get(i);
-        }
+    #[test]
+    fn test_estimate_empty_input() {
+        assert!(estimate_word_boundaries("").is_empty());
+        assert!(estimate_word_boundaries("   ").is_empty());
+    }
 
-        // Test with mismatched arrays (should not panic)
-        let short_vec = vec![1.0];
-        for i in 0..short_vec.len() {
-            let _val = short_vec.get(i);
+    #[test]
+    fn test_estimate_single_word() {
+        let b = estimate_word_boundaries("Hello");
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].text, "Hello");
+        assert_eq!(b[0].offset, 0);
+        assert!(b[0].duration > 0);
+    }
+
+    #[test]
+    fn test_estimate_offsets_monotonic() {
+        let b = estimate_word_boundaries("one two three four");
+        assert_eq!(b.len(), 4);
+        for w in b.windows(2) {
+            assert!(w[0].offset < w[1].offset);
+            // Boundary text must be one of the words.
+            assert!(!w[0].text.is_empty());
         }
     }
 }
 
 #[cfg(test)]
-mod windows_sapi_tests {
+mod ffi_boundary_tests {
+    // The FFI surface is exercised through the C entry points in lib.rs.
+    // Since integration tests share the crate's public API, we can call the
+    // extern "C" fns directly and assert they behave at the boundary.
+
+    use rust_tts_wrapper::{tts_create, tts_destroy, tts_get_engine_count};
+
     #[test]
-    fn test_sapi_clsid_constants() {
-        // Test Windows SAPI CLSID constants
-        // This validates §3 C1 fix
-
-        // Should use SPVOICE_CLSID, not bare SpVoice
-        // Should use SPCATTOKENCATEGORY_CLSID, not bare SpObjectTokenCategory
-        assert!(true);
-    }
-}
-
-#[cfg(test)]
-mod sherpaonnx_tests {
-    #[test]
-    fn test_model_type_coverage() {
-        // Test that model types are properly covered
-        // This validates §1 C1 fix
-
-        // Should support:
-        // - Kokoro models (~3)
-        // - VITS models (~184)
-        // - Matcha models (~4)
-        // Total: ~191 models
-
-        assert!(true);
+    fn test_ffi_null_engine_id_does_not_panic() {
+        // §4 C1: passing null must be caught by catch_unwind and return null.
+        let ptr = unsafe { tts_create(std::ptr::null(), std::ptr::null()) };
+        assert!(ptr.is_null());
     }
 
     #[test]
-    fn test_rate_single_application() {
-        // Test that rate is applied only once
-        // This validates §1 H1 fix
+    fn test_ffi_create_unknown_engine_returns_null() {
+        let id = std::ffi::CString::new("definitely-not-an-engine").unwrap();
+        let ptr = unsafe { tts_create(id.as_ptr(), std::ptr::null()) };
+        assert!(ptr.is_null());
+    }
 
-        // Rate should be in GenerationConfig.speed only
-        // NOT in both length_scale AND speed
-        assert!(true);
+    #[test]
+    fn test_ffi_destroy_null_is_noop() {
+        // §4 M2: tts_destroy accepts null as a no-op without panicking.
+        unsafe { tts_destroy(std::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn test_ffi_engine_count_positive() {
+        assert!(unsafe { tts_get_engine_count() } > 0);
     }
 }
