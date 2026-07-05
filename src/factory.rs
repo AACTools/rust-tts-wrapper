@@ -22,24 +22,99 @@ use crate::system_engine::SystemEngine;
 #[must_use]
 #[allow(unused_variables)]
 pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>> {
+    // Detect engines that exist in the full catalogue but were compiled out
+    // by disabled features, so callers get a useful error rather than a
+    // generic "unknown engine" (§9 H1). Only emit these messages when the
+    // caller actually asked for one of the gated engines.
     match engine_id {
-        #[cfg(feature = "system")]
-        "system" => Some(Box::new(SystemEngine::new())),
+        "system" => {
+            #[cfg(feature = "system")]
+            {
+                return Some(Box::new(SystemEngine::new()));
+            }
+            #[cfg(not(feature = "system"))]
+            {
+                eprintln!(
+                    "Engine 'system' is not enabled in this build. Rebuild with --features system."
+                );
+                return None;
+            }
+        }
+        "avsynth" => {
+            #[cfg(all(feature = "avsynth", target_os = "macos"))]
+            {
+                return Some(Box::new(AvSynthEngine::new()));
+            }
+            #[cfg(not(all(feature = "avsynth", target_os = "macos")))]
+            {
+                eprintln!(
+                    "Engine 'avsynth' requires the 'avsynth' feature and macOS. \
+                     Current build does not satisfy these conditions."
+                );
+                return None;
+            }
+        }
+        "sapi" => {
+            #[cfg(all(feature = "sapi", target_os = "windows"))]
+            {
+                return Some(Box::new(SapiEngine::new()));
+            }
+            #[cfg(not(all(feature = "sapi", target_os = "windows")))]
+            {
+                eprintln!(
+                    "Engine 'sapi' requires the 'sapi' feature and Windows. \
+                     Current build does not satisfy these conditions."
+                );
+                return None;
+            }
+        }
+        "sherpaonnx" => {
+            #[cfg(feature = "sherpaonnx")]
+            {
+                return Some(Box::new(SherpaOnnxEngine::new(credentials_json)));
+            }
+            #[cfg(not(feature = "sherpaonnx"))]
+            {
+                eprintln!(
+                    "Engine 'sherpaonnx' is not enabled in this build. \
+                     Rebuild with --features sherpaonnx."
+                );
+                return None;
+            }
+        }
+        _ => {}
+    }
 
-        #[cfg(all(feature = "avsynth", target_os = "macos"))]
-        "avsynth" => Some(Box::new(AvSynthEngine::new())),
+    // Cloud catch-all. If the cloud feature is on we delegate; otherwise the
+    // engine id is unknown to this build.
+    #[cfg(feature = "cloud")]
+    {
+        let result = cloud_engine::create_cloud_engine(engine_id, credentials_json);
+        if result.is_none() {
+            eprintln!(
+                "Unknown engine '{engine_id}'. Available engines: {}",
+                engine_list()
+                    .iter()
+                    .map(|e| e.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        return result;
+    }
 
-        #[cfg(all(feature = "sapi", target_os = "windows"))]
-        "sapi" => Some(Box::new(SapiEngine::new())),
-
-        #[cfg(feature = "sherpaonnx")]
-        "sherpaonnx" => Some(Box::new(SherpaOnnxEngine::new(credentials_json))),
-
-        #[cfg(feature = "cloud")]
-        id => cloud_engine::create_cloud_engine(id, credentials_json),
-
-        #[cfg(not(feature = "cloud"))]
-        _ => None,
+    #[cfg(not(feature = "cloud"))]
+    {
+        eprintln!(
+            "Unknown engine '{engine_id}' (cloud feature is disabled; only \
+             built-in engines are available). Available engines: {}",
+            engine_list()
+                .iter()
+                .map(|e| e.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        None
     }
 }
 

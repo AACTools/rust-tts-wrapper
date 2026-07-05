@@ -113,7 +113,41 @@ impl TtsEngine for SystemEngine {
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
-        Ok(vec![])
+        let guard = self.conn.lock().unwrap();
+        let conn = guard
+            .as_ref()
+            .ok_or_else(|| TtsError("Speech dispatcher not connected".into()))?;
+
+        let spd_voices = conn
+            .list_synthesis_voices()
+            .map_err(|e| TtsError(format!("Failed to list speech-dispatcher voices: {e}")))?;
+
+        // speech-dispatcher doesn't expose gender; map to Unknown.
+        let voices = spd_voices
+            .into_iter()
+            .map(|v| {
+                let lang = v.language.clone();
+                let iso639 = lang
+                    .split(['-', '_'])
+                    .next()
+                    .unwrap_or(&lang)
+                    .to_string();
+                Voice {
+                    // Use the name as the id; speech-dispatcher identifies
+                    // voices by name when set_synthesis_voice_* is called.
+                    id: v.name.clone(),
+                    name: v.name,
+                    gender: crate::types::Gender::Unknown,
+                    provider: "system".to_string(),
+                    language_codes: vec![crate::types::LanguageCode {
+                        bcp47: lang.clone(),
+                        iso639_3: iso639,
+                        display: lang,
+                    }],
+                }
+            })
+            .collect();
+        Ok(voices)
     }
 
     fn engine_id(&self) -> &'static str {
