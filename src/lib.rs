@@ -66,11 +66,36 @@ pub struct tts_ctx {
     pitch: Mutex<f32>,
     volume: Mutex<f32>,
     last_error: Mutex<String>,
-    on_audio: Mutex<CAudioCb>,
-    on_audio_userdata: Mutex<*mut std::ffi::c_void>,
-    on_boundary: Mutex<CBoundaryCb>,
-    on_boundary_userdata: Mutex<*mut std::ffi::c_void>,
+    // Callback + userdata are bundled into a single Mutex each so a reader
+    // can never observe a new callback paired with stale userdata (or vice
+    // versa) — see §4 H2. The `Send` wrapper below lets us ship the raw
+    // pointer across threads safely because access is mediated by the Mutex.
+    on_audio: Mutex<AudioCallback>,
+    on_boundary: Mutex<BoundaryCallback>,
 }
+
+/// Bundled audio callback + userdata so updates are atomic (§4 H2).
+#[derive(Clone, Copy)]
+struct AudioCallback {
+    cb: CAudioCb,
+    userdata: *mut std::ffi::c_void,
+}
+
+/// Bundled boundary callback + userdata so updates are atomic (§4 H2).
+#[derive(Clone, Copy)]
+struct BoundaryCallback {
+    cb: CBoundaryCb,
+    userdata: *mut std::ffi::c_void,
+}
+
+// SAFETY: the raw userdata pointers are only dereferenced via the C callback
+// signatures, and access is serialised by the surrounding Mutex on each
+// `tts_ctx` field. The host is responsible for the userdata lifetime, which
+// is the standard FFI callback contract.
+unsafe impl Send for AudioCallback {}
+unsafe impl Sync for AudioCallback {}
+unsafe impl Send for BoundaryCallback {}
+unsafe impl Sync for BoundaryCallback {}
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
@@ -137,10 +162,14 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
             pitch: Mutex::new(1.0),
             volume: Mutex::new(1.0),
             last_error: Mutex::new(String::new()),
-            on_audio: Mutex::new(None),
-            on_audio_userdata: Mutex::new(ptr::null_mut()),
-            on_boundary: Mutex::new(None),
-            on_boundary_userdata: Mutex::new(ptr::null_mut()),
+            on_audio: Mutex::new(AudioCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_boundary: Mutex::new(BoundaryCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
         });
         Box::into_raw(ctx)
     } else {
@@ -151,17 +180,29 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
 
 /// Destroy a TTS context and free all associated resources.
 ///
+/// Attempts to stop any in-progress speech before dropping the engine so the
+/// underlying resources (speech-dispatcher connection, COM objects, etc.) get
+/// a chance to clean up — see §4 H4.
+///
 /// # Safety
 ///
 /// `ctx` must be a pointer previously returned by [`tts_create`],
 /// or null (no-op).
 #[no_mangle]
 pub extern "C" fn tts_destroy(ctx: *mut tts_ctx) {
-    if !ctx.is_null() {
-        unsafe {
-            drop(Box::from_raw(ctx));
-        }
+    if ctx.is_null() {
+        return;
     }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Safety: ctx is non-null and was produced by Box::into_raw above.
+        let boxed = unsafe { Box::from_raw(ctx) };
+        // Best-effort stop before drop. The engine's Drop impl is responsible
+        // for any additional cleanup (closing sockets, releasing COM refs).
+        if let Ok(engine) = boxed.engine.lock() {
+            let _ = engine.stop();
+        }
+        drop(boxed);
+    }));
 }
 
 /// Speak `text` asynchronously using the engine in `ctx`.
@@ -187,22 +228,21 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
         let pitch = *ctx_ref.pitch.lock().unwrap();
         let volume = *ctx_ref.volume.lock().unwrap();
 
-        let audio_cb = *ctx_ref.on_audio.lock().unwrap();
-        let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
-        let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
-        let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
+        // Snapshot callback + userdata atomically (§4 H2).
+        let audio = { *ctx_ref.on_audio.lock().unwrap() };
+        let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
 
-    let mut on_audio_closure: Option<BoxedAudioCb> = match audio_cb {
+    let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
         Some(cb) => Some(Box::new(move |bytes: &[u8]| {
-            cb(bytes.as_ptr(), bytes.len(), audio_userdata);
+            cb(bytes.as_ptr(), bytes.len(), audio.userdata);
         })),
         None => None,
     };
 
-    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary_cb {
+    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
         Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
             if let Ok(c_word) = CString::new(word) {
-                cb(c_word.as_ptr(), start, end, boundary_userdata);
+                cb(c_word.as_ptr(), start, end, boundary.userdata);
             }
         })),
         None => None,
@@ -253,22 +293,20 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let pitch = *ctx_ref.pitch.lock().unwrap();
         let volume = *ctx_ref.volume.lock().unwrap();
 
-        let audio_cb = *ctx_ref.on_audio.lock().unwrap();
-        let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
-        let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
-        let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
+        let audio = { *ctx_ref.on_audio.lock().unwrap() };
+        let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
 
-    let mut on_audio_closure: Option<BoxedAudioCb> = match audio_cb {
+    let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
         Some(cb) => Some(Box::new(move |bytes: &[u8]| {
-            cb(bytes.as_ptr(), bytes.len(), audio_userdata);
+            cb(bytes.as_ptr(), bytes.len(), audio.userdata);
         })),
         None => None,
     };
 
-    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary_cb {
+    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
         Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
             if let Ok(c_word) = CString::new(word) {
-                cb(c_word.as_ptr(), start, end, boundary_userdata);
+                cb(c_word.as_ptr(), start, end, boundary.userdata);
             }
         })),
         None => None,
@@ -500,8 +538,9 @@ pub extern "C" fn tts_set_on_audio(
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_audio.lock().unwrap() = cb;
-        *ctx_ref.on_audio_userdata.lock().unwrap() = userdata;
+        // Single critical section: a reader can never observe a new cb
+        // paired with stale userdata (§4 H2).
+        *ctx_ref.on_audio.lock().unwrap() = AudioCallback { cb, userdata };
     }));
 }
 
@@ -520,8 +559,7 @@ pub extern "C" fn tts_set_on_boundary(
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_boundary.lock().unwrap() = cb;
-        *ctx_ref.on_boundary_userdata.lock().unwrap() = userdata;
+        *ctx_ref.on_boundary.lock().unwrap() = BoundaryCallback { cb, userdata };
     }));
 }
 

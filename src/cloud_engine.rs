@@ -1039,7 +1039,11 @@ impl TtsEngine for CloudEngine {
                 .and_then(|v| v.as_array())
                 .map_or_else(|| Ok(vec![]), |arr| Ok(map_google_voices(arr))),
             _ => {
-                // Generic: try to parse as array of objects with id/name fields
+                // Generic: try to parse as array of objects with id/name fields.
+                // Handles both lowercase fields (ElevenLabs, Deepgram, etc.)
+                // and PascalCase fields (Polly DescribeVoices: VoiceId, Gender,
+                // LanguageCode) — §2 H9. Also handles ElevenLabs `labels` being
+                // an object rather than a string — §2 H8.
                 json.as_array().map_or_else(
                     || Ok(vec![]),
                     |arr| {
@@ -1048,24 +1052,75 @@ impl TtsEngine for CloudEngine {
                             .filter_map(|v| {
                                 let id = v
                                     .get("id")
-                                    .or(v.get("voice_id"))
-                                    .or(v.get("name"))?
+                                    .or_else(|| v.get("voice_id"))
+                                    .or_else(|| v.get("VoiceId"))
+                                    .or_else(|| v.get("name"))
+                                    .or_else(|| v.get("Name"))?
                                     .as_str()?;
+                                let name = v
+                                    .get("name")
+                                    .or_else(|| v.get("Name"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(id)
+                                    .to_string();
+
+                                // Gender resolution order. ElevenLabs stores
+                                // gender inside a `labels` object — handle that
+                                // explicitly (§2 H8).
+                                let gender_str = v
+                                    .get("gender")
+                                    .or_else(|| v.get("Gender"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        v.get("labels").and_then(|labels| {
+                                            // ElevenLabs: labels is an object.
+                                            if let Some(obj) = labels.as_object() {
+                                                obj.get("gender")?.as_str().map(str::to_string)
+                                            } else if let Some(s) = labels.as_str() {
+                                                Some(s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    })
+                                    .unwrap_or_default();
+
+                                // Language code resolution. Polly uses
+                                // LanguageCode; ElevenLabs uses labels.language;
+                                // others may use language or lang.
+                                let lang = v
+                                    .get("language_code")
+                                    .or_else(|| v.get("LanguageCode"))
+                                    .or_else(|| v.get("language"))
+                                    .or_else(|| v.get("lang"))
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .or_else(|| {
+                                        v.get("labels").and_then(|labels| {
+                                            labels
+                                                .as_object()
+                                                .and_then(|o| o.get("language")?.as_str().map(str::to_string))
+                                        })
+                                    })
+                                    .unwrap_or_default();
+
+                                let language_codes = if lang.is_empty() {
+                                    vec![]
+                                } else {
+                                    vec![crate::types::LanguageCode {
+                                        bcp47: lang.clone(),
+                                        iso639_3: lang.split(['-', '_']).next().unwrap_or(&lang).to_string(),
+                                        display: lang,
+                                    }]
+                                };
+
                                 Some(Voice {
                                     id: id.to_string(),
-                                    name: v
-                                        .get("name")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or(id)
-                                        .to_string(),
-                                    gender: normalize_gender(
-                                        v.get("gender")
-                                            .or(v.get("labels"))
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or(""),
-                                    ),
+                                    name,
+                                    gender: normalize_gender(&gender_str),
                                     provider: self.config.provider_id.clone(),
-                                    language_codes: vec![],
+                                    language_codes,
                                 })
                             })
                             .collect())
