@@ -11,6 +11,13 @@ use windows::{core::*, Win32::Media::Speech::*, Win32::System::Com::*};
 pub struct SapiEngine {
     voice: Mutex<Option<ISpVoice>>,
     voice_id: Mutex<Option<String>>,
+    // Cached voice token so we don't re-enumerate registry tokens on every
+    // speak call (§3 M2). `None` means "no explicit voice selected; use the
+    // SAPI default".
+    cached_token: Mutex<Option<ISpObjectToken>>,
+    // Whether *we* called CoInitializeEx and must balance it with
+    // CoUninitialize on Drop (§3 H4).
+    com_initialized: Mutex<bool>,
 }
 
 unsafe impl Send for SapiEngine {}
@@ -18,16 +25,24 @@ unsafe impl Sync for SapiEngine {}
 
 impl SapiEngine {
     pub fn new() -> Self {
-        let voice = unsafe { Self::create_voice() };
+        let (voice, com_initialized) = unsafe { Self::create_voice() };
         SapiEngine {
             voice: Mutex::new(voice),
             voice_id: Mutex::new(None),
+            cached_token: Mutex::new(None),
+            com_initialized: Mutex::new(com_initialized),
         }
     }
 
-    unsafe fn create_voice() -> Option<ISpVoice> {
-        CoInitializeEx(None, COINIT_MULTITHREADED).ok().ok()?;
-        CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok()
+    /// Create the ISpVoice. Returns `(voice, did_init_com)`.
+    unsafe fn create_voice() -> (Option<ISpVoice>, bool) {
+        // COINIT_MULTITHREADED is the standard apartment model for non-UI
+        // threads. We track whether *we* initialised COM so that Drop can
+        // balance the reference count (§3 H4).
+        let did_init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
+        let voice =
+            CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok();
+        (voice, did_init)
     }
 
     // windows-rs does not expose the sphelper.h `SpEnumTokens` inline helper, so
@@ -55,15 +70,42 @@ impl SapiEngine {
         }
         None
     }
+
+    /// Resolve the configured voice to a token, using the cache when possible
+    /// (§3 M2). Acquires the registry-enumerating path only on cache miss.
+    fn resolve_voice_token(&self, override_voice: Option<&str>) -> Option<ISpObjectToken> {
+        let requested = override_voice
+            .map(str::to_string)
+            .or_else(|| self.voice_id.lock().unwrap().clone());
+
+        let cached = self.cached_token.lock().unwrap();
+        if let (Some(token), None) = (cached.as_ref(), requested.as_ref()) {
+            return Some(token.clone());
+        }
+        drop(cached);
+
+        let requested = requested?;
+        // SAFETY: COM token enumeration; no borrowed references escape.
+        let token = unsafe { Self::find_voice_by_id(&requested)? };
+        *self.cached_token.lock().unwrap() = Some(token.clone());
+        Some(token)
+    }
 }
 
 fn rate_to_sapi(rate: f32) -> i32 {
     ((rate.clamp(0.1, 10.0) - 1.0) * 10.0).round() as i32
 }
 
-fn pitch_to_sapi(pitch: f32) -> u32 {
-    let val = ((pitch.clamp(0.1, 10.0) - 1.0) * 10.0).round() as i32;
-    val.unsigned_abs()
+/// Map a rate multiplier (1.0 = normal) to a percentage string suitable for
+/// SSML `<prosody pitch="+N%">`. Range: ±50% for rate 0.5–2.0.
+fn pitch_to_percent(pitch: f32) -> String {
+    let p = pitch.clamp(0.25, 4.0);
+    let pct = ((p - 1.0) * 100.0).round() as i32;
+    if pct >= 0 {
+        format!("+{pct}%")
+    } else {
+        format!("{pct}%")
+    }
 }
 
 fn volume_to_sapi(volume: f32) -> u16 {
@@ -87,36 +129,42 @@ impl TtsEngine for SapiEngine {
             .ok_or_else(|| TtsError("SAPI voice not initialized".into()))?;
 
         unsafe {
-            let voice_to_use = voice
-                .map(|v| v.to_string())
-                .or_else(|| self.voice_id.lock().unwrap().clone());
-
-            if let Some(ref vid) = voice_to_use {
-                if let Some(token) = Self::find_voice_by_id(vid) {
-                    let _ = sp_voice.SetVoice(&token);
-                }
+            if let Some(token) = self.resolve_voice_token(voice) {
+                let _ = sp_voice.SetVoice(&token);
             }
 
             let _ = sp_voice.SetRate(rate_to_sapi(rate));
             let _ = sp_voice.SetVolume(volume_to_sapi(volume));
 
-            if (pitch - 1.0).abs() > f32::EPSILON {
-                let pitch_val = pitch_to_sapi(pitch);
-                let pitch_str = format!(
-                    "<pitch absmiddle=\"{}\"/>",
-                    if pitch >= 1.0 {
-                        pitch_val as i32
-                    } else {
-                        -(pitch_val as i32)
-                    }
+            // Build SSML only when we need pitch (avoids unnecessary XML
+            // parsing for the common case). Use standard `<prosody pitch=...>`
+            // rather than the non-standard `<pitch absmiddle>` (§3 M1).
+            let flags = if (pitch - 1.0).abs() > f32::EPSILON {
+                let pitch_attr = pitch_to_percent(pitch);
+                let escaped = text
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                let ssml = format!(
+                    "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\"\
+                     xml:lang=\"en-US\"><prosody pitch=\"{pitch_attr}\">{escaped}</prosody></speak>"
                 );
-                let wrapped = format!("{pitch_str}{text}");
-                let wtext = HSTRING::from(&wrapped);
-                let _ = sp_voice.Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None);
+                let wtext = HSTRING::from(&ssml);
+                // Surface Speak failures instead of swallowing them (§3 H3).
+                let _ = sp_voice
+                    .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
+                    .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+                (SPF_ASYNC.0 | SPF_IS_XML.0) as u32
             } else {
                 let wtext = HSTRING::from(text);
-                let _ = sp_voice.Speak(&wtext, SPF_ASYNC.0 as u32, None);
-            }
+                let _ = sp_voice
+                    .Speak(&wtext, SPF_ASYNC.0 as u32, None)
+                    .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+                SPF_ASYNC.0 as u32
+            };
+            // `flags` was used inline above; keep the variable to make the
+            // intent explicit if we later want to vary it.
+            let _ = flags;
         }
 
         if let Some(cb) = on_boundary.as_mut() {
@@ -236,5 +284,29 @@ impl TtsEngine for SapiEngine {
 
     fn engine_id(&self) -> &'static str {
         "sapi"
+    }
+}
+
+impl Drop for SapiEngine {
+    fn drop(&mut self) {
+        // Release the voice and cached token first while COM is still
+        // initialised, then balance our CoInitializeEx with CoUninitialize
+        // (§3 H4). COM refs are ref-counted per thread, so we only call
+        // CoUninitialize if we successfully called CoInitializeEx.
+        if let Ok(mut guard) = self.voice.lock() {
+            *guard = None;
+        }
+        if let Ok(mut cache) = self.cached_token.lock() {
+            *cache = None;
+        }
+        if let Ok(mut com) = self.com_initialized.lock() {
+            if *com {
+                // SAFETY: matching the CoInitializeEx call from new().
+                unsafe {
+                    CoUninitialize();
+                }
+                *com = false;
+            }
+        }
     }
 }
