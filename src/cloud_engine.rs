@@ -7,6 +7,7 @@
 use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[cfg(feature = "cloud")]
 use {
@@ -1157,13 +1158,13 @@ impl TtsEngine for CloudEngine {
 }
 
 /// Create a cloud engine from a JSON credentials string.
-pub fn create_cloud_engine(id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>> {
+pub fn create_cloud_engine(id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
     let creds: HashMap<String, String> = if credentials_json.is_empty() {
         HashMap::new()
     } else {
         serde_json::from_str(credentials_json).unwrap_or_default()
     };
-    CloudEngine::new(id, &creds).map(|e| Box::new(e) as Box<dyn TtsEngine>)
+    CloudEngine::new(id, &creds).map(|e| Arc::new(e) as Arc<dyn TtsEngine>)
 }
 
 #[cfg(test)]

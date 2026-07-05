@@ -46,12 +46,17 @@ pub mod types;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use engine::TtsEngine;
 use factory::create_engine;
 
-type BoxedEngine = Box<dyn TtsEngine>;
+/// Shared engine handle. Using `Arc<dyn TtsEngine>` instead of
+/// `Mutex<Box<dyn TtsEngine>>` means synthesis no longer blocks
+/// `tts_stop` / `tts_set_*` / `tts_destroy` (§4 H1). It also keeps the
+/// engine alive if `tts_destroy` is called while synthesis is still
+/// running — the Arc is cloned before speak() and dropped afterwards.
+type BoxedEngine = Arc<dyn TtsEngine>;
 
 /// Opaque context holding an engine instance and its per-instance settings.
 pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void)>;
@@ -60,7 +65,12 @@ type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
 type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32)>;
 
 pub struct tts_ctx {
-    engine: Mutex<BoxedEngine>,
+    // The TtsEngine trait already requires Send + Sync, and every engine
+    // impl uses internal Mutexes (or atomic state) for thread safety. The
+    // outer Mutex that used to wrap the engine was held for the entire
+    // synthesis call, blocking concurrent tts_stop / tts_set_*. Removing
+    // it (§4 H1) lets those calls proceed while synthesis runs.
+    engine: BoxedEngine,
     voice_id: Mutex<Option<String>>,
     rate: Mutex<f32>,
     pitch: Mutex<f32>,
@@ -156,7 +166,7 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
 
     if let Some(engine) = create_engine(&engine_id_str, &creds) {
         let ctx = Box::new(tts_ctx {
-            engine: Mutex::new(engine),
+            engine,
             voice_id: Mutex::new(None),
             rate: Mutex::new(1.0),
             pitch: Mutex::new(1.0),
@@ -198,9 +208,7 @@ pub extern "C" fn tts_destroy(ctx: *mut tts_ctx) {
         let boxed = unsafe { Box::from_raw(ctx) };
         // Best-effort stop before drop. The engine's Drop impl is responsible
         // for any additional cleanup (closing sockets, releasing COM refs).
-        if let Ok(engine) = boxed.engine.lock() {
-            let _ = engine.stop();
-        }
+        let _ = boxed.engine.stop();
         drop(boxed);
     }));
 }
@@ -248,7 +256,7 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
         None => None,
     };
 
-    let engine = ctx_ref.engine.lock().unwrap();
+    let engine = &ctx_ref.engine;
     match engine.speak(
         &text_str,
         voice.as_deref(),
@@ -268,6 +276,7 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
             -1
         }
     }
+})
 }
 
 /// Speak `text` synchronously (blocks until complete).
@@ -312,7 +321,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         None => None,
     };
 
-    let engine = ctx_ref.engine.lock().unwrap();
+    let engine = &ctx_ref.engine;
     match engine.speak_sync(
         &text_str,
         voice.as_deref(),
@@ -332,6 +341,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             -1
         }
     }
+})
 }
 
 /// Stop any in-progress speech.
@@ -346,8 +356,7 @@ pub extern "C" fn tts_stop(ctx: *mut tts_ctx) {
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        let engine = ctx_ref.engine.lock().unwrap();
-        let _ = engine.stop();
+        let _ = ctx_ref.engine.stop();
     }));
 }
 
@@ -382,7 +391,7 @@ fn tts_get_voices_inner(
         return -1;
     }
     let ctx_ref = unsafe { &*ctx };
-    let engine = ctx_ref.engine.lock().unwrap();
+    let engine = &ctx_ref.engine;
     match engine.get_voices() {
         Ok(voices) => {
             let len = voices.len();
@@ -710,8 +719,7 @@ pub extern "C" fn tts_pause(ctx: *mut tts_ctx) {
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        let engine = ctx_ref.engine.lock().unwrap();
-        let _ = engine.pause();
+        let _ = ctx_ref.engine.pause();
     }));
 }
 
@@ -726,8 +734,7 @@ pub extern "C" fn tts_resume(ctx: *mut tts_ctx) {
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        let engine = ctx_ref.engine.lock().unwrap();
-        let _ = engine.resume();
+        let _ = ctx_ref.engine.resume();
     }));
 }
 
@@ -758,7 +765,7 @@ pub extern "C" fn tts_synth_to_bytes(
         let pitch = *ctx_ref.pitch.lock().unwrap();
         let volume = *ctx_ref.volume.lock().unwrap();
 
-        let engine = ctx_ref.engine.lock().unwrap();
+        let engine = &ctx_ref.engine;
         match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
             Ok(data) => {
                 if data.is_empty() {

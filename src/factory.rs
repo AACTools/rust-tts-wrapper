@@ -2,6 +2,7 @@
 
 use crate::engine::TtsEngine;
 use crate::types::EngineDescriptor;
+use std::sync::Arc;
 
 // The unused-import warning is a false positive — TtsEngine is a trait used as a dyn bound.
 #[cfg(all(feature = "avsynth", target_os = "macos"))]
@@ -21,7 +22,7 @@ use crate::system_engine::SystemEngine;
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
 #[must_use]
 #[allow(unused_variables)]
-pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>> {
+pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
     // Detect engines that exist in the full catalogue but were compiled out
     // by disabled features, so callers get a useful error rather than a
     // generic "unknown engine" (§9 H1). Only emit these messages when the
@@ -30,7 +31,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
         "system" => {
             #[cfg(feature = "system")]
             {
-                return Some(Box::new(SystemEngine::new()));
+                return Some(Arc::new(SystemEngine::new()));
             }
             #[cfg(not(feature = "system"))]
             {
@@ -43,7 +44,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
         "avsynth" => {
             #[cfg(all(feature = "avsynth", target_os = "macos"))]
             {
-                return Some(Box::new(AvSynthEngine::new()));
+                return Some(Arc::new(AvSynthEngine::new()));
             }
             #[cfg(not(all(feature = "avsynth", target_os = "macos")))]
             {
@@ -57,7 +58,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
         "sapi" => {
             #[cfg(all(feature = "sapi", target_os = "windows"))]
             {
-                return Some(Box::new(SapiEngine::new()));
+                return Some(Arc::new(SapiEngine::new()));
             }
             #[cfg(not(all(feature = "sapi", target_os = "windows")))]
             {
@@ -71,7 +72,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn 
         "sherpaonnx" => {
             #[cfg(feature = "sherpaonnx")]
             {
-                return Some(Box::new(SherpaOnnxEngine::new(credentials_json)));
+                return Some(Arc::new(SherpaOnnxEngine::new(credentials_json)));
             }
             #[cfg(not(feature = "sherpaonnx"))]
             {
