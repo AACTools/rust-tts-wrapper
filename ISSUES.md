@@ -42,43 +42,56 @@ accurate to the version of each file inspected. Severities:
 - **Why it matters:** Speech plays at the wrong speed for every non-default rate.
 - **Severity:** High
 
-### H2. Pitch and volume silently ignored
-- **Files / lines:** `src/sherpaonnx_engine.rs:145-146` (`_pitch`, `_volume`)
+### ✅ H2. FIXED - Pitch and volume silently ignored
+- **Files / lines:** `src/sherpaonnx_engine.rs` (speak fn)
 - **Issue:** No prosody control applied; the `gen_config` doesn't set pitch or
   volume either.
 - **Why it matters:** Accessibility users (the target audience per
   `Cargo.toml:8`) cannot adjust pitch/volume on the only offline engine.
+- **Fix:** Sherpa-ONNX has no native pitch/volume hooks, so we post-process
+  the rendered samples: volume via amplitude scaling, pitch via linear
+  interpolation resampling.
 - **Severity:** High
 
-### H3. Hardcoded default model id `"kokoro-en-en-19"`
-- **Files / lines:** `src/sherpaonnx_engine.rs:41`
+### ✅ H3. FIXED - Hardcoded default model id `"kokoro-en-en-19"`
+- **Files / lines:** `src/sherpaonnx_engine.rs` (new fn)
 - **Issue:** If `modelId` is not supplied in credentials, defaults to
   `kokoro-en-en-19`, which forces a ~305 MB download the user never asked for.
+- **Fix:** No default model id; `speak()` returns an error directing the user
+  to pass `modelId` in credentials.
 - **Severity:** Medium
 
-### H4. Hardcoded `num_threads: 2` and no provider option
-- **Files / lines:** `src/sherpaonnx_engine.rs:189-191`
+### ✅ H4. FIXED - Hardcoded `num_threads: 2` and no provider option
+- **Files / lines:** `src/sherpaonnx_engine.rs` (new fn)
 - **Issue:** No way to tune CPU usage or select CoreML/CUDA/DirectML provider.
+- **Fix:** Reads `numThreads` and `provider` from the credentials JSON.
 - **Severity:** Medium
 
-### M1. `play_wav_file` is Linux-only and silently fails
-- **Files / lines:** `src/sherpaonnx_engine.rs:297-304`
+### ✅ M1. FIXED - `play_wav_file` is Linux-only and silently fails
+- **Files / lines:** `src/sherpaonnx_engine.rs` (play_wav_file)
 - **Issue:** Shells out to `aplay`. On Windows/macOS, or pipewire-only Linux
   distros, the audio is rendered to a temp file but never played; the failure is
   swallowed by `let _ =`.
+- **Fix:** Dispatches to `aplay` (Linux), `afplay` (macOS), or PowerShell
+  `Media.SoundPlayer` (Windows). Also writes the WAV header manually so we no
+  longer depend on sherpa-onnx's `GeneratedAudio::save`.
 - **Severity:** Medium
 
-### M2. Voice list mislabels `iso639_3` with 2-letter codes
-- **Files / lines:** `src/sherpaonnx_engine.rs:281-285`
+### ✅ M2. FIXED - Voice list mislabels `iso639_3` with 2-letter codes
+- **Files / lines:** `src/sherpaonnx_engine.rs` (iso639_3 fn)
 - **Issue:** Sets `iso639_3` to the 2-letter `lang_code` (e.g. `"en"`); ISO 639-3
   requires 3-letter codes (e.g. `"eng"`).
+- **Fix:** Added an iso639_3() lookup covering every language in the registry.
 - **Severity:** Medium
 
-### L1. Cancellation callback always returns `true`
-- **Files / lines:** `src/sherpaonnx_engine.rs:213`
+### ✅ L1. FIXED - Cancellation callback always returns `true`
+- **Files / lines:** `src/sherpaonnx_engine.rs` (CANCEL_REQUESTED)
 - **Issue:** Sherpa's progress callback returns `bool` (false = stop). Returning
   `true` unconditionally means `tts_stop` cannot actually cancel in-progress
   synthesis.
+- **Fix:** `stop()` sets a static `AtomicBool`; the progress callback reads it
+  and returns `false` to abort synthesis. (Limitation: the flag is process-wide,
+  not per-engine — fine for the typical one-engine-per-process usage.)
 - **Severity:** Low
 
 ### L2. No runtime model switching
@@ -109,39 +122,46 @@ accurate to the version of each file inspected. Severities:
   and gives users the impression Polly is supported.
 - **Severity:** Critical
 
-### C3. PlayHT puts `userId` in the JSON body, but the API requires `X-User-ID` header
-- **Files / lines:** `src/cloud_engine.rs:165-179`
+### ✅ C3. FIXED - PlayHT puts `userId` in the JSON body, but the API requires `X-User-ID` header
+- **Files / lines:** `src/cloud_engine.rs` (playht branch)
 - **Issue:** `extra_body` puts `user_id` as a JSON field. PlayHT v2 requires
   `X-User-ID` header + `Authorization: Bearer <secret>`.
-- **Why it matters:** All PlayHT requests will be rejected.
+- **Fix:** Reads `userId` from credentials and emits it in `extra_headers`
+  under `X-User-ID`. Covered by `test_playht_config_has_user_id_header`.
 - **Severity:** Critical
 
-### H1. Azure WebSocket `X-RequestId` is the wrong format
-- **Files / lines:** `src/cloud_engine.rs:559`
+### ✅ H1. FIXED - Azure WebSocket `X-RequestId` is the wrong format
+- **Files / lines:** `src/cloud_engine.rs` (Azure WS branch)
 - **Issue:** Azure requires a 32-char hex UUID with **no dashes**. Code uses
   `Uuid::new_v4().to_string().to_lowercase()`, which keeps the dashes.
-- **Why it matters:** Azure's speech gateway may reject the request outright.
+- **Fix:** Uses `Uuid::new_v4().simple().to_string()` which yields the
+  32-char hex form.
 - **Severity:** High
 
 ### ✅ H2. FIXED - Azure WS response `Path:` parser assumes ASCII and unsafe slicing
-- **Files / lines:** `src/cloud_engine.rs:606-607`
+- **Files / lines:** `src/cloud_engine.rs` (Azure WS loop)
 - **Issue:** `l[5..]` is byte slicing on a UTF-8 `&str`. If Azure ever sends a
   non-ASCII character before `Path:`, this panics. Should use
   `l.strip_prefix("Path:")` and `.trim()`.
 - **Severity:** High (panic across FFI = UB, see §4 C1)
 
-### H3. Azure WS lacks required `X-Timestamp` header
-- **Files / lines:** `src/cloud_engine.rs:573-577`
+### ✅ H3. FIXED - Azure WS lacks required `X-Timestamp` header
+- **Files / lines:** `src/cloud_engine.rs` (Azure WS branch)
 - **Issue:** Azure protocol requires `X-Timestamp:<ISO 8601>` in every message.
   The code only sets `X-RequestId`, `Content-Type`, and `Path`. May cause the
   service to drop the message.
+- **Fix:** Every Azure WS message now carries an `X-Timestamp` header built
+  from a UTC `SystemTime` (no chrono dependency).
 - **Severity:** High
 
-### H4. Azure WS doesn't handle `turn.start`, `response`, or error paths
-- **Files / lines:** `src/cloud_engine.rs:603-674`
+### ✅ H4. FIXED - Azure WS doesn't handle `turn.start`, `response`, or error paths
+- **Files / lines:** `src/cloud_engine.rs` (Azure WS loop)
 - **Issue:** Only handles `turn.end`, `audio.metadata`, `word-boundary`. Errors
   arrive as `Path:response` with a JSON body containing `Error`; they will be
   silently ignored and the loop will hang until the connection closes.
+- **Fix:** The loop now parses the JSON body of every text message and, if it
+  contains an `Error` object (or `reason`), surfaces it as a `TtsError` and
+  closes the socket cleanly.
 - **Severity:** High
 
 ### H5. Azure WS `Uuid` is `to_lowercase()` *after* `to_string()` (minor) but value is fine
@@ -149,12 +169,14 @@ accurate to the version of each file inspected. Severities:
 - **Note:** Not a bug per se, but combined with H1 means the value is the wrong
   shape.
 
-### H6. Azure SSML drops volume entirely
-- **Files / lines:** `src/cloud_engine.rs:306-346`
+### ✅ H6. FIXED - Azure SSML drops volume entirely
+- **Files / lines:** `src/cloud_engine.rs` (build_azure_ssml)
 - **Issue:** `build_azure_ssml` takes `rate` and `pitch` only. Volume is never
   rendered into `<prosody volume="...">`, even though it's plumbed through
   `speak(...)`. The Azure WS path (`cloud_engine.rs:583`) and HTTP path both
   silently lose volume.
+- **Fix:** `build_azure_ssml` now takes a `volume: f32` and emits a
+  `volume="x-soft".."x-loud"` prosody attribute. Both call sites updated.
 - **Severity:** High (accessibility regression)
 
 ### ✅ H7. FIXED - ElevenLabs alignment parser can index out of bounds
@@ -164,20 +186,24 @@ accurate to the version of each file inspected. Severities:
   (which can happen), the code panics. See §4 C1 for panic-safety implications.
 - **Severity:** High
 
-### H8. ElevenLabs voice list parser: `labels` is an object, not a string
-- **Files / lines:** `src/cloud_engine.rs:980-983`
+### ✅ H8. FIXED - ElevenLabs voice list parser: `labels` is an object, not a string
+- **Files / lines:** `src/cloud_engine.rs` (generic voice parser)
 - **Issue:** The generic voice parser does
   `v.get("gender").or(v.get("labels")).and_then(|v| v.as_str())`. ElevenLabs'
   `labels` is an object (`{"gender": "female", "age": "young", ...}`), so
   `.as_str()` returns `None` and gender falls back to `Unknown`.
+- **Fix:** When `labels` is an object, dive into `labels.gender`. Also resolves
+  `labels.language` for the language code.
 - **Severity:** Medium (gender is wrong but engine still works)
 
-### H9. Generic voice parser doesn't handle PascalCase fields (Polly, AWS)
-- **Files / lines:** `src/cloud_engine.rs:965-988`
+### ✅ H9. FIXED - Generic voice parser doesn't handle PascalCase fields (Polly, AWS)
+- **Files / lines:** `src/cloud_engine.rs` (generic voice parser)
 - **Issue:** Polly's `DescribeVoices` returns `{"VoiceId": "...", "Gender": "...",
   "LanguageCode": "..."}`. The parser only looks for lowercase `id`, `voice_id`,
   `name`, `gender`. Polly voice listing will return an empty list even if
   signing were fixed.
+- **Fix:** The parser now also accepts `VoiceId`, `Name`, `Gender`,
+  `LanguageCode` (case-insensitive on the field lookup).
 - **Severity:** Medium (compounds C2)
 
 ### DONE H10. FIXED - Deepgram API shape is wrong
@@ -195,10 +221,12 @@ accurate to the version of each file inspected. Severities:
   code sends `voice` as a string.
 - **Severity:** High
 
-### H12. Azure SSML voice name is not escaped
-- **Files / lines:** `src/cloud_engine.rs:343-344`
+### ✅ H12. FIXED - Azure SSML voice name is not escaped
+- **Files / lines:** `src/cloud_engine.rs` (build_azure_ssml)
 - **Issue:** Text is XML-escaped but `voice` is interpolated raw inside single
   quotes. A `'` in a voice name would break the SSML.
+- **Fix:** Voice name is now escaped (&, <, >, ', ") before interpolation.
+  Covered by `test_azure_ssml_escapes_voice_name`.
 - **Severity:** Low (voice names are typically ASCII identifiers)
 
 ### M1. Continuous rate/pitch buckets discard precision
@@ -276,40 +304,52 @@ accurate to the version of each file inspected. Severities:
   current code was written against an older binding.
 - **Severity:** Critical
 
-### H1. `sapi` feature has no platform guard
-- **Files / lines:** `Cargo.toml:23, 38-39`
+### ✅ H1. FIXED - `sapi` feature has no platform guard
+- **Files / lines:** `Cargo.toml`, `build.rs`
 - **Issue:** `sapi = ["windows"]` enables the feature on any platform, but
   `windows` is only a dependency under
   `[target.'cfg(target_os = "windows")'.dependencies]`. Enabling `sapi` on
   Linux/macOS produces a "crate not found" error rather than a helpful message.
   (The `lib.rs:38` module gate does protect the source file, but the dep
   resolution fails first.)
+- **Fix:** `build.rs` now emits a clear panic when `--features sapi` is set on
+  a non-Windows target, listing the condition that wasn't met.
 - **Severity:** High
 
 ### H2. Real SAPI word-boundary events not implemented
-- **Files / lines:** `src/sapi_engine.rs:122-131`
+- **Files / lines:** `src/sapi_engine.rs` (speak fn)
 - **Issue:** SAPI exposes real word boundaries via `ISpEventSource::SetNotify`
   / `ISpVoice::GetStatus` / `SPEI_WORD_BOUNDARY`. The implementation falls back
   to `estimate_word_boundaries`, giving inaccurate timing.
+- **Status:** Still pending; estimate fallback is unchanged. Implementing real
+  events requires wiring up `ISpEventSource::SetNotify` + a callback sink,
+  which is a substantial change.
 - **Severity:** Medium (functional but inaccurate)
 
-### H3. `Speak` return value discarded
-- **Files / lines:** `src/sapi_engine.rs:115-119`
+### ✅ H3. FIXED - `Speak` return value discarded
+- **Files / lines:** `src/sapi_engine.rs` (speak fn)
 - **Issue:** `let _ = sp_voice.Speak(...)` swallows errors. Failures (e.g.
   invalid voice id, COM re-entrancy) become silent `Ok(())`.
+- **Fix:** Both Speak call sites now propagate `windows::core::Error` as
+  `TtsError`.
 - **Severity:** Medium
 
-### H4. `CoInitializeEx` is never paired with `CoUninitialize`
-- **Files / lines:** `src/sapi_engine.rs:29`
+### ✅ H4. FIXED - `CoInitializeEx` is never paired with `CoUninitialize`
+- **Files / lines:** `src/sapi_engine.rs` (Drop impl)
 - **Issue:** Each `SapiEngine::new()` increments the COM init count without
   decrementing. Drops also don't uninitialize. Slow leak of COM refs.
+- **Fix:** `SapiEngine` now tracks whether it successfully called
+  `CoInitializeEx` and the `Drop` impl calls `CoUninitialize` exactly once
+  when matched.
 - **Severity:** Medium
 
-### M1. Pitch implemented as SSML wrapper around the *entire* text
-- **Files / lines:** `src/sapi_engine.rs:103-115`
+### ✅ M1. FIXED - Pitch implemented as SSML wrapper around the *entire* text
+- **Files / lines:** `src/sapi_engine.rs` (speak fn)
 - **Issue:** `<pitch absmiddle="..."/>` is prepended to the body. SAPI's pitch
   tag uses `<prosody pitch="...">`, not `<pitch absmiddle>`. The latter is a
   non-standard extension that older SAPI 5.1 may not honour.
+- **Fix:** Switched to standard SSML `<prosody pitch="+N%">` inside a proper
+  `<speak>` envelope.
 - **Severity:** Medium
 
 ### M2. `find_voice_by_id` is called under the voice Mutex during `speak`
@@ -371,37 +411,47 @@ accurate to the version of each file inspected. Severities:
 - **Severity:** Critical
 
 ### H1. `tts_speak` holds the engine Mutex for the entire (synchronous) synthesis
-- **Files / lines:** `lib.rs:202-215`, `lib.rs:267-280`, `lib.rs:642-666`
+- **Files / lines:** `src/lib.rs` (tts_speak / tts_speak_sync / tts_synth_to_bytes)
 - **Issue:** `engine.lock().unwrap()` is held for the duration of
   `engine.speak(...)`. For the cloud engine, that's an HTTP request (or a full
   WebSocket session — seconds to tens of seconds). Any concurrent call
   (`tts_stop`, `tts_set_voice`, `tts_destroy`) blocks.
+- **Status:** Partially mitigated — all other Mutexes (voice/rate/pitch/volume/
+  callbacks) are released before the engine Mutex is acquired, and the engine
+  Mutex is held only for the synthesis call itself. A deeper fix would replace
+  `Mutex<Box<dyn TtsEngine>>` with `Arc<dyn TtsEngine + Send + Sync>` (engines
+  already synchronise internally); deferred because the trait object bounds
+  ripple through factory.rs.
 - **Severity:** High
 
-### H2. `tts_set_on_audio` updates `cb` and `userdata` in two separate critical sections
-- **Files / lines:** `lib.rs:484-485`, `lib.rs:502-503`
-- **Issue:** A reader (`tts_speak`, lib.rs:181-184) can observe a new callback
+### ✅ H2. FIXED - `tts_set_on_audio` updates `cb` and `userdata` in two separate critical sections
+- **Files / lines:** `src/lib.rs` (AudioCallback / BoundaryCallback)
+- **Issue:** A reader (`tts_speak`) can observe a new callback
   paired with the old userdata (or vice versa). Result: callback invoked with a
   dangling `userdata` pointer.
+- **Fix:** Each callback type now bundles `(cb, userdata)` into a single
+  Mutex-protected struct with `#[derive(Clone, Copy)]`. Both setters and
+  readers take a single lock, so the snapshot is always consistent.
 - **Severity:** High (potential UB if userdata lifetimes differ)
 
-### H3. AvSynth FFI passes non-null-terminated UTF-8 to NSString
-- **Files / lines:** `src/avsynth_engine.rs:76-78` (`text.as_ptr()` /
-  `voice_to_use.as_ref().map_or(ptr::null(), |v| v.as_ptr())`) and
-  `extern/avsynth_shim.m:24` (`stringWithUTF8String:text`)
+### ✅ H3. FIXED - AvSynth FFI passes non-null-terminated UTF-8 to NSString
+- **Files / lines:** `src/avsynth_engine.rs` (speak fn), `extern/avsynth_shim.m`
 - **Issue:** `&str::as_ptr()` is **not** null-terminated. `stringWithUTF8String:`
   reads until `\0`, walking past the end of the Rust string into adjacent heap
   memory.
-- **Why it matters:** Memory-safety violation — read overflow on every macOS
-  speak call. Should use `CString::new(text).unwrap().as_ptr()` or pass an
-  explicit length.
+- **Fix:** Rust now wraps `text` and `voice_id` in `CString::new(...)?` (which
+  surfaces interior-NUL errors rather than truncating). The extern signatures
+  use `*const c_char` to make the contract explicit. Covered by FFI tests.
 - **Severity:** Critical (macOS only, but the only macOS path)
 
-### H4. `tts_destroy` does not stop in-progress speech or close resources
-- **Files / lines:** `lib.rs:151-157`
+### ✅ H4. FIXED - `tts_destroy` does not stop in-progress speech or close resources
+- **Files / lines:** `src/lib.rs` (tts_destroy)
 - **Issue:** Just `Box::from_raw` + drop. `SystemEngine` has no `Drop`, so the
   speech-dispatcher connection is leaked (and any in-flight utterance
   continues). SAPI's `Drop` doesn't `Speak("", PURGEBEFORESPEAK)`.
+- **Fix:** `tts_destroy` now calls `engine.stop()` before dropping the context,
+  wrapped in `catch_unwind`. Engine `Drop` impls remain responsible for any
+  further cleanup (closing sockets, releasing COM refs, etc.).
 - **Severity:** Medium
 
 ### M1. `tts_get_voices_inner` leaks partial allocations on panic
@@ -467,11 +517,14 @@ accurate to the version of each file inspected. Severities:
 
 ## 6. System engine (`src/system_engine.rs`)
 
-### M1. `get_voices` always returns empty
-- **Files / lines:** `src/system_engine.rs:115-117`
+### ✅ M1. FIXED - `get_voices` always returns empty
+- **Files / lines:** `src/system_engine.rs` (get_voices)
 - **Issue:** speech-dispatcher supports `list_synthesis_voices()`. Returning
   empty means the C `tts_get_voices` reports no voices on Linux, even when
   voices are installed.
+- **Fix:** Implemented via `Connection::list_synthesis_voices`, mapping each
+  speech-dispatcher voice into the wrapper `Voice` struct (gender defaults to
+  Unknown since speech-dispatcher doesn't expose it).
 - **Severity:** Medium
 
 ### M2. Mutex held during `conn.say(...)` which queues async speech
@@ -533,12 +586,15 @@ accurate to the version of each file inspected. Severities:
 
 ## 9. Factory (`src/factory.rs`)
 
-### H1. Cloud catch-all masks missing-feature errors
-- **Files / lines:** `src/factory.rs:38-39`
+### ✅ H1. FIXED - Cloud catch-all masks missing-feature errors
+- **Files / lines:** `src/factory.rs` (create_engine)
 - **Issue:** When the `cloud` feature is on but `system`/`sherpaonnx` are off,
   calling `tts_create("system", ...)` falls into the cloud catch-all which
   returns `None` because "system" isn't a cloud provider. The user gets
   "Unknown engine: system" rather than "system feature not enabled".
+- **Fix:** `create_engine` now matches each gated engine id explicitly. When
+  the feature is disabled it `eprintln!`s a clear rebuild hint. For unknown
+  ids, the warning lists the engines actually available in this build.
 - **Severity:** Medium
 
 ### L1. Engine list hardcoded twice (factory.rs and cloud_engine.rs)
@@ -598,10 +654,13 @@ accurate to the version of each file inspected. Severities:
 
 ## 11. CI (`/.github/workflows/ci.yml`, `publish.yml`)
 
-### C1. `windows-build` job has `continue-on-error: true`
-- **Files / lines:** `.github/workflows/ci.yml:60`
+### ✅ C1. FIXED - `windows-build` job has `continue-on-error: true`
+- **Files / lines:** `.github/workflows/ci.yml`
 - **Issue:** All Windows SAPI builds are silently allowed to fail. PR merge
   gate appears green even though Windows is completely broken (per §3 C1).
+- **Fix:** Previous session set `continue-on-error: false` and added a
+  dedicated `lint.yml`/`test.yml` with explicit failures. We're no longer
+  masking Windows failures.
 - **Severity:** Critical (masks Critical bug)
 
 ### H1. `sherpa-onnx` is not exercised by CI at all
@@ -609,6 +668,10 @@ accurate to the version of each file inspected. Severities:
 - **Issue:** No clippy, build, or test step uses `--features sherpaonnx`. Only
   `publish.yml:46-48` runs sherpa clippy, with `continue-on-error: true`. The
   bugs in §1 (C1, C2, H1) are never caught.
+- **Status:** Sherpa clippy still has continue-on-error due to upstream
+  sherpa-onnx 504 download failures on the GitHub release server (see TODO.md).
+  The SherpaOnnx fixes from this session will need a successful sherpa build
+  to fully validate.
 - **Severity:** High
 
 ### H2. `publish.yml` build job has job-level `continue-on-error: true`
@@ -660,12 +723,21 @@ accurate to the version of each file inspected. Severities:
 
 ## 13. Tests (`tests/integration.rs`)
 
-### H1. No integration test calls `tts_speak`, `tts_synth_to_bytes`, or any FFI function
-- **Files / lines:** `tests/integration.rs` (entire file)
+### ✅ H1. FIXED - No integration test calls `tts_speak`, `tts_synth_to_bytes`, or any FFI function
+- **Files / lines:** `tests/integration_tests.rs`, `tests/ffi_safety.rs`,
+  `tests/sherpaonnx_models.rs`
 - **Issue:** Tests cover factory creation, types, and estimator math. No test
   actually synthesises audio, exercises the C ABI, validates memory
   free/unfree, or runs cloud SSML/JSON building against a mock server. The
   critical bugs in §1, §2, §4 are invisible to the suite.
+- **Fix:** Integration tests now exercise the public FFI surface
+  (`tts_create`/`tts_destroy`/`tts_get_engine_count`/`tts_get_voices`/...) with
+  null pointers, unknown engines, and successful round-trips. Cloud config
+  builders have unit tests for Watson auth, PlayHT headers, Deepgram/Hume body
+  shape, Polly being None. SherpaOnnx registry parsing is validated against
+  the embedded JSON (count > 100, all model_types have dispatch branches).
+- **Status:** Still no mock HTTP server for actual cloud synth — that's a
+  larger follow-up.
 - **Severity:** High
 
 ### M1. `test_create_all_cloud_engines` omits 3 engines
@@ -674,16 +746,25 @@ accurate to the version of each file inspected. Severities:
   polly have dedicated tests but elevenlabs is uncovered.)
 - **Severity:** Low
 
-### M2. No tests for Watson auth header, Polly signing, PlayHT header, ElevenLabs indexing
-- **Files / lines:** `tests/integration.rs` (entire file)
+### ✅ M2. FIXED - No tests for Watson auth header, Polly signing, PlayHT header, ElevenLabs indexing
+- **Files / lines:** `src/cloud_engine.rs` (mod tests), `tests/ffi_safety.rs`
 - **Issue:** The bugs in §2 C1, C2, C3, H7 are uncaught.
+- **Fix:** Unit tests added: `test_watson_auth_header_format`,
+  `test_playht_config_has_user_id_header`, `test_deepgram_uses_model_param`,
+  `test_hume_voice_is_object_in_extra_body`,
+  `test_polly_unsupported_returns_none`, `test_azure_ssml_escapes_voice_name`.
+  ElevenLabs alignment indexing covered by `bounds_check_tests`.
 - **Severity:** High
 
-### M3. Tests don't validate `merged_models.json` parse completeness
-- **Files / lines:** `tests/integration.rs` (entire file)
+### ✅ M3. FIXED - Tests don't validate `merged_models.json` parse completeness
+- **Files / lines:** `tests/sherpaonnx_models.rs`
 - **Issue:** `load_models()` silently returns an empty HashMap on parse error
   (`sherpaonnx_engine.rs:69-73`). If the JSON schema changes, every test
   passes with 0 models.
+- **Fix:** `test_registry_loads_nonzero_models` asserts the JSON parses to
+  >100 models, and `test_known_model_ids_are_present` pins a handful of
+  well-known ids. `test_every_model_has_supported_type` ensures the dispatch
+  table covers every model_type present in the registry.
 - **Severity:** Medium
 
 ---
