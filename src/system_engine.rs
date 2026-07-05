@@ -127,11 +127,7 @@ impl TtsEngine for SystemEngine {
             .into_iter()
             .map(|v| {
                 let lang = v.language.clone();
-                let iso639 = lang
-                    .split(['-', '_'])
-                    .next()
-                    .unwrap_or(&lang)
-                    .to_string();
+                let iso639 = lang.split(['-', '_']).next().unwrap_or(&lang).to_string();
                 Voice {
                     // Use the name as the id; speech-dispatcher identifies
                     // voices by name when set_synthesis_voice_* is called.

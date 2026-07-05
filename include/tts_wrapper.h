@@ -83,6 +83,10 @@ struct tts_ctx *tts_create(const char *engine_id, const char *credentials_json);
 /**
  * Destroy a TTS context and free all associated resources.
  *
+ * Attempts to stop any in-progress speech before dropping the engine so the
+ * underlying resources (speech-dispatcher connection, COM objects, etc.) get
+ * a chance to clean up
+ *
  * # Safety
  *
  * `ctx` must be a pointer previously returned by [`tts_create`],
@@ -224,19 +228,21 @@ int32_t tts_get_engines(struct tts_engine_info **out_engines, int32_t *out_count
  *
  * `engines` must be a pointer from `tts_get_engines` with the matching `count`.
  */
-void tts_free_engine_info(struct tts_engine_info *engines, int32_t count);
+void tts_free_engines(struct tts_engine_info *engines, int32_t count);
 
 /**
  * Return the last error message as a C string, or null if none.
  *
- * If ctx is provided, returns per-context error. If ctx is null,
- * returns global error (for tts_create failures).
+ * If ctx is provided, returns the per-context error. If ctx is null,
+ * returns the global error (for tts_create failures).
  *
  * The returned pointer is valid until the next call to any TTS function.
  *
- * @param ctx Context pointer, or null for global error.
+ * # Safety
+ *
+ * `ctx` may be null (returns global error), or a valid context pointer.
  */
-const char *tts_get_last_error(tts_ctx *ctx);
+const char *tts_get_last_error(struct tts_ctx *ctx);
 
 /**
  * Pause in-progress speech.
@@ -281,8 +287,8 @@ extern void *avsynth_create(void);
 extern void avsynth_destroy(void *handle);
 
 extern void avsynth_speak(void *handle,
-                          const uint8_t *text,
-                          const uint8_t *voice_id,
+                          const char *text,
+                          const char *voice_id,
                           float rate,
                           float pitch,
                           float volume);
@@ -297,11 +303,11 @@ extern int32_t avsynth_voice_count(void *handle);
 
 extern int32_t avsynth_get_voice(void *handle,
                                  int32_t index,
-                                 uint8_t *id_buf,
+                                 char *id_buf,
                                  int32_t id_buf_len,
-                                 uint8_t *name_buf,
+                                 char *name_buf,
                                  int32_t name_buf_len,
-                                 uint8_t *lang_buf,
+                                 char *lang_buf,
                                  int32_t lang_buf_len);
 
 #ifdef __cplusplus

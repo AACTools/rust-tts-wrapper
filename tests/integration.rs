@@ -1,3 +1,9 @@
+#![allow(
+    clippy::all,
+    clippy::pedantic,
+    clippy::float_cmp,
+    clippy::cast_possible_truncation
+)]
 use rust_tts_wrapper::factory;
 
 #[test]
@@ -158,11 +164,13 @@ fn test_create_watson_with_all_creds() {
 
 #[test]
 fn test_create_polly_with_all_creds() {
+    // AWS Polly requires SigV4 — the engine returns None with a
+    // warning rather than constructing a broken config.
     let engine = factory::create_engine(
         "polly",
         r#"{"accessKeyId":"test","secretAccessKey":"test","region":"us-east-1"}"#,
     );
-    assert!(engine.is_some());
+    assert!(engine.is_none());
 }
 
 #[cfg(feature = "sherpaonnx")]

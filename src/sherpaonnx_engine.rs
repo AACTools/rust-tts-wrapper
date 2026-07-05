@@ -215,6 +215,7 @@ fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
 }
 
 impl TtsEngine for SherpaOnnxEngine {
+    #[allow(clippy::too_many_lines)]
     fn speak(
         &self,
         text: &str,
@@ -259,10 +260,13 @@ impl TtsEngine for SherpaOnnxEngine {
                     voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
                     data_dir: Some(
-                        model_dir.join("espeak-ng-data").to_string_lossy().to_string(),
+                        model_dir
+                            .join("espeak-ng-data")
+                            .to_string_lossy()
+                            .to_string(),
                     ),
                     // length_scale is left at default — rate is applied via
-                    // GenerationConfig.speed to avoid the double-rate bug (§1 H1).
+                    // GenerationConfig.speed to avoid the double-rate bug.
                     ..Default::default()
                 },
                 num_threads: self.num_threads,
@@ -270,7 +274,11 @@ impl TtsEngine for SherpaOnnxEngine {
                 provider: self.provider.clone(),
                 ..Default::default()
             },
-            "vits" => {
+            // VITS, MMS (Facebook Massively Multilingual Speech), and unknown
+            // model types all use the VITS config family. The merged_models
+            // registry has ~1143 MMS entries that omit `model_type`, so we
+            // fall through to VITS rather than reject them.
+            "vits" | "mms" | "unknown" | "" => {
                 let lexicon = model_dir.join("lexicon.txt");
                 let dict_dir = model_dir.join("dict");
                 let espeak_data = model_dir.join("espeak-ng-data");
@@ -310,21 +318,19 @@ impl TtsEngine for SherpaOnnxEngine {
                 );
                 let vocoder = first_existing(
                     &model_dir,
-                    &[
-                        "hifigan_v2.onnx",
-                        "hifigan_v2_en_zh.onnx",
-                        "vocoder.onnx",
-                    ],
+                    &["hifigan_v2.onnx", "hifigan_v2_en_zh.onnx", "vocoder.onnx"],
                 );
                 let tokens = model_dir.join("tokens.txt");
                 let dict_dir = model_dir.join("dict");
                 sherpa_onnx::OfflineTtsModelConfig {
                     matcha: sherpa_onnx::OfflineTtsMatchaModelConfig {
-                        acoustic_model: acoustic
-                            .map(|p| p.to_string_lossy().to_string())
-                            .ok_or_else(|| {
-                                TtsError("Matcha acoustic model not found".into())
-                            })?,
+                        acoustic_model: Some(
+                            acoustic
+                                .map(|p| p.to_string_lossy().to_string())
+                                .ok_or_else(|| {
+                                    TtsError("Matcha acoustic model not found".into())
+                                })?,
+                        ),
                         vocoder: vocoder.as_ref().map(|p| p.to_string_lossy().to_string()),
                         lexicon: None,
                         tokens: Some(tokens.to_string_lossy().to_string()),
@@ -348,7 +354,10 @@ impl TtsEngine for SherpaOnnxEngine {
                     voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
                     data_dir: Some(
-                        model_dir.join("espeak-ng-data").to_string_lossy().to_string(),
+                        model_dir
+                            .join("espeak-ng-data")
+                            .to_string_lossy()
+                            .to_string(),
                     ),
                     ..Default::default()
                 },
@@ -384,14 +393,18 @@ impl TtsEngine for SherpaOnnxEngine {
         CANCEL_REQUESTED.store(false, Ordering::SeqCst);
 
         let audio = tts
-            .generate_with_config(text, &gen_config, Some(|_samples: &[f32], _progress: f32| -> bool {
-                // Return false to stop in-progress synthesis when stop() was called.
-                !CANCEL_REQUESTED.load(Ordering::SeqCst)
-            }))
+            .generate_with_config(
+                text,
+                &gen_config,
+                Some(|_samples: &[f32], _progress: f32| -> bool {
+                    // Return false to stop in-progress synthesis when stop() was called.
+                    !CANCEL_REQUESTED.load(Ordering::SeqCst)
+                }),
+            )
             .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
 
         // Post-process samples for volume and pitch since the underlying
-        // models don't natively expose these controls (§1 H2).
+        // models don't natively expose these controls.
         let samples = audio.samples();
         let volume_factor = volume.clamp(0.0, 4.0);
         let pitch_factor = pitch.clamp(0.25, 4.0);
@@ -446,7 +459,7 @@ impl TtsEngine for SherpaOnnxEngine {
 
     fn stop(&self) -> TtsResult<()> {
         // The progress callback reads this flag on every chunk and aborts
-        // synthesis when set (§1 L1).
+        // synthesis when set.
         CANCEL_REQUESTED.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -497,12 +510,15 @@ fn apply_volume_and_pitch(samples: &[f32], volume: f32, pitch: f32) -> Vec<f32> 
     }
     // First resample for pitch (changes length).
     let resampled: Vec<f32> = if (pitch - 1.0).abs() > f32::EPSILON {
-        let out_len = (samples.len() as f32 / pitch).round().max(1.0) as usize;
+        #[allow(clippy::cast_precision_loss)]
+        let out_len = ((samples.len() as f32) / pitch).round().max(1.0) as usize;
         let mut out = Vec::with_capacity(out_len);
-        let step = samples.len() as f32 / out_len as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let step = (samples.len() as f32) / out_len as f32;
         let mut idx = 0.0f32;
         while (idx as usize) < samples.len() {
             let i = idx as usize;
+            #[allow(clippy::cast_precision_loss)]
             let frac = idx - i as f32;
             let next = samples.get(i + 1).copied().unwrap_or(samples[i]);
             let v = samples[i] * (1.0 - frac) + next * frac;
@@ -523,10 +539,7 @@ fn apply_volume_and_pitch(samples: &[f32], volume: f32, pitch: f32) -> Vec<f32> 
 
 /// Return the first existing file from `dir` matching one of `names`.
 fn first_existing(dir: &std::path::Path, names: &[&str]) -> Option<std::path::PathBuf> {
-    names
-        .iter()
-        .map(|n| dir.join(n))
-        .find(|p| p.exists())
+    names.iter().map(|n| dir.join(n)).find(|p| p.exists())
 }
 
 /// Write a 16-bit PCM mono WAV file. Returns `false` on I/O error.

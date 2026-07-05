@@ -12,11 +12,11 @@ pub struct SapiEngine {
     voice: Mutex<Option<ISpVoice>>,
     voice_id: Mutex<Option<String>>,
     // Cached voice token so we don't re-enumerate registry tokens on every
-    // speak call (§3 M2). `None` means "no explicit voice selected; use the
+    // speak call. `None` means "no explicit voice selected; use the
     // SAPI default".
     cached_token: Mutex<Option<ISpObjectToken>>,
     // Whether *we* called CoInitializeEx and must balance it with
-    // CoUninitialize on Drop (§3 H4).
+    // CoUninitialize on Drop.
     com_initialized: Mutex<bool>,
 }
 
@@ -38,10 +38,9 @@ impl SapiEngine {
     unsafe fn create_voice() -> (Option<ISpVoice>, bool) {
         // COINIT_MULTITHREADED is the standard apartment model for non-UI
         // threads. We track whether *we* initialised COM so that Drop can
-        // balance the reference count (§3 H4).
+        // balance the reference count.
         let did_init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let voice =
-            CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok();
+        let voice = CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok();
         (voice, did_init)
     }
 
@@ -72,7 +71,7 @@ impl SapiEngine {
     }
 
     /// Resolve the configured voice to a token, using the cache when possible
-    /// (§3 M2). Acquires the registry-enumerating path only on cache miss.
+    ///. Acquires the registry-enumerating path only on cache miss.
     fn resolve_voice_token(&self, override_voice: Option<&str>) -> Option<ISpObjectToken> {
         let requested = override_voice
             .map(str::to_string)
@@ -138,7 +137,7 @@ impl TtsEngine for SapiEngine {
 
             // Build SSML only when we need pitch (avoids unnecessary XML
             // parsing for the common case). Use standard `<prosody pitch=...>`
-            // rather than the non-standard `<pitch absmiddle>` (§3 M1).
+            // rather than the non-standard `<pitch absmiddle>`.
             let flags = if (pitch - 1.0).abs() > f32::EPSILON {
                 let pitch_attr = pitch_to_percent(pitch);
                 let escaped = text
@@ -150,7 +149,7 @@ impl TtsEngine for SapiEngine {
                      xml:lang=\"en-US\"><prosody pitch=\"{pitch_attr}\">{escaped}</prosody></speak>"
                 );
                 let wtext = HSTRING::from(&ssml);
-                // Surface Speak failures instead of swallowing them (§3 H3).
+                // Surface Speak failures instead of swallowing them.
                 let _ = sp_voice
                     .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
@@ -291,7 +290,7 @@ impl Drop for SapiEngine {
     fn drop(&mut self) {
         // Release the voice and cached token first while COM is still
         // initialised, then balance our CoInitializeEx with CoUninitialize
-        // (§3 H4). COM refs are ref-counted per thread, so we only call
+        //. COM refs are ref-counted per thread, so we only call
         // CoUninitialize if we successfully called CoInitializeEx.
         if let Ok(mut guard) = self.voice.lock() {
             *guard = None;

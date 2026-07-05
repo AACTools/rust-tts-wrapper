@@ -53,7 +53,7 @@ use factory::create_engine;
 
 /// Shared engine handle. Using `Arc<dyn TtsEngine>` instead of
 /// `Mutex<Box<dyn TtsEngine>>` means synthesis no longer blocks
-/// `tts_stop` / `tts_set_*` / `tts_destroy` (§4 H1). It also keeps the
+/// `tts_stop` / `tts_set_*` / `tts_destroy`. It also keeps the
 /// engine alive if `tts_destroy` is called while synthesis is still
 /// running — the Arc is cloned before speak() and dropped afterwards.
 type BoxedEngine = Arc<dyn TtsEngine>;
@@ -69,7 +69,7 @@ pub struct tts_ctx {
     // impl uses internal Mutexes (or atomic state) for thread safety. The
     // outer Mutex that used to wrap the engine was held for the entire
     // synthesis call, blocking concurrent tts_stop / tts_set_*. Removing
-    // it (§4 H1) lets those calls proceed while synthesis runs.
+    // it lets those calls proceed while synthesis runs.
     engine: BoxedEngine,
     voice_id: Mutex<Option<String>>,
     rate: Mutex<f32>,
@@ -78,20 +78,20 @@ pub struct tts_ctx {
     last_error: Mutex<String>,
     // Callback + userdata are bundled into a single Mutex each so a reader
     // can never observe a new callback paired with stale userdata (or vice
-    // versa) — see §4 H2. The `Send` wrapper below lets us ship the raw
+    // versa) The `Send` wrapper below lets us ship the raw
     // pointer across threads safely because access is mediated by the Mutex.
     on_audio: Mutex<AudioCallback>,
     on_boundary: Mutex<BoundaryCallback>,
 }
 
-/// Bundled audio callback + userdata so updates are atomic (§4 H2).
+/// Bundled audio callback + userdata so updates are atomic.
 #[derive(Clone, Copy)]
 struct AudioCallback {
     cb: CAudioCb,
     userdata: *mut std::ffi::c_void,
 }
 
-/// Bundled boundary callback + userdata so updates are atomic (§4 H2).
+/// Bundled boundary callback + userdata so updates are atomic.
 #[derive(Clone, Copy)]
 struct BoundaryCallback {
     cb: CBoundaryCb,
@@ -118,8 +118,7 @@ fn set_error(msg: &str) {
 /// Helper macro to wrap FFI functions with panic catching
 macro_rules! ffi_catch {
     ($expr:expr) => {
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr))
-            .unwrap_or(-1)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr)).unwrap_or(-1)
     };
 }
 
@@ -192,7 +191,7 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
 ///
 /// Attempts to stop any in-progress speech before dropping the engine so the
 /// underlying resources (speech-dispatcher connection, COM objects, etc.) get
-/// a chance to clean up — see §4 H4.
+/// a chance to clean up
 ///
 /// # Safety
 ///
@@ -236,47 +235,47 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
         let pitch = *ctx_ref.pitch.lock().unwrap();
         let volume = *ctx_ref.volume.lock().unwrap();
 
-        // Snapshot callback + userdata atomically (§4 H2).
+        // Snapshot callback + userdata atomically.
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
 
-    let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
-        Some(cb) => Some(Box::new(move |bytes: &[u8]| {
-            cb(bytes.as_ptr(), bytes.len(), audio.userdata);
-        })),
-        None => None,
-    };
+        let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
+            Some(cb) => Some(Box::new(move |bytes: &[u8]| {
+                cb(bytes.as_ptr(), bytes.len(), audio.userdata);
+            })),
+            None => None,
+        };
 
-    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
-        Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
-            if let Ok(c_word) = CString::new(word) {
-                cb(c_word.as_ptr(), start, end, boundary.userdata);
+        let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
+            Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
+                if let Ok(c_word) = CString::new(word) {
+                    cb(c_word.as_ptr(), start, end, boundary.userdata);
+                }
+            })),
+            None => None,
+        };
+
+        let engine = &ctx_ref.engine;
+        match engine.speak(
+            &text_str,
+            voice.as_deref(),
+            rate,
+            pitch,
+            volume,
+            on_audio_closure
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+            on_boundary_closure
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
+        ) {
+            Ok(()) => 0,
+            Err(e) => {
+                *ctx_ref.last_error.lock().unwrap() = e.to_string();
+                -1
             }
-        })),
-        None => None,
-    };
-
-    let engine = &ctx_ref.engine;
-    match engine.speak(
-        &text_str,
-        voice.as_deref(),
-        rate,
-        pitch,
-        volume,
-        on_audio_closure
-            .as_mut()
-            .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
-        on_boundary_closure
-            .as_mut()
-            .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
-    ) {
-        Ok(()) => 0,
-        Err(e) => {
-            *ctx_ref.last_error.lock().unwrap() = e.to_string();
-            -1
         }
-    }
-})
+    })
 }
 
 /// Speak `text` synchronously (blocks until complete).
@@ -305,43 +304,43 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
 
-    let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
-        Some(cb) => Some(Box::new(move |bytes: &[u8]| {
-            cb(bytes.as_ptr(), bytes.len(), audio.userdata);
-        })),
-        None => None,
-    };
+        let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
+            Some(cb) => Some(Box::new(move |bytes: &[u8]| {
+                cb(bytes.as_ptr(), bytes.len(), audio.userdata);
+            })),
+            None => None,
+        };
 
-    let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
-        Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
-            if let Ok(c_word) = CString::new(word) {
-                cb(c_word.as_ptr(), start, end, boundary.userdata);
+        let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
+            Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
+                if let Ok(c_word) = CString::new(word) {
+                    cb(c_word.as_ptr(), start, end, boundary.userdata);
+                }
+            })),
+            None => None,
+        };
+
+        let engine = &ctx_ref.engine;
+        match engine.speak_sync(
+            &text_str,
+            voice.as_deref(),
+            rate,
+            pitch,
+            volume,
+            on_audio_closure
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
+            on_boundary_closure
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
+        ) {
+            Ok(()) => 0,
+            Err(e) => {
+                *ctx_ref.last_error.lock().unwrap() = e.to_string();
+                -1
             }
-        })),
-        None => None,
-    };
-
-    let engine = &ctx_ref.engine;
-    match engine.speak_sync(
-        &text_str,
-        voice.as_deref(),
-        rate,
-        pitch,
-        volume,
-        on_audio_closure
-            .as_mut()
-            .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
-        on_boundary_closure
-            .as_mut()
-            .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
-    ) {
-        Ok(()) => 0,
-        Err(e) => {
-            *ctx_ref.last_error.lock().unwrap() = e.to_string();
-            -1
         }
-    }
-})
+    })
 }
 
 /// Stop any in-progress speech.
@@ -548,7 +547,7 @@ pub extern "C" fn tts_set_on_audio(
         }
         let ctx_ref = unsafe { &*ctx };
         // Single critical section: a reader can never observe a new cb
-        // paired with stale userdata (§4 H2).
+        // paired with stale userdata.
         *ctx_ref.on_audio.lock().unwrap() = AudioCallback { cb, userdata };
     }));
 }
@@ -639,7 +638,8 @@ pub extern "C" fn tts_get_engines(
         }
 
         0
-    })).unwrap_or(-1)
+    }))
+    .unwrap_or(-1)
 }
 
 /// Free an engine info array previously returned by [`tts_get_engines`].
@@ -687,14 +687,12 @@ pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
     // If context provided and valid, return per-context error
     if !ctx.is_null() {
         let ctx_ref = unsafe { &*ctx };
-        match ctx_ref.last_error.lock() {
-            Ok(guard) => {
-                if !guard.is_empty() {
-                    let cstr = std::ffi::CString::new(guard.as_str()).unwrap_or_else(|_| CString::new("error").unwrap());
-                    return cstr.as_ptr();
-                }
+        if let Ok(guard) = ctx_ref.last_error.lock() {
+            if !guard.is_empty() {
+                let cstr = std::ffi::CString::new(guard.as_str())
+                    .unwrap_or_else(|_| CString::new("error").unwrap());
+                return cstr.as_ptr();
             }
-            Err(_) => {}
         }
     }
 
@@ -790,7 +788,8 @@ pub extern "C" fn tts_synth_to_bytes(
                 -1
             }
         }
-    })).unwrap_or(-1)
+    }))
+    .unwrap_or(-1)
 }
 
 /// Free a byte buffer returned by [`tts_synth_to_bytes`].

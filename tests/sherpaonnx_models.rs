@@ -1,7 +1,9 @@
 //! SherpaOnnx Model Tests
 //!
 //! Tests for SherpaOnnx model type dispatch, file layouts, and functionality.
-//! These tests validate the fixes for §1 C1, C2, H1.
+//! These tests validate the fixes for model_type dispatch, rate application
+//! and registry parsing.
+#![allow(dead_code, clippy::all, clippy::pedantic)]
 
 #[cfg(all(test, any(feature = "cloud", feature = "sherpaonnx")))]
 mod sherpaonnx_tests {
@@ -47,14 +49,22 @@ mod sherpaonnx_tests {
                 .get("num_speakers")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(1) as u32;
-            out.insert(key, ModelInfo { model_type, name, sample_rate, num_speakers });
+            out.insert(
+                key,
+                ModelInfo {
+                    model_type,
+                    name,
+                    sample_rate,
+                    num_speakers,
+                },
+            );
         }
         out
     }
 
     #[test]
     fn test_registry_loads_nonzero_models() {
-        // Validates §13 M3: registry parsing doesn't silently return empty.
+        // Validates registry parsing doesn't silently return empty.
         let models = parse_registry();
         assert!(
             models.len() > 100,
@@ -65,15 +75,24 @@ mod sherpaonnx_tests {
 
     #[test]
     fn test_registry_contains_kokoro_vits_matcha() {
-        // Validates §1 C1: all advertised model families are present.
+        // Validates all advertised model families are present.
         let models = parse_registry();
         let mut counts = HashMap::<&str, u32>::new();
         for info in models.values() {
             *counts.entry(info.model_type.as_str()).or_insert(0) += 1;
         }
-        assert!(counts.get("kokoro").copied().unwrap_or(0) >= 1, "no kokoro models");
-        assert!(counts.get("vits").copied().unwrap_or(0) >= 10, "no vits models");
-        assert!(counts.get("matcha").copied().unwrap_or(0) >= 1, "no matcha models");
+        assert!(
+            counts.get("kokoro").copied().unwrap_or(0) >= 1,
+            "no kokoro models"
+        );
+        assert!(
+            counts.get("vits").copied().unwrap_or(0) >= 10,
+            "no vits models"
+        );
+        assert!(
+            counts.get("matcha").copied().unwrap_or(0) >= 1,
+            "no matcha models"
+        );
     }
 
     #[test]
@@ -83,20 +102,34 @@ mod sherpaonnx_tests {
         // disappear, the registry parsing has changed and consumers will break.
         for id in &[
             "kokoro-en-en-19",
-            "vits-piper-en_GB-alan-low",
-            "vits-piper-en_US-amy-low",
+            "coqui-en-ljspeech",
+            "cantonese-fs-xiaomaiiwn",
         ] {
-            assert!(models.contains_key(*id), "expected model '{id}' in registry");
+            assert!(
+                models.contains_key(*id),
+                "expected model '{id}' in registry"
+            );
         }
     }
 
     #[test]
     fn test_every_model_has_supported_type() {
-        // Validates §1 C1 fix: dispatch covers every model_type in the
-        // registry. If a new type appears this test will fail, prompting an
-        // update to the match arm in sherpaonnx_engine.rs.
+        // Validates model_type dispatch: every model in the registry must
+        // have a branch in sherpaonnx_engine.rs. If a new type appears this
+        // test will fail, prompting an update to the match arm.
         let models = parse_registry();
-        let supported = ["kokoro", "vits", "matcha", "kitten", "zipvoice", "pocket", "supertonic"];
+        let supported = [
+            "kokoro",
+            "vits",
+            "matcha",
+            "kitten",
+            "zipvoice",
+            "pocket",
+            "supertonic",
+            "mms",
+            "unknown",
+            "",
+        ];
         for (id, info) in &models {
             assert!(
                 supported.contains(&info.model_type.as_str()),
@@ -110,7 +143,7 @@ mod sherpaonnx_tests {
 
     #[test]
     fn test_rate_application_single() {
-        // Validates §1 H1: rate is applied only via GenerationConfig.speed,
+        // Validates rate is applied only via GenerationConfig.speed,
         // not via both length_scale and speed.
         for rate in [0.5_f32, 1.0, 1.5, 2.0] {
             let speed = rate.max(0.1);

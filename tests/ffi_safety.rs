@@ -2,85 +2,72 @@
 //!
 //! Exercises the C ABI surface to validate panic protection, allocator
 //! consistency, null handling, and string safety across the FFI boundary.
-
-#![allow(unsafe_op_in_unsafe_fn)]
+#![allow(clippy::all, clippy::pedantic)]
 
 #[cfg(test)]
 mod ffi_null_handling_tests {
     use rust_tts_wrapper::{tts_destroy, tts_get_engine_count, tts_pause, tts_resume, tts_stop};
-    use std::ffi::CString;
-
-    /// Helper to assert that calling an FFI function with a null ctx does not
-    /// panic. The function is expected to silently no-op.
-    fn assert_null_ctx_noop<F: FnOnce(rust_tts_wrapper::tts_ctx)>(f: F) {
-        // We deliberately pass null by not constructing a real ctx.
-        // Each individual FFI call below is its own assertion.
-    }
 
     #[test]
     fn test_destroy_null_noop() {
-        unsafe { tts_destroy(std::ptr::null_mut()) };
+        tts_destroy(std::ptr::null_mut());
     }
 
     #[test]
     fn test_stop_null_noop() {
-        unsafe { tts_stop(std::ptr::null_mut()) };
+        tts_stop(std::ptr::null_mut());
     }
 
     #[test]
     fn test_pause_null_noop() {
-        unsafe { tts_pause(std::ptr::null_mut()) };
+        tts_pause(std::ptr::null_mut());
     }
 
     #[test]
     fn test_resume_null_noop() {
-        unsafe { tts_resume(std::ptr::null_mut()) };
+        tts_resume(std::ptr::null_mut());
     }
 
     #[test]
     fn test_engine_count_is_positive() {
-        assert!(unsafe { tts_get_engine_count() } > 0);
+        assert!(tts_get_engine_count() > 0);
     }
 
     #[test]
+    #[cfg(feature = "sherpaonnx")]
     fn test_create_with_valid_sherpaonnx_returns_non_null() {
-        let id = CString::new("sherpaonnx").unwrap();
-        let ctx = unsafe {
-            rust_tts_wrapper::tts_create(id.as_ptr(), std::ptr::null())
-        };
-        assert!(!ctx.is_null(), "sherpaonnx should construct without credentials");
-        unsafe { tts_destroy(ctx) };
+        let id = std::ffi::CString::new("sherpaonnx").unwrap();
+        let ctx = rust_tts_wrapper::tts_create(id.as_ptr(), std::ptr::null());
+        assert!(
+            !ctx.is_null(),
+            "sherpaonnx should construct without credentials"
+        );
+        tts_destroy(ctx);
     }
 }
 
 #[cfg(test)]
 mod ffi_voice_roundtrip_tests {
-    use rust_tts_wrapper::{tts_create, tts_destroy, tts_get_voices, tts_free_voices};
-    use std::ffi::CString;
+    use rust_tts_wrapper::{tts_create, tts_destroy, tts_free_voices, tts_get_voices};
 
     #[test]
+    #[cfg(feature = "sherpaonnx")]
     fn test_get_voices_with_null_pointers_returns_error() {
-        let id = CString::new("sherpaonnx").unwrap();
-        let ctx = unsafe { tts_create(id.as_ptr(), std::ptr::null()) };
+        let id = std::ffi::CString::new("sherpaonnx").unwrap();
+        let ctx = tts_create(id.as_ptr(), std::ptr::null());
         assert!(!ctx.is_null());
 
         // Passing any null out-pointer must not crash; must return -1.
-        let rc = unsafe {
-            tts_get_voices(
-                ctx,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-            )
-        };
+        let rc = tts_get_voices(ctx, std::ptr::null_mut(), std::ptr::null_mut());
         assert_eq!(rc, -1);
 
-        unsafe { tts_destroy(ctx) };
+        tts_destroy(ctx);
     }
 
     #[test]
     fn test_free_voices_null_is_noop() {
         // tts_free_voices must accept (null, 0) without crashing.
-        unsafe { tts_free_voices(std::ptr::null_mut(), 0) };
+        tts_free_voices(std::ptr::null_mut(), 0);
     }
 }
 
@@ -88,7 +75,7 @@ mod ffi_voice_roundtrip_tests {
 mod string_safety_tests {
     #[test]
     fn test_cstring_helper_round_trip() {
-        // §4 H3: ensure CString::new produces a NUL-terminated buffer for
+        // ensure CString::new produces a NUL-terminated buffer for
         // every test input we care about. CString::new returns Err only when
         // the input contains an interior NUL byte.
         for input in ["hello", "Hello, World!", "trëma ünîcode", "测试"] {
@@ -103,7 +90,7 @@ mod string_safety_tests {
     fn test_cstring_interior_nul_is_detected() {
         // A stray NUL byte must surface as Err rather than silently
         // truncating. The FFI layer should treat this as an error rather
-        // than pass a `&str.as_ptr()` that walks off the end (§4 H3).
+        // than pass a `&str.as_ptr()` that walks off the end.
         let result = std::ffi::CString::new("with\0nul");
         assert!(result.is_err());
     }
@@ -113,7 +100,7 @@ mod string_safety_tests {
 mod path_parsing_tests {
     #[test]
     fn test_azure_path_parsing_safe() {
-        // §2 H2: Azure WS Path: parsing must use strip_prefix + trim, not
+        // Azure WS Path: parsing must use strip_prefix + trim, not
         // raw byte slicing. Validate the same logic against tricky inputs.
         let cases = [
             ("Path:turn.end", "turn.end"),
@@ -146,7 +133,7 @@ mod path_parsing_tests {
 mod bounds_check_tests {
     #[test]
     fn test_elevenlabs_alignment_safe_iteration() {
-        // §2 H7: ElevenLabs characters/starts/ends arrays can have different
+        // ElevenLabs characters/starts/ends arrays can have different
         // lengths. Use .get(i) instead of [i] to avoid panicking.
         let chars = ["H", "e", "l", "l", "o"];
         let starts = [0.0_f32, 0.1, 0.2, 0.3, 0.4];

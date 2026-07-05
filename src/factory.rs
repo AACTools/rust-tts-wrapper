@@ -25,7 +25,7 @@ use crate::system_engine::SystemEngine;
 pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
     // Detect engines that exist in the full catalogue but were compiled out
     // by disabled features, so callers get a useful error rather than a
-    // generic "unknown engine" (§9 H1). Only emit these messages when the
+    // generic "unknown engine". Only emit these messages when the
     // caller actually asked for one of the gated engines.
     match engine_id {
         "system" => {
@@ -101,7 +101,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
                     .join(", ")
             );
         }
-        return result;
+        result
     }
 
     #[cfg(not(feature = "cloud"))]

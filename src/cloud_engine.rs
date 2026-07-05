@@ -157,7 +157,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             synth_url: "https://api.deepgram.com/v1/speak".into(),
             auth_header: "Authorization".into(),
             auth_prefix: "Token ".into(),
-            voice_param: "model".into(),  // Fixed: Deepgram uses "model" not "voice"
+            voice_param: "model".into(), // Fixed: Deepgram uses "model" not "voice"
             default_voice: Some("aura-asteria-en".into()),
             text_field: "text".into(),
             provider_id: "deepgram".into(),
@@ -173,7 +173,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 auth_prefix: "Bearer ".into(),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
-                extra_headers: extra_headers,
+                extra_headers,
                 provider_id: "playht".into(),
                 ..Default::default()
             })
@@ -192,13 +192,16 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             let voice_name = creds.get("voice").cloned().unwrap_or_default();
             let mut extra_body = HashMap::new();
             extra_body.insert("voice".into(), serde_json::json!({"name": voice_name}));
-            extra_body.insert("audio_format".into(), serde_json::Value::String("wav".into()));
+            extra_body.insert(
+                "audio_format".into(),
+                serde_json::Value::String("wav".into()),
+            );
 
             Some(CloudConfig {
                 synth_url: "https://api.hume.ai/v0/tts".into(),
                 auth_header: "Authorization".into(),
                 auth_prefix: "Bearer ".into(),
-                voice_param: "".into(),  // Not used - voice in extra_body
+                voice_param: String::new(), // Not used - voice in extra_body
                 text_field: "text".into(),
                 extra_body,
                 provider_id: "hume".into(),
@@ -320,7 +323,7 @@ fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32)
         .replace('>', "&gt;");
 
     // Escape the voice attribute value too — a stray `'` or `<` would break
-    // the SSML (§2 H12). Apostrophes are escaped using `&apos;`.
+    // the SSML. Apostrophes are escaped using `&apos;`.
     let voice_escaped = voice
         .replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -356,7 +359,7 @@ fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32)
     if (pitch - 1.0).abs() > f32::EPSILON {
         prosody_attrs.push(format!("pitch=\"{pitch_str}\""));
     }
-    // Volume was previously dropped silently (§2 H6).
+    // Volume was previously dropped silently.
     if (volume - 1.0).abs() > f32::EPSILON {
         prosody_attrs.push(format!("volume=\"{volume_str}\""));
     }
@@ -562,7 +565,7 @@ impl TtsEngine for CloudEngine {
         voice: Option<&str>,
         rate: f32,
         pitch: f32,
-        _volume: f32,
+        volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
@@ -621,9 +624,7 @@ impl TtsEngine for CloudEngine {
                 let d = doy - (153 * mp + 2) / 5 + 1;
                 let m = if mp < 10 { mp + 3 } else { mp - 9 };
                 let year = if m <= 2 { y + 1 } else { y };
-                format!(
-                    "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"
-                )
+                format!("{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z")
             };
 
             // Send config (must include X-Timestamp per Azure protocol).
@@ -640,7 +641,7 @@ impl TtsEngine for CloudEngine {
                 .map_err(|e| TtsError(format!("WS config send error: {e}")))?;
 
             // Send SSML
-            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, _volume);
+            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, volume);
             let ssml_msg = format!(
                 "X-RequestId:{request_id}\r\nX-Timestamp:{}\r\nContent-Type:application/ssml+xml\r\nX-StreamId:{request_id}\r\nPath:ssml\r\n\r\n{ssml}",
                 now_timestamp()
@@ -665,7 +666,8 @@ impl TtsEngine for CloudEngine {
                     Message::Text(t) => {
                         let text_msg = t.as_str();
                         let path_line = text_msg.lines().find(|l| l.starts_with("Path:"));
-                        let path = path_line.map_or("", |l| l.strip_prefix("Path:").unwrap_or(l).trim());
+                        let path =
+                            path_line.map_or("", |l| l.strip_prefix("Path:").unwrap_or(l).trim());
 
                         // Parse out JSON body once for the branches below.
                         let body = if let Some(idx) = text_msg.find("\r\n\r\n") {
@@ -678,7 +680,7 @@ impl TtsEngine for CloudEngine {
 
                         // Error handling: Azure reports synthesis failures via
                         // `Path:response` with a JSON body containing `Error`.
-                        // Without this the loop would hang on failures (§2 H4).
+                        // Without this the loop would hang on failures.
                         if path == "response" || path == "turn.end" {
                             if !body.is_empty() {
                                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
@@ -686,10 +688,7 @@ impl TtsEngine for CloudEngine {
                                         let reason = err
                                             .get("Message")
                                             .and_then(|v| v.as_str())
-                                            .or_else(|| {
-                                                json.get("reason")
-                                                    .and_then(|v| v.as_str())
-                                            })
+                                            .or_else(|| json.get("reason").and_then(|v| v.as_str()))
                                             .unwrap_or("Azure synthesis failed");
                                         let _ = socket.close(None);
                                         return Err(TtsError(reason.to_string()));
@@ -800,7 +799,7 @@ impl TtsEngine for CloudEngine {
         // Body depends on engine type
         let resp = if self.config.body_is_ssml {
             // Azure: send SSML XML body
-            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, _volume);
+            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, volume);
             let ct = self
                 .config
                 .content_type
@@ -888,8 +887,14 @@ impl TtsEngine for CloudEngine {
                         for i in 0..chars.len() {
                             // Bounds check for all arrays to prevent OOB indexing
                             let char_str = chars.get(i).and_then(|v| v.as_str()).unwrap_or("");
-                            let start_time = starts.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
-                            let end_time = ends.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let start_time = starts
+                                .get(i)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.0) as f32;
+                            let end_time = ends
+                                .get(i)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.0) as f32;
 
                             if char_str.trim().is_empty() {
                                 if has_started {
@@ -1043,8 +1048,8 @@ impl TtsEngine for CloudEngine {
                 // Generic: try to parse as array of objects with id/name fields.
                 // Handles both lowercase fields (ElevenLabs, Deepgram, etc.)
                 // and PascalCase fields (Polly DescribeVoices: VoiceId, Gender,
-                // LanguageCode) — §2 H9. Also handles ElevenLabs `labels` being
-                // an object rather than a string — §2 H8.
+                // LanguageCode) Also handles ElevenLabs `labels` being
+                // an object rather than a string
                 json.as_array().map_or_else(
                     || Ok(vec![]),
                     |arr| {
@@ -1067,7 +1072,7 @@ impl TtsEngine for CloudEngine {
 
                                 // Gender resolution order. ElevenLabs stores
                                 // gender inside a `labels` object — handle that
-                                // explicitly (§2 H8).
+                                // explicitly.
                                 let gender_str = v
                                     .get("gender")
                                     .or_else(|| v.get("Gender"))
@@ -1078,10 +1083,10 @@ impl TtsEngine for CloudEngine {
                                             // ElevenLabs: labels is an object.
                                             if let Some(obj) = labels.as_object() {
                                                 obj.get("gender")?.as_str().map(str::to_string)
-                                            } else if let Some(s) = labels.as_str() {
-                                                Some(s.to_string())
                                             } else {
-                                                None
+                                                labels
+                                                    .as_str()
+                                                    .map(std::string::ToString::to_string)
                                             }
                                         })
                                     })
@@ -1099,9 +1104,9 @@ impl TtsEngine for CloudEngine {
                                     .map(str::to_string)
                                     .or_else(|| {
                                         v.get("labels").and_then(|labels| {
-                                            labels
-                                                .as_object()
-                                                .and_then(|o| o.get("language")?.as_str().map(str::to_string))
+                                            labels.as_object().and_then(|o| {
+                                                o.get("language")?.as_str().map(str::to_string)
+                                            })
                                         })
                                     })
                                     .unwrap_or_default();
@@ -1111,7 +1116,11 @@ impl TtsEngine for CloudEngine {
                                 } else {
                                     vec![crate::types::LanguageCode {
                                         bcp47: lang.clone(),
-                                        iso639_3: lang.split(['-', '_']).next().unwrap_or(&lang).to_string(),
+                                        iso639_3: lang
+                                            .split(['-', '_'])
+                                            .next()
+                                            .unwrap_or(&lang)
+                                            .to_string(),
                                         display: lang,
                                     }]
                                 };
@@ -1298,9 +1307,12 @@ mod tests {
 
     #[test]
     fn test_azure_ssml_escapes_voice_name() {
-        // §2 H12: a stray apostrophe in the voice name must not break the SSML.
+        // a stray apostrophe in the voice name must not break the SSML.
         let ssml = build_azure_ssml("hi", "en-US-Voice'Name", 1.0, 1.0, 1.0);
-        assert!(ssml.contains("&apos;"), "voice apostrophe should be escaped");
+        assert!(
+            ssml.contains("&apos;"),
+            "voice apostrophe should be escaped"
+        );
         assert!(!ssml.contains("Voice'Name"));
     }
 
@@ -1315,8 +1327,9 @@ mod tests {
 
     #[test]
     fn test_watson_auth_header_format() {
-        // §2 C1: Watson Basic auth is base64("apikey:KEY") — not the malformed
+        // Watson Basic auth is base64("apikey:KEY") — not the malformed
         // "<base64(KEY)>:" that shipped originally.
+        use base64::Engine as _;
         let api_key = "test_key_123";
         let encoded = base64_encode(&format!("apiKey:{api_key}"));
         let auth_header = format!("Basic {encoded}");
@@ -1334,7 +1347,7 @@ mod tests {
 
     #[test]
     fn test_playht_config_has_user_id_header() {
-        // §2 C3: userId belongs in the X-User-ID header, not the JSON body.
+        // userId belongs in the X-User-ID header, not the JSON body.
         let mut creds = HashMap::new();
         creds.insert("userId".to_string(), "u-123".to_string());
         creds.insert("apiKey".to_string(), "k".to_string());
@@ -1349,7 +1362,7 @@ mod tests {
 
     #[test]
     fn test_deepgram_uses_model_param() {
-        // §2 H10: Deepgram's /v1/speak takes `model` as the voice parameter.
+        // Deepgram's /v1/speak takes `model` as the voice parameter.
         let creds = HashMap::new();
         let cfg = build_config("deepgram", &creds).expect("deepgram config");
         assert_eq!(cfg.voice_param, "model");
@@ -1357,7 +1370,7 @@ mod tests {
 
     #[test]
     fn test_hume_voice_is_object_in_extra_body() {
-        // §2 H11: Hume expects voice as {"voice": {"name": "..."}}.
+        // Hume expects voice as {"voice": {"name": "..."}}.
         let creds = HashMap::new();
         let cfg = build_config("hume", &creds).expect("hume config");
         let voice = cfg
@@ -1374,7 +1387,7 @@ mod tests {
 
     #[test]
     fn test_polly_unsupported_returns_none() {
-        // §2 C2: AWS Polly needs SigV4. We surface this by returning None
+        // AWS Polly needs SigV4. We surface this by returning None
         // (and emitting a warning) rather than constructing a broken config.
         let creds = HashMap::new();
         assert!(build_config("polly", &creds).is_none());

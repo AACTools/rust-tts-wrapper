@@ -1,8 +1,9 @@
 //! Integration tests for critical fixes
 //!
-//! Tests that validate fixes for the Critical/High issues identified in
-//! ISSUES.md. Uses the public API surface so the tests exercise the same
+//! Tests that validate fixes for the Critical/High issues identified in the
+//! audit. Uses the public API surface so the tests exercise the same
 //! code paths as external consumers.
+#![allow(clippy::all, clippy::pedantic)]
 
 #[cfg(test)]
 mod factory_tests {
@@ -12,16 +13,15 @@ mod factory_tests {
     fn test_engine_list_contains_builtins() {
         let list = engine_list();
         let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
-        // sherpaonnx + cloud + (platform native) are always present in the
-        // default feature set. We don't pin an exact count because the list
-        // varies by platform (avsynth on macOS, sapi on Windows).
+        // Cloud engines should always be present in the default build.
+        assert!(ids.contains(&"openai"), "missing openai; got {ids:?}");
+        assert!(ids.contains(&"azure"), "missing azure; got {ids:?}");
+        // sherpaonnx is only present when the feature is on.
+        #[cfg(feature = "sherpaonnx")]
         assert!(
             ids.contains(&"sherpaonnx"),
             "missing sherpaonnx; got {ids:?}"
         );
-        // Cloud engines should always be present in the default build.
-        assert!(ids.contains(&"openai"), "missing openai; got {ids:?}");
-        assert!(ids.contains(&"azure"), "missing azure; got {ids:?}");
     }
 
     #[test]
@@ -31,21 +31,23 @@ mod factory_tests {
 
     #[test]
     fn test_create_unknown_engine_returns_none() {
-        // §9 H1: should return None with a helpful warning rather than panic.
+        // should return None with a helpful warning rather than panic.
         assert!(create_engine("does-not-exist", "").is_none());
     }
 
     #[test]
+    #[cfg(feature = "sherpaonnx")]
     fn test_create_sherpaonnx_engine_succeeds() {
-        // §1 H3: with no modelId set, the engine still constructs (it errors
+        // with no modelId set, the engine still constructs (it errors
         // at speak-time, not construction-time).
         let engine = create_engine("sherpaonnx", "");
         assert!(engine.is_some(), "sherpaonnx should construct");
     }
 
     #[test]
+    #[cfg(feature = "sherpaonnx")]
     fn test_create_sherpaonnx_engine_reads_num_threads() {
-        // §1 H4: numThreads should be parsed from credentials without panicking.
+        // numThreads should be parsed from credentials without panicking.
         let creds = r#"{"numThreads":"4","provider":"cpu"}"#;
         let engine = create_engine("sherpaonnx", creds);
         assert!(engine.is_some());
@@ -94,7 +96,7 @@ mod cloud_engine_smoke_tests {
 
     #[test]
     fn test_polly_is_not_constructable() {
-        // §2 C2: Polly needs SigV4 — engine creation must surface as None.
+        // Polly needs SigV4 — engine creation must surface as None.
         let creds = r#"{"accessKeyId":"a","secretAccessKey":"s","region":"us-east-1"}"#;
         assert!(create_engine("polly", creds).is_none());
     }
@@ -141,26 +143,26 @@ mod ffi_boundary_tests {
 
     #[test]
     fn test_ffi_null_engine_id_does_not_panic() {
-        // §4 C1: passing null must be caught by catch_unwind and return null.
-        let ptr = unsafe { tts_create(std::ptr::null(), std::ptr::null()) };
+        // passing null must be caught by catch_unwind and return null.
+        let ptr = tts_create(std::ptr::null(), std::ptr::null());
         assert!(ptr.is_null());
     }
 
     #[test]
     fn test_ffi_create_unknown_engine_returns_null() {
         let id = std::ffi::CString::new("definitely-not-an-engine").unwrap();
-        let ptr = unsafe { tts_create(id.as_ptr(), std::ptr::null()) };
+        let ptr = tts_create(id.as_ptr(), std::ptr::null());
         assert!(ptr.is_null());
     }
 
     #[test]
     fn test_ffi_destroy_null_is_noop() {
-        // §4 M2: tts_destroy accepts null as a no-op without panicking.
-        unsafe { tts_destroy(std::ptr::null_mut()) };
+        // tts_destroy accepts null as a no-op without panicking.
+        tts_destroy(std::ptr::null_mut());
     }
 
     #[test]
     fn test_ffi_engine_count_positive() {
-        assert!(unsafe { tts_get_engine_count() } > 0);
+        assert!(tts_get_engine_count() > 0);
     }
 }
