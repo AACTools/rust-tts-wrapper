@@ -30,14 +30,16 @@ jobs:
       run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
 
     - name: Select feature set per platform
-      # `sapi` only builds on Windows; `avsynth` only on macOS. Use a
-      # platform-specific feature set rather than --all-features so every
-      # job lints and tests a build that actually compiles.
+      # `sapi` only builds on Windows; `avsynth` only on macOS; sherpa-onnx
+      # has intermittent 504 download failures on the GitHub Actions runners
+      # (see TODO.md). Use a per-platform feature set that gives us reliable
+      # CI signal; sherpa-onnx is covered by a separate allow-failure job
+      # below.
       shell: bash
       run: |
         case "${{ matrix.os }}" in
-          ubuntu-latest)  echo "FEATURES=--no-default-features --features system,cloud,sherpaonnx" >> $GITHUB_ENV ;;
-          windows-latest) echo "FEATURES=--no-default-features --features sapi,cloud,sherpaonnx"   >> $GITHUB_ENV ;;
+          ubuntu-latest)  echo "FEATURES=--no-default-features --features system,cloud" >> $GITHUB_ENV ;;
+          windows-latest) echo "FEATURES=--no-default-features --features sapi,cloud,sherpaonnx" >> $GITHUB_ENV ;;
           macos-latest)   echo "FEATURES=--no-default-features --features avsynth,cloud,sherpaonnx" >> $GITHUB_ENV ;;
         esac
 
