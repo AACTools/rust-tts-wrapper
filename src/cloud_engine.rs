@@ -1012,6 +1012,7 @@ impl TtsEngine for CloudEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_lines)]
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         let Some(ref voices_url) = self.config.voices_url else {
             return Ok(vec![]);

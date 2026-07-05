@@ -33,14 +33,15 @@ impl SapiEngine {
             com_initialized: Mutex::new(com_initialized),
         }
     }
-
     /// Create the ISpVoice. Returns `(voice, did_init_com)`.
     unsafe fn create_voice() -> (Option<ISpVoice>, bool) {
         // COINIT_MULTITHREADED is the standard apartment model for non-UI
         // threads. We track whether *we* initialised COM so that Drop can
         // balance the reference count.
         let did_init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-        let voice = CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok();
+        // The windows 0.62 crate exposes the SpVoice COM class CLSID under
+        // the unadorned name `SpVoice` (not `CLSID_SpVoice`).
+        let voice = CoCreateInstance::<_, ISpVoice>(&SpVoice, None, CLSCTX_ALL).ok();
         (voice, did_init)
     }
 
@@ -48,7 +49,7 @@ impl SapiEngine {
     // enumerate the voice category tokens directly through the COM interface.
     unsafe fn enum_voice_tokens() -> Result<IEnumSpObjectTokens> {
         let category: ISpObjectTokenCategory =
-            CoCreateInstance(&SPCATTOKENCATEGORY_CLSID, None, CLSCTX_ALL)?;
+            CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
         category.SetId(SPCAT_VOICES, false)?;
         category.EnumTokens(PCWSTR::null(), PCWSTR::null())
     }
