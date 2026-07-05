@@ -48,7 +48,9 @@ mod ffi_null_handling_tests {
 
 #[cfg(test)]
 mod ffi_voice_roundtrip_tests {
-    use rust_tts_wrapper::{tts_create, tts_destroy, tts_free_voices, tts_get_voices};
+    use rust_tts_wrapper::tts_free_voices;
+    #[cfg(feature = "sherpaonnx")]
+    use rust_tts_wrapper::{tts_create, tts_destroy, tts_get_voices};
 
     #[test]
     #[cfg(feature = "sherpaonnx")]

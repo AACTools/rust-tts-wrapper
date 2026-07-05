@@ -251,22 +251,51 @@ impl TtsEngine for SherpaOnnxEngine {
             )));
         }
 
-        // Dispatch model config by model_type. Each branch honours the file
-        // layout documented in the Sherpa-ONNX model registry.
+        // Dispatch model config by model_type. The branches below mirror the
+        // file-layout conventions used by js-tts-wrapper and dotnet-tts-wrapper:
+        //
+        //   kokoro  → model.onnx + voices.bin + tokens.txt + espeak-ng-data/
+        //   matcha  → acoustic-model.onnx + vocoder.onnx + tokens.txt
+        //             (vocoder may be hifigan_v2.onnx, vocos-22khz-univ.onnx,
+        //              or live in a shared base dir)
+        //   vits    → model.onnx + tokens.txt + (lexicon.txt | espeak-ng-data/)
+        //             Piper / GitHub models prefer espeak-ng-data and ignore
+        //             dict_dir; Chinese models want a dict/ directory for
+        //             jieba segmentation.
+        //   mms /   → MMS models use the VITS config but typically have no
+        //   unknown   espeak-ng-data; they ship just model.onnx + tokens.txt
+        //             + lexicon.txt.
+        //
+        // The merged_models registry has ~1143 MMS entries that omit
+        // `model_type`, so empty/unknown falls through to VITS handling.
+        let id_lower = self.loaded_model_id.to_ascii_lowercase();
+        let is_piper_or_github = is_piper_or_github_model(&id_lower);
+        let is_chinese = id_lower.starts_with("vits-icefall-zh")
+            || id_lower.contains("cantonese")
+            || id_lower.starts_with("mms_zho")
+            || id_lower.starts_with("mms_cmn");
+
         let model_config = match model_info.model_type.as_str() {
             "kokoro" => sherpa_onnx::OfflineTtsModelConfig {
-                kokoro: sherpa_onnx::OfflineTtsKokoroModelConfig {
+                kokoro: build_kokoro_config(&model_dir),
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
+            "matcha" => sherpa_onnx::OfflineTtsModelConfig {
+                matcha: build_matcha_config(&model_dir, &self.model_dir)?,
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
+            "kitten" => sherpa_onnx::OfflineTtsModelConfig {
+                kitten: sherpa_onnx::OfflineTtsKittenModelConfig {
                     model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
                     voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-                    data_dir: Some(
-                        model_dir
-                            .join("espeak-ng-data")
-                            .to_string_lossy()
-                            .to_string(),
-                    ),
-                    // length_scale is left at default — rate is applied via
-                    // GenerationConfig.speed to avoid the double-rate bug.
+                    data_dir: existing_path(&model_dir, "espeak-ng-data"),
                     ..Default::default()
                 },
                 num_threads: self.num_threads,
@@ -275,92 +304,9 @@ impl TtsEngine for SherpaOnnxEngine {
                 ..Default::default()
             },
             // VITS, MMS (Facebook Massively Multilingual Speech), and unknown
-            // model types all use the VITS config family. The merged_models
-            // registry has ~1143 MMS entries that omit `model_type`, so we
-            // fall through to VITS rather than reject them.
-            "vits" | "mms" | "unknown" | "" => {
-                let lexicon = model_dir.join("lexicon.txt");
-                let dict_dir = model_dir.join("dict");
-                let espeak_data = model_dir.join("espeak-ng-data");
-                sherpa_onnx::OfflineTtsModelConfig {
-                    vits: sherpa_onnx::OfflineTtsVitsModelConfig {
-                        model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
-                        tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-                        lexicon: if lexicon.exists() {
-                            Some(lexicon.to_string_lossy().to_string())
-                        } else {
-                            None
-                        },
-                        data_dir: if espeak_data.exists() {
-                            Some(espeak_data.to_string_lossy().to_string())
-                        } else {
-                            None
-                        },
-                        dict_dir: if dict_dir.exists() {
-                            Some(dict_dir.to_string_lossy().to_string())
-                        } else {
-                            None
-                        },
-                        ..Default::default()
-                    },
-                    num_threads: self.num_threads,
-                    debug: false,
-                    provider: self.provider.clone(),
-                    ..Default::default()
-                }
-            }
-            "matcha" => {
-                // Matcha models use acoustic-model.onnx + a vocoder (hifigan_v2.onnx).
-                // Try the common naming variants seen in the registry.
-                let acoustic = first_existing(
-                    &model_dir,
-                    &["acoustic-model.onnx", "model-steps-3.onnx", "model.onnx"],
-                );
-                let vocoder = first_existing(
-                    &model_dir,
-                    &["hifigan_v2.onnx", "hifigan_v2_en_zh.onnx", "vocoder.onnx"],
-                );
-                let tokens = model_dir.join("tokens.txt");
-                let dict_dir = model_dir.join("dict");
-                sherpa_onnx::OfflineTtsModelConfig {
-                    matcha: sherpa_onnx::OfflineTtsMatchaModelConfig {
-                        acoustic_model: Some(
-                            acoustic
-                                .map(|p| p.to_string_lossy().to_string())
-                                .ok_or_else(|| {
-                                    TtsError("Matcha acoustic model not found".into())
-                                })?,
-                        ),
-                        vocoder: vocoder.as_ref().map(|p| p.to_string_lossy().to_string()),
-                        lexicon: None,
-                        tokens: Some(tokens.to_string_lossy().to_string()),
-                        data_dir: None,
-                        dict_dir: if dict_dir.exists() {
-                            Some(dict_dir.to_string_lossy().to_string())
-                        } else {
-                            None
-                        },
-                        ..Default::default()
-                    },
-                    num_threads: self.num_threads,
-                    debug: false,
-                    provider: self.provider.clone(),
-                    ..Default::default()
-                }
-            }
-            "kitten" => sherpa_onnx::OfflineTtsModelConfig {
-                kitten: sherpa_onnx::OfflineTtsKittenModelConfig {
-                    model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
-                    voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
-                    tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-                    data_dir: Some(
-                        model_dir
-                            .join("espeak-ng-data")
-                            .to_string_lossy()
-                            .to_string(),
-                    ),
-                    ..Default::default()
-                },
+            // model types all use the VITS config family.
+            "vits" | "mms" | "unknown" | "" => sherpa_onnx::OfflineTtsModelConfig {
+                vits: build_vits_config(&model_dir, is_piper_or_github, is_chinese),
                 num_threads: self.num_threads,
                 debug: false,
                 provider: self.provider.clone(),
@@ -376,6 +322,9 @@ impl TtsEngine for SherpaOnnxEngine {
 
         let config = sherpa_onnx::OfflineTtsConfig {
             model: model_config,
+            // Single-sentence mode matches the reference implementations and
+            // avoids extra allocations when the input is short.
+            max_num_sentences: 1,
             ..Default::default()
         };
 
@@ -537,11 +486,6 @@ fn apply_volume_and_pitch(samples: &[f32], volume: f32, pitch: f32) -> Vec<f32> 
     }
 }
 
-/// Return the first existing file from `dir` matching one of `names`.
-fn first_existing(dir: &std::path::Path, names: &[&str]) -> Option<std::path::PathBuf> {
-    names.iter().map(|n| dir.join(n)).find(|p| p.exists())
-}
-
 /// Write a 16-bit PCM mono WAV file. Returns `false` on I/O error.
 fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: i32) -> bool {
     use std::io::Write;
@@ -614,4 +558,184 @@ fn play_wav_file(path: &std::path::Path) {
         return;
     };
     let _ = result;
+}
+
+// ===== Model-config builders =====
+//
+// These helpers encapsulate the file-layout differences between Kokoro,
+// Matcha, and the various VITS flavours (Piper, MMS, Coqui, Chinese, ...).
+// They mirror the per-model logic in js-tts-wrapper / dotnet-tts-wrapper.
+
+/// Return `Some(path)` only when `dir/name` exists on disk; otherwise `None`.
+fn existing_path(dir: &std::path::Path, name: &str) -> Option<String> {
+    let p = dir.join(name);
+    if p.exists() {
+        Some(p.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+/// Walk `dir` and return the path of the first child matching `name`, if any.
+fn find_file(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            if path.file_name().is_some_and(|n| n == name) {
+                Some(path)
+            } else {
+                None
+            }
+        })
+}
+
+/// Return the first existing file under `dir` matching one of `names`.
+fn first_existing(dir: &std::path::Path, names: &[&str]) -> Option<std::path::PathBuf> {
+    names.iter().map(|n| dir.join(n)).find(|p| p.exists())
+}
+
+/// Heuristic: is this a Piper voice or another "GitHub-style" archive model
+/// (Coqui / icefall / mimic3 / melo / vctk / ljs / cantonese / zh / kokoro)?
+/// These layouts ship `espeak-ng-data/` rather than a lexicon and shouldn't
+/// be configured with `dict_dir` (jieba would otherwise warn on every call).
+fn is_piper_or_github_model(model_id: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "piper-",
+        "coqui-",
+        "icefall-",
+        "mimic3-",
+        "melo-",
+        "vctk-",
+        "zh-",
+        "ljs-",
+        "cantonese-",
+        "kokoro-",
+    ];
+    PREFIXES.iter().any(|p| model_id.starts_with(p))
+}
+
+/// Kokoro config: model.onnx + voices.bin + tokens.txt + espeak-ng-data/.
+fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKokoroModelConfig {
+    sherpa_onnx::OfflineTtsKokoroModelConfig {
+        model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+        voices: existing_path(model_dir, "voices.bin"),
+        tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
+        data_dir: existing_path(model_dir, "espeak-ng-data"),
+        // length_scale left at default — rate is applied via GenerationConfig.speed.
+        ..Default::default()
+    }
+}
+
+/// Matcha config: acoustic-model.onnx + vocoder.onnx + tokens.txt.
+///
+/// The vocoder is commonly `hifigan_v2.onnx` (en/zh bundled), but recent
+/// models ship `vocos-22khz-univ.onnx` instead. We look for the vocoder in
+/// the model directory first, then fall back to the user's base model dir
+/// so a single shared vocoder can be reused across Matcha models.
+fn build_matcha_config(
+    model_dir: &std::path::Path,
+    base_dir: &std::path::Path,
+) -> TtsResult<sherpa_onnx::OfflineTtsMatchaModelConfig> {
+    // Acoustic model: try the canonical names in order of prevalence.
+    let acoustic = first_existing(
+        model_dir,
+        &[
+            "acoustic-model.onnx",
+            "model-steps-3.onnx",
+            "model-steps-1000.onnx",
+            "model.onnx",
+        ],
+    )
+    .ok_or_else(|| TtsError("Matcha acoustic model not found".into()))?;
+
+    // Vocoder: prefer co-located; fall back to shared in base_dir.
+    let vocoder = first_existing(
+        model_dir,
+        &[
+            "hifigan_v2.onnx",
+            "hifigan_v2_en_zh.onnx",
+            "hifigan_vitimator_v2.onnx",
+            "vocos-22khz-univ.onnx",
+            "vocoder.onnx",
+        ],
+    )
+    .or_else(|| {
+        first_existing(
+            base_dir,
+            &["vocos-22khz-univ.onnx", "hifigan_v2.onnx", "vocoder.onnx"],
+        )
+    });
+
+    Ok(sherpa_onnx::OfflineTtsMatchaModelConfig {
+        acoustic_model: Some(acoustic.to_string_lossy().to_string()),
+        vocoder: vocoder.as_ref().map(|p| p.to_string_lossy().to_string()),
+        lexicon: existing_path(model_dir, "lexicon.txt"),
+        tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
+        data_dir: existing_path(model_dir, "espeak-ng-data"),
+        dict_dir: existing_path(model_dir, "dict"),
+        ..Default::default()
+    })
+}
+
+/// VITS-family config. The right combination of lexicon / data_dir / dict_dir
+/// depends on where the model came from:
+///
+/// - Piper / GitHub models → prefer `espeak-ng-data/`, never `dict_dir`.
+/// - Chinese/Cantonese models → use `dict/` for jieba segmentation.
+/// - MMS and other VITS → `lexicon.txt` if present, else nothing.
+fn build_vits_config(
+    model_dir: &std::path::Path,
+    is_piper_or_github: bool,
+    is_chinese: bool,
+) -> sherpa_onnx::OfflineTtsVitsModelConfig {
+    // Always point at model.onnx if present; for models whose archive uses
+    // a different filename (e.g. older MMS releases), look it up by suffix.
+    let model = first_existing(
+        model_dir,
+        &["model.onnx", "vits-model.onnx", "generator.onnx"],
+    )
+    .unwrap_or_else(|| model_dir.join("model.onnx"));
+
+    // Pick the right phonetic back-end.
+    let (data_dir, dict_dir) = if is_piper_or_github {
+        // Piper & friends ship espeak-ng-data; jieba would just complain.
+        (existing_path(model_dir, "espeak-ng-data"), None)
+    } else if is_chinese {
+        // Chinese voices need jieba — point dict_dir at the bundled `dict/`.
+        let dict = existing_path(model_dir, "dict").or_else(|| {
+            // Some archives nest the dict directory under a child folder.
+            std::fs::read_dir(model_dir).ok().and_then(|entries| {
+                entries.filter_map(Result::ok).find_map(|e| {
+                    let p = e.path();
+                    if p.is_dir() && p.join("dict.txt").exists() {
+                        Some(p.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+        });
+        (existing_path(model_dir, "espeak-ng-data"), dict)
+    } else {
+        // MMS / vanilla VITS: use espeak-ng-data if present, fall back to
+        // a sibling dict/ directory only when lexicon.txt is absent.
+        let has_lexicon = model_dir.join("lexicon.txt").exists();
+        let dict = if has_lexicon {
+            None
+        } else {
+            existing_path(model_dir, "dict")
+        };
+        (existing_path(model_dir, "espeak-ng-data"), dict)
+    };
+
+    sherpa_onnx::OfflineTtsVitsModelConfig {
+        model: Some(model.to_string_lossy().to_string()),
+        tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
+        lexicon: existing_path(model_dir, "lexicon.txt"),
+        data_dir,
+        dict_dir,
+        ..Default::default()
+    }
 }
