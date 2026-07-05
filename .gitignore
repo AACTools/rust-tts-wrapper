@@ -1,3 +1,8 @@
 /target
 **/*.orig
 Cargo.lock
+
+# Local-only live cloud tests (never commit credentials)
+/tests/live_cloud.rs
+*.live.env
+/run-live-tests.sh
