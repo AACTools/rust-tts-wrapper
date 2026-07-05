@@ -268,7 +268,7 @@ impl TtsEngine for SapiEngine {
                 let gender_str = unsafe {
                     token
                         .GetStringValue(windows::core::w!("Gender"))
-                        .map_or_else(String::new, |h| h.to_hstring().to_string_lossy())
+                        .map_or_else(|_| String::new(), |h| h.to_hstring().to_string_lossy())
                 };
 
                 voices.push(Voice {
