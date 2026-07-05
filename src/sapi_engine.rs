@@ -4,8 +4,20 @@ use crate::engine::{estimate_word_boundaries, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
+// Explicit imports rather than wildcard — clippy rejects `use foo::*` for
+// non-prelude modules. The `windows` crate exposes a lot of SAPI types so
+// the list is long but unambiguous.
 #[cfg(feature = "sapi")]
-use windows::{core::*, Win32::Media::Speech::*, Win32::System::Com::*};
+use windows::{
+    core::{Result, HSTRING, PCWSTR},
+    Win32::Media::Speech::{
+        IEnumSpObjectTokens, ISpObjectToken, ISpObjectTokenCategory, ISpVoice,
+        SpObjectTokenCategory, SpVoice, SPCAT_VOICES, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
+    },
+    Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    },
+};
 
 #[derive(Debug)]
 pub struct SapiEngine {
@@ -58,11 +70,12 @@ impl SapiEngine {
         let enum_tokens = Self::enum_voice_tokens().ok()?;
 
         let mut count = 0u32;
-        enum_tokens.GetCount(&mut count).ok()?;
+        enum_tokens.GetCount(&raw mut count).ok()?;
         for i in 0..count {
             if let Ok(token) = enum_tokens.Item(i) {
                 if let Ok(id) = token.GetId() {
-                    if id.to_string().map(|s| s == voice_id).unwrap_or(false) {
+                    let matches = id.to_string().is_ok_and(|s| s == voice_id);
+                    if matches {
                         return Some(token);
                     }
                 }
@@ -139,7 +152,7 @@ impl TtsEngine for SapiEngine {
             // Build SSML only when we need pitch (avoids unnecessary XML
             // parsing for the common case). Use standard `<prosody pitch=...>`
             // rather than the non-standard `<pitch absmiddle>`.
-            let flags = if (pitch - 1.0).abs() > f32::EPSILON {
+            if (pitch - 1.0).abs() > f32::EPSILON {
                 let pitch_attr = pitch_to_percent(pitch);
                 let escaped = text
                     .replace('&', "&amp;")
@@ -151,20 +164,15 @@ impl TtsEngine for SapiEngine {
                 );
                 let wtext = HSTRING::from(&ssml);
                 // Surface Speak failures instead of swallowing them.
-                let _ = sp_voice
+                sp_voice
                     .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
-                (SPF_ASYNC.0 | SPF_IS_XML.0) as u32
             } else {
                 let wtext = HSTRING::from(text);
-                let _ = sp_voice
+                sp_voice
                     .Speak(&wtext, SPF_ASYNC.0 as u32, None)
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
-                SPF_ASYNC.0 as u32
-            };
-            // `flags` was used inline above; keep the variable to make the
-            // intent explicit if we later want to vary it.
-            let _ = flags;
+            }
         }
 
         if let Some(cb) = on_boundary.as_mut() {
@@ -235,7 +243,7 @@ impl TtsEngine for SapiEngine {
         };
 
         let mut count = 0u32;
-        unsafe { tokens.GetCount(&mut count) }
+        unsafe { tokens.GetCount(&raw mut count) }
             .map_err(|e| TtsError(format!("Failed to get voice count: {e}")))?;
         let count = count as usize;
 
@@ -248,22 +256,19 @@ impl TtsEngine for SapiEngine {
                 let name = unsafe {
                     token
                         .GetStringValue(windows::core::w!("Name"))
-                        .map(|h| h.to_hstring().to_string_lossy())
-                        .unwrap_or_else(|_| id.clone())
+                        .map_or_else(|_| id.clone(), |h| h.to_hstring().to_string_lossy())
                 };
 
                 let lang = unsafe {
                     token
                         .GetStringValue(windows::core::w!("Language"))
-                        .map(|h| h.to_hstring().to_string_lossy())
-                        .unwrap_or_else(|_| "en-US".into())
+                        .map_or_else(|_| "en-US".into(), |h| h.to_hstring().to_string_lossy())
                 };
 
                 let gender_str = unsafe {
                     token
                         .GetStringValue(windows::core::w!("Gender"))
-                        .map(|h| h.to_hstring().to_string_lossy())
-                        .unwrap_or_default()
+                        .map_or_else(String::new, |h| h.to_hstring().to_string_lossy())
                 };
 
                 voices.push(Voice {

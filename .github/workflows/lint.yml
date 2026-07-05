@@ -20,17 +20,19 @@ jobs:
         toolchain: stable
         components: rustfmt, clippy
 
+    - name: Install system dependencies
+      run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+
     - name: Run rustfmt check
-      run: |
-        cargo fmt --all -- --check
-      continue-on-error: false
+      run: cargo fmt --all -- --check
 
-    - name: Run clippy
+    - name: Run clippy (Linux-compatible features)
+      # `sapi` and `avsynth` are platform-gated; on Linux we lint the union
+      # of features that actually build here.
       run: |
-        cargo clippy --all-targets --all-features -- -D warnings
-      continue-on-error: false
+        cargo clippy --no-default-features --features system,cloud,sherpaonnx --all-targets -- -D warnings
 
-    - name: Check formatting standards
+    - name: Formatting standards summary
       run: |
         echo "## Formatting Standards" >> $GITHUB_STEP_SUMMARY
         echo "- Standard: rustfmt with default settings" >> $GITHUB_STEP_SUMMARY
