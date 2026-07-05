@@ -27,14 +27,14 @@ impl SapiEngine {
 
     unsafe fn create_voice() -> Option<ISpVoice> {
         CoInitializeEx(None, COINIT_MULTITHREADED).ok().ok()?;
-        CoCreateInstance::<_, ISpVoice>(&SpVoice, None, CLSCTX_ALL).ok()
+        CoCreateInstance::<_, ISpVoice>(&SPVOICE_CLSID, None, CLSCTX_ALL).ok()
     }
 
     // windows-rs does not expose the sphelper.h `SpEnumTokens` inline helper, so
     // enumerate the voice category tokens directly through the COM interface.
     unsafe fn enum_voice_tokens() -> Result<IEnumSpObjectTokens> {
         let category: ISpObjectTokenCategory =
-            CoCreateInstance(&SpObjectTokenCategory, None, CLSCTX_ALL)?;
+            CoCreateInstance(&SPCATTOKENCATEGORY_CLSID, None, CLSCTX_ALL)?;
         category.SetId(SPCAT_VOICES, false)?;
         category.EnumTokens(PCWSTR::null(), PCWSTR::null())
     }

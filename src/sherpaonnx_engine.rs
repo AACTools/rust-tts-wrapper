@@ -6,9 +6,66 @@ use crate::types::{
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Embedded model registry compiled from `merged_models.json`.
 static MERGED_MODELS_JSON: &str = include_str!("merged_models.json");
+
+/// Shared cancellation flag — set by `stop()`, read by the progress callback.
+static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+/// Maps a 2-letter ISO 639-1 code to its 3-letter ISO 639-3 equivalent for the
+/// languages covered by the Sherpa-ONNX model registry. Falls back to the
+/// input when no mapping is known.
+fn iso639_3(lang_code: &str) -> String {
+    let lower = lang_code.to_ascii_lowercase();
+    let two = lower.split(['-', '_']).next().unwrap_or(&lower);
+    let three = match two {
+        "en" => "eng",
+        "zh" => "zho",
+        "de" => "deu",
+        "fr" => "fra",
+        "es" => "spa",
+        "ru" => "rus",
+        "ar" => "ara",
+        "ko" => "kor",
+        "ja" => "jpn",
+        "it" => "ita",
+        "pt" => "por",
+        "pl" => "pol",
+        "nl" => "nld",
+        "tr" => "tur",
+        "cs" => "ces",
+        "uk" => "ukr",
+        "vi" => "vie",
+        "th" => "tha",
+        "hi" => "hin",
+        "bn" => "ben",
+        "fa" => "fas",
+        "hu" => "hun",
+        "el" => "ell",
+        "fi" => "fin",
+        "sv" => "swe",
+        "da" => "dan",
+        "no" => "nor",
+        "he" => "heb",
+        "ms" => "msa",
+        "id" => "ind",
+        "ro" => "ron",
+        "sk" => "slk",
+        "bg" => "bul",
+        "ca" => "cat",
+        "hr" => "hrv",
+        "lt" => "lit",
+        "lv" => "lav",
+        "sr" => "srp",
+        "sl" => "slv",
+        "et" => "est",
+        "tl" => "tgl",
+        _ => return lower,
+    };
+    three.to_string()
+}
 
 /// Offline TTS engine using [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx).
 #[derive(Debug)]
@@ -16,13 +73,26 @@ pub struct SherpaOnnxEngine {
     models: HashMap<String, SherpaModelInfo>,
     model_dir: PathBuf,
     loaded_model_id: String,
+    num_threads: i32,
+    provider: Option<String>,
 }
 
 impl SherpaOnnxEngine {
     /// Create a new Sherpa-ONNX engine.
+    ///
+    /// Credentials JSON keys:
+    /// - `modelPath`: directory containing downloaded models (defaults to
+    ///   `~/.rust-tts-wrapper/sherpaonnx`)
+    /// - `modelId`: id from the registry (e.g. `kokoro-en-en-19`). Required —
+    ///   if absent, no model is loaded and `speak` will return an error rather
+    ///   than silently forcing a 305 MB download.
+    /// - `numThreads`: ONNX runtime intra-op thread count (default 2).
+    /// - `provider`: `cpu` (default), `coreml`, `cuda`, `directml`, etc.
     pub fn new(credentials_json: &str) -> Self {
         let mut model_dir = default_model_dir();
         let mut model_id = String::new();
+        let mut num_threads = 2;
+        let mut provider: Option<String> = None;
 
         if !credentials_json.is_empty() {
             if let Ok(creds) = serde_json::from_str::<HashMap<String, String>>(credentials_json) {
@@ -32,19 +102,27 @@ impl SherpaOnnxEngine {
                 if let Some(id) = creds.get("modelId") {
                     model_id.clone_from(id);
                 }
+                if let Some(t) = creds.get("numThreads").and_then(|s| s.parse::<i32>().ok()) {
+                    if t > 0 {
+                        num_threads = t;
+                    }
+                }
+                if let Some(p) = creds.get("provider") {
+                    if !p.is_empty() {
+                        provider = Some(p.clone());
+                    }
+                }
             }
         }
 
         let models = load_models();
 
-        if model_id.is_empty() && !models.is_empty() {
-            model_id = "kokoro-en-en-19".to_string();
-        }
-
         SherpaOnnxEngine {
             models,
             model_dir,
             loaded_model_id: model_id,
+            num_threads,
+            provider,
         }
     }
 
@@ -142,11 +220,19 @@ impl TtsEngine for SherpaOnnxEngine {
         text: &str,
         voice: Option<&str>,
         rate: f32,
-        _pitch: f32,
-        _volume: f32,
+        pitch: f32,
+        volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
+        if self.loaded_model_id.is_empty() {
+            return Err(TtsError(
+                "No SherpaOnnx modelId configured. Pass modelId in credentials JSON. \
+                 See available_models() for the registry."
+                    .into(),
+            ));
+        }
+
         let model_info = self.models.get(&self.loaded_model_id).ok_or_else(|| {
             TtsError(format!(
                 "Model '{}' not found in registry ({} models available)",
@@ -164,31 +250,119 @@ impl TtsEngine for SherpaOnnxEngine {
             )));
         }
 
-        let kokoro = sherpa_onnx::OfflineTtsKokoroModelConfig {
-            model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
-            voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
-            tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-            data_dir: Some(
-                model_dir
-                    .join("espeak-ng-data")
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-            length_scale: 1.0 / rate.max(0.1),
-            ..Default::default()
-        };
-
-        let model_config = sherpa_onnx::OfflineTtsModelConfig {
-            kokoro,
-            vits: sherpa_onnx::OfflineTtsVitsModelConfig::default(),
-            matcha: sherpa_onnx::OfflineTtsMatchaModelConfig::default(),
-            kitten: sherpa_onnx::OfflineTtsKittenModelConfig::default(),
-            zipvoice: sherpa_onnx::OfflineTtsZipvoiceModelConfig::default(),
-            pocket: sherpa_onnx::OfflineTtsPocketModelConfig::default(),
-            supertonic: sherpa_onnx::OfflineTtsSupertonicModelConfig::default(),
-            num_threads: 2,
-            debug: false,
-            provider: None,
+        // Dispatch model config by model_type. Each branch honours the file
+        // layout documented in the Sherpa-ONNX model registry.
+        let model_config = match model_info.model_type.as_str() {
+            "kokoro" => sherpa_onnx::OfflineTtsModelConfig {
+                kokoro: sherpa_onnx::OfflineTtsKokoroModelConfig {
+                    model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+                    voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
+                    tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
+                    data_dir: Some(
+                        model_dir.join("espeak-ng-data").to_string_lossy().to_string(),
+                    ),
+                    // length_scale is left at default — rate is applied via
+                    // GenerationConfig.speed to avoid the double-rate bug (§1 H1).
+                    ..Default::default()
+                },
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
+            "vits" => {
+                let lexicon = model_dir.join("lexicon.txt");
+                let dict_dir = model_dir.join("dict");
+                let espeak_data = model_dir.join("espeak-ng-data");
+                sherpa_onnx::OfflineTtsModelConfig {
+                    vits: sherpa_onnx::OfflineTtsVitsModelConfig {
+                        model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+                        tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
+                        lexicon: if lexicon.exists() {
+                            Some(lexicon.to_string_lossy().to_string())
+                        } else {
+                            None
+                        },
+                        data_dir: if espeak_data.exists() {
+                            Some(espeak_data.to_string_lossy().to_string())
+                        } else {
+                            None
+                        },
+                        dict_dir: if dict_dir.exists() {
+                            Some(dict_dir.to_string_lossy().to_string())
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    },
+                    num_threads: self.num_threads,
+                    debug: false,
+                    provider: self.provider.clone(),
+                    ..Default::default()
+                }
+            }
+            "matcha" => {
+                // Matcha models use acoustic-model.onnx + a vocoder (hifigan_v2.onnx).
+                // Try the common naming variants seen in the registry.
+                let acoustic = first_existing(
+                    &model_dir,
+                    &["acoustic-model.onnx", "model-steps-3.onnx", "model.onnx"],
+                );
+                let vocoder = first_existing(
+                    &model_dir,
+                    &[
+                        "hifigan_v2.onnx",
+                        "hifigan_v2_en_zh.onnx",
+                        "vocoder.onnx",
+                    ],
+                );
+                let tokens = model_dir.join("tokens.txt");
+                let dict_dir = model_dir.join("dict");
+                sherpa_onnx::OfflineTtsModelConfig {
+                    matcha: sherpa_onnx::OfflineTtsMatchaModelConfig {
+                        acoustic_model: acoustic
+                            .map(|p| p.to_string_lossy().to_string())
+                            .ok_or_else(|| {
+                                TtsError("Matcha acoustic model not found".into())
+                            })?,
+                        vocoder: vocoder.as_ref().map(|p| p.to_string_lossy().to_string()),
+                        lexicon: None,
+                        tokens: Some(tokens.to_string_lossy().to_string()),
+                        data_dir: None,
+                        dict_dir: if dict_dir.exists() {
+                            Some(dict_dir.to_string_lossy().to_string())
+                        } else {
+                            None
+                        },
+                        ..Default::default()
+                    },
+                    num_threads: self.num_threads,
+                    debug: false,
+                    provider: self.provider.clone(),
+                    ..Default::default()
+                }
+            }
+            "kitten" => sherpa_onnx::OfflineTtsModelConfig {
+                kitten: sherpa_onnx::OfflineTtsKittenModelConfig {
+                    model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+                    voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
+                    tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
+                    data_dir: Some(
+                        model_dir.join("espeak-ng-data").to_string_lossy().to_string(),
+                    ),
+                    ..Default::default()
+                },
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
+            other => {
+                return Err(TtsError(format!(
+                    "Unsupported SherpaOnnx model_type '{other}' for model '{}'",
+                    self.loaded_model_id
+                )));
+            }
         };
 
         let config = sherpa_onnx::OfflineTtsConfig {
@@ -206,25 +380,39 @@ impl TtsEngine for SherpaOnnxEngine {
             ..Default::default()
         };
 
+        // Reset cancellation flag before synthesis.
+        CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+
         let audio = tts
-            .generate_with_config(
-                text,
-                &gen_config,
-                Some(|_samples: &[f32], _progress: f32| -> bool { true }),
-            )
+            .generate_with_config(text, &gen_config, Some(|_samples: &[f32], _progress: f32| -> bool {
+                // Return false to stop in-progress synthesis when stop() was called.
+                !CANCEL_REQUESTED.load(Ordering::SeqCst)
+            }))
             .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
 
+        // Post-process samples for volume and pitch since the underlying
+        // models don't natively expose these controls (§1 H2).
+        let samples = audio.samples();
+        let volume_factor = volume.clamp(0.0, 4.0);
+        let pitch_factor = pitch.clamp(0.25, 4.0);
+        let processed: Vec<f32> = if (volume_factor - 1.0).abs() > f32::EPSILON
+            || (pitch_factor - 1.0).abs() > f32::EPSILON
+        {
+            apply_volume_and_pitch(samples, volume_factor, pitch_factor)
+        } else {
+            samples.to_vec()
+        };
+
         if let Some(cb) = on_audio.as_mut() {
-            let samples = audio.samples();
-            let mut pcm_bytes = Vec::with_capacity(samples.len() * 2);
-            for &s in samples {
+            let mut pcm_bytes = Vec::with_capacity(processed.len() * 2);
+            for &s in &processed {
                 let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                 pcm_bytes.extend_from_slice(&s16.to_ne_bytes());
             }
             cb(&pcm_bytes);
         } else {
             let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
-            if audio.save(filename.to_string_lossy().as_ref()) {
+            if write_wav(&filename, &processed, audio.sample_rate()) {
                 play_wav_file(&filename);
             }
         }
@@ -257,6 +445,9 @@ impl TtsEngine for SherpaOnnxEngine {
     }
 
     fn stop(&self) -> TtsResult<()> {
+        // The progress callback reads this flag on every chunk and aborts
+        // synthesis when set (§1 L1).
+        CANCEL_REQUESTED.store(true, Ordering::SeqCst);
         Ok(())
     }
 
@@ -271,6 +462,7 @@ impl TtsEngine for SherpaOnnxEngine {
             .and_then(|m| m.language.first())
             .map(|l| l.lang_code.clone())
             .unwrap_or_default();
+        let iso639 = iso639_3(&lang_code);
         let mut voices = Vec::new();
         for i in 0..num_speakers {
             voices.push(Voice {
@@ -280,7 +472,7 @@ impl TtsEngine for SherpaOnnxEngine {
                 provider: "sherpaonnx".to_string(),
                 language_codes: vec![LanguageCode {
                     bcp47: lang.clone(),
-                    iso639_3: lang_code.clone(),
+                    iso639_3: iso639.clone(),
                     display: lang.clone(),
                 }],
             });
@@ -293,13 +485,120 @@ impl TtsEngine for SherpaOnnxEngine {
     }
 }
 
-/// Play a WAV file using `aplay` (Linux).
+/// Apply volume scaling and pitch shifting to a buffer of f32 samples.
+///
+/// Volume is a straightforward linear scale. Pitch shifting uses simple
+/// linear-interpolation resampling — it does change duration slightly, but it
+/// is the cheapest DSP approach that doesn't pull in an FFT dependency. The
+/// shift is a no-op when both factors are 1.0.
+fn apply_volume_and_pitch(samples: &[f32], volume: f32, pitch: f32) -> Vec<f32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    // First resample for pitch (changes length).
+    let resampled: Vec<f32> = if (pitch - 1.0).abs() > f32::EPSILON {
+        let out_len = (samples.len() as f32 / pitch).round().max(1.0) as usize;
+        let mut out = Vec::with_capacity(out_len);
+        let step = samples.len() as f32 / out_len as f32;
+        let mut idx = 0.0f32;
+        while (idx as usize) < samples.len() {
+            let i = idx as usize;
+            let frac = idx - i as f32;
+            let next = samples.get(i + 1).copied().unwrap_or(samples[i]);
+            let v = samples[i] * (1.0 - frac) + next * frac;
+            out.push(v);
+            idx += step;
+        }
+        out
+    } else {
+        samples.to_vec()
+    };
+    // Then scale amplitude for volume.
+    if (volume - 1.0).abs() > f32::EPSILON {
+        resampled.iter().map(|&s| s * volume).collect()
+    } else {
+        resampled
+    }
+}
+
+/// Return the first existing file from `dir` matching one of `names`.
+fn first_existing(dir: &std::path::Path, names: &[&str]) -> Option<std::path::PathBuf> {
+    names
+        .iter()
+        .map(|n| dir.join(n))
+        .find(|p| p.exists())
+}
+
+/// Write a 16-bit PCM mono WAV file. Returns `false` on I/O error.
+fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: i32) -> bool {
+    use std::io::Write;
+    let Ok(mut f) = std::fs::File::create(path) else {
+        return false;
+    };
+    let mut pcm = Vec::with_capacity(samples.len() * 2);
+    for &s in samples {
+        let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        pcm.extend_from_slice(&s16.to_ne_bytes());
+    }
+    let data_len = pcm.len() as u32;
+    let sample_rate = sample_rate as u32;
+    let byte_rate = sample_rate * 2; // 16-bit mono
+    let block_align: u32 = 2;
+    let riff_len = 36 + data_len;
+    let header = [
+        b"RIFF".as_slice(),
+        &riff_len.to_le_bytes(),
+        b"WAVE",
+        b"fmt ",
+        &16u32.to_le_bytes(), // PCM chunk size
+        &1u16.to_le_bytes(),  // PCM format
+        &1u16.to_le_bytes(),  // mono
+        &sample_rate.to_le_bytes(),
+        &byte_rate.to_le_bytes(),
+        &block_align.to_le_bytes(),
+        &16u16.to_le_bytes(), // bits per sample
+        b"data",
+        &data_len.to_le_bytes(),
+    ]
+    .concat();
+    if f.write_all(&header).is_err() || f.write_all(&pcm).is_err() {
+        return false;
+    }
+    true
+}
+
+/// Play a WAV file using a platform-appropriate command.
+///
+/// - Linux: `aplay`
+/// - macOS: `afplay`
+/// - Windows: PowerShell `(New-Object Media.SoundPlayer).PlaySync()`
+///
+/// Failures are swallowed because playback is best-effort (audio has already
+/// been rendered to a file the caller can locate).
 fn play_wav_file(path: &std::path::Path) {
-    let _ = std::process::Command::new("aplay")
-        .arg("-q")
-        .arg(path)
-        .spawn()
-        .map(|mut c| {
-            let _ = c.wait();
-        });
+    let result = if cfg!(target_os = "linux") {
+        std::process::Command::new("aplay")
+            .arg("-q")
+            .arg(path)
+            .spawn()
+            .map(|mut c| c.wait())
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("afplay")
+            .arg(path)
+            .spawn()
+            .map(|mut c| c.wait())
+    } else if cfg!(target_os = "windows") {
+        let p = path.to_string_lossy().replace('\'', "''");
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!("(New-Object Media.SoundPlayer '{p}').PlaySync()"),
+            ])
+            .spawn()
+            .map(|mut c| c.wait())
+    } else {
+        return;
+    };
+    let _ = result;
 }

@@ -12,7 +12,7 @@ accurate to the version of each file inspected. Severities:
 
 ## 1. SherpaOnnx engine (`src/sherpaonnx_engine.rs`)
 
-### C1. Only Kokoro models work — 188 of 191 models in the registry are unusable
+### ✅ C1. FIXED - Only Kokoro models work — 188 of 191 models in the registry are unusable
 - **Files / lines:** `src/sherpaonnx_engine.rs:167-192`
 - **Issue:** `speak` *always* builds an `OfflineTtsKokoroModelConfig` and leaves
   `vits`, `matcha`, `kitten`, `zipvoice`, `pocket`, `supertonic` at
@@ -25,7 +25,7 @@ accurate to the version of each file inspected. Severities:
   a generic "Failed to create SherpaOnnx TTS engine" from `OfflineTts::create`.
 - **Severity:** Critical
 
-### C2. Hardcoded Kokoro file layout for every model
+### ✅ C2. FIXED - Hardcoded Kokoro file layout for every model
 - **Files / lines:** `src/sherpaonnx_engine.rs:168-176`
 - **Issue:** Always looks for `model.onnx`, `voices.bin`, `tokens.txt`, and
   `espeak-ng-data/`. VITS models use `lexicon.txt`, Matcha uses
@@ -33,7 +33,7 @@ accurate to the version of each file inspected. Severities:
 - **Why it matters:** Even if C1 were fixed for `model_type`, the file paths are wrong.
 - **Severity:** Critical (compounds C1)
 
-### H1. Rate is applied twice (double-speed or half-speed)
+### ✅ H1. FIXED - Rate is applied twice (double-speed or half-speed)
 - **Files / lines:** `src/sherpaonnx_engine.rs:177` (`length_scale = 1.0 / rate`)
   and `src/sherpaonnx_engine.rs:205` (`speed: rate`)
 - **Issue:** Kokoro's `length_scale` controls duration inversely, and
@@ -91,14 +91,14 @@ accurate to the version of each file inspected. Severities:
 
 ## 2. Cloud engine (`src/cloud_engine.rs`)
 
-### C1. Watson Basic-auth header is malformed
+### DONE C1. FIXED - Watson Basic-auth header is malformed
 - **Files / lines:** `src/cloud_engine.rs:254-257`
 - **Issue:** The code emits `Basic <base64(apiKey)>:` (trailing colon *outside*
   the base64). Watson expects `Basic <base64("apikey:" + apiKey)>`.
 - **Why it matters:** Every Watson request will fail auth.
 - **Severity:** Critical
 
-### C2. Amazon Polly is fundamentally non-functional
+### DONE C2. FIXED - Amazon Polly is fundamentally non-functional
 - **Files / lines:** `src/cloud_engine.rs:287-294`
 - **Issue:** Polly requires AWS Signature V4. This implementation sends an
   unauthenticated JSON POST. The region from credentials is *never read*, so the
@@ -123,7 +123,7 @@ accurate to the version of each file inspected. Severities:
 - **Why it matters:** Azure's speech gateway may reject the request outright.
 - **Severity:** High
 
-### H2. Azure WS response `Path:` parser assumes ASCII and unsafe slicing
+### ✅ H2. FIXED - Azure WS response `Path:` parser assumes ASCII and unsafe slicing
 - **Files / lines:** `src/cloud_engine.rs:606-607`
 - **Issue:** `l[5..]` is byte slicing on a UTF-8 `&str`. If Azure ever sends a
   non-ASCII character before `Path:`, this panics. Should use
@@ -157,7 +157,7 @@ accurate to the version of each file inspected. Severities:
   silently lose volume.
 - **Severity:** High (accessibility regression)
 
-### H7. ElevenLabs alignment parser can index out of bounds
+### ✅ H7. FIXED - ElevenLabs alignment parser can index out of bounds
 - **Files / lines:** `src/cloud_engine.rs:805-808`
 - **Issue:** Loop bounds are `0..chars.len()`, but it indexes `starts[i]` and
   `ends[i]`. If ElevenLabs returns `characters` longer than the time arrays
@@ -180,7 +180,7 @@ accurate to the version of each file inspected. Severities:
   signing were fixed.
 - **Severity:** Medium (compounds C2)
 
-### H10. Deepgram API shape is wrong
+### DONE H10. FIXED - Deepgram API shape is wrong
 - **Files / lines:** `src/cloud_engine.rs:155-164`
 - **Issue:** Deepgram's `/v1/speak` takes `model` as a query parameter (or in
   the new body shape `{ "model": "aura-asteria-en", "text": "..." }`). Current
@@ -188,7 +188,7 @@ accurate to the version of each file inspected. Severities:
   will reject.
 - **Severity:** High
 
-### H11. Hume TTS body shape is wrong
+### DONE H11. FIXED - Hume TTS body shape is wrong
 - **Files / lines:** `src/cloud_engine.rs:189-197`
 - **Issue:** Hume TTS expects
   `{ "text": "...", "voice": {"name": "..."}, "audio_format": "wav" }`. Current
@@ -260,7 +260,7 @@ accurate to the version of each file inspected. Severities:
 
 ## 3. SAPI engine (`src/sapi_engine.rs`)
 
-### C1. Bare `SpVoice` / `SpObjectTokenCategory` are not valid `windows` crate symbols
+### ✅ C1. FIXED - Bare `SpVoice` / `SpObjectTokenCategory` are not valid `windows` crate symbols
 - **Files / lines:** `src/sapi_engine.rs:30`, `src/sapi_engine.rs:37`
 - **Issue:** The windows-rs 0.61 API does not expose these as bare constants.
   `windows` 0.61 expects `SPVOICE_CLSID` (or `windows::core::GUID::from_u128`)
@@ -323,7 +323,7 @@ accurate to the version of each file inspected. Severities:
 
 ## 4. C ABI / FFI (`src/lib.rs`, `include/tts_wrapper.h`, `bindings/`)
 
-### C1. Most FFI functions do not catch panics — undefined behaviour on unwind
+### ✅ C1. FIXED - Most FFI functions do not catch panics — undefined behaviour on unwind
 - **Files / lines:** `src/lib.rs:97` (`tts_create`), `src/lib.rs:320`
   (`tts_get_voices`) are the **only** functions wrapped in `catch_unwind`.
   Everything else — `tts_speak` (`lib.rs:168`), `tts_speak_sync` (`lib.rs:233`),
@@ -344,7 +344,7 @@ accurate to the version of each file inspected. Severities:
   Any panic can corrupt the host process.
 - **Severity:** Critical
 
-### C2. `tts_get_engines` writes into caller-allocated memory but `tts_free_engine_info` calls `std::alloc::dealloc`
+### DONE C2. FIXED - `tts_get_engines` writes into caller-allocated memory but `tts_free_engine_info` calls `std::alloc::dealloc`
 - **Files / lines:** `lib.rs:521-542` (write into caller buffer) vs
   `lib.rs:550-572` (dealloc with Rust allocator)
 - **Issue:** The API contract is: caller allocates the array (C `malloc`,
@@ -356,7 +356,7 @@ accurate to the version of each file inspected. Severities:
   heap corruption.
 - **Severity:** Critical
 
-### C3. `tts_get_last_error` reads a stale global, never the per-context error
+### DONE C3. FIXED - `tts_get_last_error` reads a stale global, never the per-context error
 - **Files / lines:** `lib.rs:75` (`static LAST_ERROR`), `lib.rs:77-81`
   (`set_error` writes the global), `lib.rs:218, 283, 372, 663` (per-ctx
   `last_error` field written but never read), `lib.rs:578-586` (returns the

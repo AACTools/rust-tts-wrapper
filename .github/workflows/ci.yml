@@ -57,7 +57,7 @@ jobs:
 
   windows-build:
     runs-on: windows-latest
-    continue-on-error: true
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -1,7 +1,7 @@
 use crate::engine::{estimate_word_boundaries, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
-use std::ffi::CStr;
-use std::os::raw::c_void;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_void};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 
@@ -10,8 +10,8 @@ extern "C" {
     fn avsynth_destroy(handle: *mut c_void);
     fn avsynth_speak(
         handle: *mut c_void,
-        text: *const u8,
-        voice_id: *const u8,
+        text: *const c_char,
+        voice_id: *const c_char,
         rate: f32,
         pitch: f32,
         volume: f32,
@@ -23,11 +23,11 @@ extern "C" {
     fn avsynth_get_voice(
         handle: *mut c_void,
         index: i32,
-        id_buf: *mut u8,
+        id_buf: *mut c_char,
         id_buf_len: i32,
-        name_buf: *mut u8,
+        name_buf: *mut c_char,
         name_buf_len: i32,
-        lang_buf: *mut u8,
+        lang_buf: *mut c_char,
         lang_buf_len: i32,
     ) -> i32;
 }
@@ -73,9 +73,26 @@ impl TtsEngine for AvSynthEngine {
             .or_else(|| self.voice_id.lock().unwrap().clone());
 
         unsafe {
-            let text_c = text.as_ptr();
-            let voice_c = voice_to_use.as_ref().map_or(ptr::null(), |v| v.as_ptr());
-            avsynth_speak(*guard, text_c, voice_c, rate, pitch, volume);
+            // CString::new fails if the input contains an interior NUL. For TTS
+            // text and voice ids that is an error we should surface rather than
+            // silently truncate or read past the end of the buffer.
+            let text_c = CString::new(text)
+                .map_err(|_| TtsError("text contains interior NUL byte".into()))?;
+            let voice_c = match voice_to_use.as_deref() {
+                Some(v) => Some(
+                    CString::new(v)
+                        .map_err(|_| TtsError("voice id contains interior NUL byte".into()))?,
+                ),
+                None => None,
+            };
+            avsynth_speak(
+                *guard,
+                text_c.as_ptr(),
+                voice_c.as_ref().map_or(ptr::null(), |c| c.as_ptr()),
+                rate,
+                pitch,
+                volume,
+            );
         }
 
         if let Some(cb) = on_boundary.as_mut() {
@@ -148,11 +165,11 @@ impl TtsEngine for AvSynthEngine {
                 avsynth_get_voice(
                     *guard,
                     i,
-                    id_buf.as_mut_ptr(),
+                    id_buf.as_mut_ptr().cast(),
                     id_buf.len() as i32,
-                    name_buf.as_mut_ptr(),
+                    name_buf.as_mut_ptr().cast(),
                     name_buf.len() as i32,
-                    lang_buf.as_mut_ptr(),
+                    lang_buf.as_mut_ptr().cast(),
                     lang_buf.len() as i32,
                 )
             };

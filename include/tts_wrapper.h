@@ -204,16 +204,18 @@ void tts_set_on_boundary(struct tts_ctx *ctx, CBoundaryCb cb, void *userdata);
 int32_t tts_get_engine_count(void);
 
 /**
- * Write engine descriptors into a caller-allocated array.
+ * Get the list of available engine descriptors.
  *
- * `out_engines` must point to at least [`tts_get_engine_count`] entries.
- * Caller must free each entry's strings and the array with [`tts_free_engine_info`].
+ * On success, writes a heap-allocated array to `*out_engines` and its length
+ * to `*out_count`. Caller must free with [`tts_free_engines`].
+ *
+ * Returns 0 on success, -1 on failure.
  *
  * # Safety
  *
- * `out_engines` must be non-null and point to enough space.
+ * `out_engines` and `out_count` must be non-null.
  */
-void tts_get_engines(struct tts_engine_info *out_engines);
+int32_t tts_get_engines(struct tts_engine_info **out_engines, int32_t *out_count);
 
 /**
  * Free an engine info array previously returned by [`tts_get_engines`].
@@ -227,9 +229,14 @@ void tts_free_engine_info(struct tts_engine_info *engines, int32_t count);
 /**
  * Return the last error message as a C string, or null if none.
  *
+ * If ctx is provided, returns per-context error. If ctx is null,
+ * returns global error (for tts_create failures).
+ *
  * The returned pointer is valid until the next call to any TTS function.
+ *
+ * @param ctx Context pointer, or null for global error.
  */
-const char *tts_get_last_error(void);
+const char *tts_get_last_error(tts_ctx *ctx);
 
 /**
  * Pause in-progress speech.

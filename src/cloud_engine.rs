@@ -156,7 +156,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             synth_url: "https://api.deepgram.com/v1/speak".into(),
             auth_header: "Authorization".into(),
             auth_prefix: "Token ".into(),
-            voice_param: "voice".into(),
+            voice_param: "model".into(),  // Fixed: Deepgram uses "model" not "voice"
             default_voice: Some("aura-asteria-en".into()),
             text_field: "text".into(),
             provider_id: "deepgram".into(),
@@ -164,15 +164,15 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
         }),
         "playht" => {
             let user_id = creds.get("userId").cloned().unwrap_or_default();
-            let mut extra = HashMap::new();
-            extra.insert("user_id".into(), serde_json::Value::String(user_id));
+            let mut extra_headers = HashMap::new();
+            extra_headers.insert("X-User-ID".into(), user_id);
             Some(CloudConfig {
                 synth_url: "https://api.play.ht/api/v2/tts".into(),
                 auth_header: "Authorization".into(),
                 auth_prefix: "Bearer ".into(),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
-                extra_body: extra,
+                extra_headers: extra_headers,
                 provider_id: "playht".into(),
                 ..Default::default()
             })
@@ -186,15 +186,24 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             provider_id: "fishaudio".into(),
             ..Default::default()
         }),
-        "hume" => Some(CloudConfig {
-            synth_url: "https://api.hume.ai/v0/tts".into(),
-            auth_header: "Authorization".into(),
-            auth_prefix: "Bearer ".into(),
-            voice_param: "voice".into(),
-            text_field: "text".into(),
-            provider_id: "hume".into(),
-            ..Default::default()
-        }),
+        "hume" => {
+            // Hume API requires voice as object: {"voice": {"name": "..."}}
+            let voice_name = creds.get("voice").cloned().unwrap_or_default();
+            let mut extra_body = HashMap::new();
+            extra_body.insert("voice".into(), serde_json::json!({"name": voice_name}));
+            extra_body.insert("audio_format".into(), serde_json::Value::String("wav".into()));
+
+            Some(CloudConfig {
+                synth_url: "https://api.hume.ai/v0/tts".into(),
+                auth_header: "Authorization".into(),
+                auth_prefix: "Bearer ".into(),
+                voice_param: "".into(),  // Not used - voice in extra_body
+                text_field: "text".into(),
+                extra_body,
+                provider_id: "hume".into(),
+                ..Default::default()
+            })
+        }
         "mistral" => Some(CloudConfig {
             synth_url: "https://api.mistral.ai/v1/tts".into(),
             auth_header: "Authorization".into(),
@@ -252,8 +261,8 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 ),
                 auth_header: "Authorization".into(),
                 auth_prefix: format!(
-                    "Basic {}:",
-                    base64_encode(&creds.get("apiKey").cloned().unwrap_or_default())
+                    "Basic {}",
+                    base64_encode(&format!("apiKey:{}", creds.get("apiKey").cloned().unwrap_or_default()))
                 ),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
@@ -284,14 +293,12 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             provider_id: "modelslab".into(),
             ..Default::default()
         }),
-        "polly" => Some(CloudConfig {
-            synth_url: "https://polly.us-east-1.amazonaws.com/v1/speech".into(),
-            voice_param: "VoiceId".into(),
-            default_voice: Some("Joanna".into()),
-            text_field: "Text".into(),
-            provider_id: "polly".into(),
-            ..Default::default()
-        }),
+        "polly" => {
+            // Polly requires AWS Signature V4 - not implemented yet
+            // Returning None indicates unsupported engine
+            eprintln!("WARNING: AWS Polly requires AWS Signature V4 authentication which is not implemented. Use a different cloud provider.");
+            None
+        }
         _ => None,
     }
 }
@@ -303,13 +310,22 @@ fn base64_encode(data: &str) -> String {
 }
 
 /// Build SSML for Azure TTS.
-fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32) -> String {
+fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32) -> String {
     let lang = voice.chars().take(5).collect::<String>();
 
     let escaped = text
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;");
+
+    // Escape the voice attribute value too — a stray `'` or `<` would break
+    // the SSML (§2 H12). Apostrophes are escaped using `&apos;`.
+    let voice_escaped = voice
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&apos;")
+        .replace('"', "&quot;");
 
     let mut prosody_attrs = Vec::new();
     let rate_str = match rate {
@@ -326,11 +342,22 @@ fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32) -> String {
         p if p < 1.4 => "high",
         _ => "x-high",
     };
+    let volume_str = match volume {
+        v if v < 0.4 => "x-soft",
+        v if v < 0.7 => "soft",
+        v if v < 1.15 => "medium",
+        v if v < 1.5 => "loud",
+        _ => "x-loud",
+    };
     if (rate - 1.0).abs() > f32::EPSILON {
         prosody_attrs.push(format!("rate=\"{rate_str}\""));
     }
     if (pitch - 1.0).abs() > f32::EPSILON {
         prosody_attrs.push(format!("pitch=\"{pitch_str}\""));
+    }
+    // Volume was previously dropped silently (§2 H6).
+    if (volume - 1.0).abs() > f32::EPSILON {
+        prosody_attrs.push(format!("volume=\"{volume_str}\""));
     }
 
     let inner = if prosody_attrs.is_empty() {
@@ -341,7 +368,7 @@ fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32) -> String {
 
     format!(
         "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang}'>\
-         <voice name='{voice}'>{inner}</voice></speak>"
+         <voice name='{voice_escaped}'>{inner}</voice></speak>"
     )
 }
 
@@ -556,7 +583,8 @@ impl TtsEngine for CloudEngine {
                 .get("region")
                 .cloned()
                 .unwrap_or_else(|| "eastus".into());
-            let request_id = Uuid::new_v4().to_string().to_lowercase();
+            // Azure requires a 32-char lowercase hex UUID with NO dashes.
+            let request_id = Uuid::new_v4().simple().to_string();
             let ws_url_str = format!(
                 "wss://{}.tts.speech.microsoft.com/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={}",
                 region, self.api_key
@@ -569,8 +597,39 @@ impl TtsEngine for CloudEngine {
 
             let output_format = "audio-24khz-96kbitrate-mono-mp3"; // Or another default
 
-            // Send config
-            let config_headers = format!("X-RequestId:{request_id}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n");
+            // Helper to produce an ISO 8601 timestamp for the X-Timestamp header.
+            let now_timestamp = || {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let secs = now.as_secs();
+                // Build a UTC timestamp string without pulling in chrono.
+                let days_since_epoch = secs / 86_400;
+                let secs_today = secs % 86_400;
+                let hour = secs_today / 3600;
+                let minute = (secs_today % 3600) / 60;
+                let second = secs_today % 60;
+                // Convert days since 1970-01-01 to Y-M-D (Howard Hinnant's algorithm).
+                let z = days_since_epoch as i64 + 719_468;
+                let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+                let doe = (z - era * 146_097) as u64;
+                let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+                let y = yoe as i64 + era * 400;
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                let mp = (5 * doy + 2) / 153;
+                let d = doy - (153 * mp + 2) / 5 + 1;
+                let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                let year = if m <= 2 { y + 1 } else { y };
+                format!(
+                    "{year:04}-{m:02}-{d:02}T{hour:02}:{minute:02}:{second:02}Z"
+                )
+            };
+
+            // Send config (must include X-Timestamp per Azure protocol).
+            let config_headers = format!(
+                "X-RequestId:{request_id}\r\nX-Timestamp:{}\r\nContent-Type:application/json; charset=utf-8\r\nPath:speech.config\r\n\r\n",
+                now_timestamp()
+            );
             let config_body = format!(
                 r#"{{"context":{{"synthesis":{{"audio":{{"metadataOptions":{{"sentenceBoundaryEnabled":false,"wordBoundaryEnabled":true}},"outputFormat":"{output_format}"}}}}}}}}"#
             );
@@ -580,9 +639,10 @@ impl TtsEngine for CloudEngine {
                 .map_err(|e| TtsError(format!("WS config send error: {e}")))?;
 
             // Send SSML
-            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch);
+            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, _volume);
             let ssml_msg = format!(
-                "X-RequestId:{request_id}\r\nContent-Type:application/ssml+xml\r\nX-StreamId:{request_id}\r\nPath:ssml\r\n\r\n{ssml}"
+                "X-RequestId:{request_id}\r\nX-Timestamp:{}\r\nContent-Type:application/ssml+xml\r\nX-StreamId:{request_id}\r\nPath:ssml\r\n\r\n{ssml}",
+                now_timestamp()
             );
             socket
                 .send(Message::Text(ssml_msg.into()))
@@ -604,22 +664,44 @@ impl TtsEngine for CloudEngine {
                     Message::Text(t) => {
                         let text_msg = t.as_str();
                         let path_line = text_msg.lines().find(|l| l.starts_with("Path:"));
-                        let path = path_line.map_or("", |l| l[5..].trim());
+                        let path = path_line.map_or("", |l| l.strip_prefix("Path:").unwrap_or(l).trim());
 
-                        if path == "turn.end" {
-                            let _ = socket.close(None);
-                            break;
+                        // Parse out JSON body once for the branches below.
+                        let body = if let Some(idx) = text_msg.find("\r\n\r\n") {
+                            &text_msg[idx + 4..]
+                        } else if let Some(idx) = text_msg.find("\n\n") {
+                            &text_msg[idx + 2..]
+                        } else {
+                            ""
+                        };
+
+                        // Error handling: Azure reports synthesis failures via
+                        // `Path:response` with a JSON body containing `Error`.
+                        // Without this the loop would hang on failures (§2 H4).
+                        if path == "response" || path == "turn.end" {
+                            if !body.is_empty() {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+                                    if let Some(err) = json.get("Error") {
+                                        let reason = err
+                                            .get("Message")
+                                            .and_then(|v| v.as_str())
+                                            .or_else(|| {
+                                                json.get("reason")
+                                                    .and_then(|v| v.as_str())
+                                            })
+                                            .unwrap_or("Azure synthesis failed");
+                                        let _ = socket.close(None);
+                                        return Err(TtsError(reason.to_string()));
+                                    }
+                                }
+                            }
+                            if path == "turn.end" {
+                                let _ = socket.close(None);
+                                break;
+                            }
                         }
 
                         if path == "audio.metadata" || path == "word-boundary" {
-                            let body = if let Some(idx) = text_msg.find("\r\n\r\n") {
-                                &text_msg[idx + 4..]
-                            } else if let Some(idx) = text_msg.find("\n\n") {
-                                &text_msg[idx + 2..]
-                            } else {
-                                text_msg
-                            };
-
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
                                 if let Some(metadata) =
                                     json.get("Metadata").and_then(|v| v.as_array())
@@ -717,7 +799,7 @@ impl TtsEngine for CloudEngine {
         // Body depends on engine type
         let resp = if self.config.body_is_ssml {
             // Azure: send SSML XML body
-            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch);
+            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, _volume);
             let ct = self
                 .config
                 .content_type
@@ -803,9 +885,10 @@ impl TtsEngine for CloudEngine {
                         let mut has_started = false;
 
                         for i in 0..chars.len() {
-                            let char_str = chars[i].as_str().unwrap_or("");
-                            let start_time = starts[i].as_f64().unwrap_or(0.0) as f32;
-                            let end_time = ends[i].as_f64().unwrap_or(0.0) as f32;
+                            // Bounds check for all arrays to prevent OOB indexing
+                            let char_str = chars.get(i).and_then(|v| v.as_str()).unwrap_or("");
+                            let start_time = starts.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let end_time = ends.get(i).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
                             if char_str.trim().is_empty() {
                                 if has_started {
@@ -1034,7 +1117,7 @@ mod tests {
 
     #[test]
     fn test_build_azure_ssml() {
-        let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.0, 1.0);
+        let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.0, 1.0, 1.0);
         assert!(ssml.contains("<speak"));
         assert!(ssml.contains("en-US-AriaNeural"));
         assert!(ssml.contains("Hello world"));
@@ -1043,10 +1126,11 @@ mod tests {
 
     #[test]
     fn test_build_azure_ssml_with_prosody() {
-        let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.5, 0.8);
+        let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.5, 0.8, 1.4);
         assert!(ssml.contains("<prosody"));
         assert!(ssml.contains("rate="));
         assert!(ssml.contains("pitch="));
+        assert!(ssml.contains("volume="));
     }
 
     #[test]

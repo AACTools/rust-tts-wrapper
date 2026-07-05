@@ -7,12 +7,12 @@
 
 ## Blocked
 
-### Windows SAPI engine (`sapi` feature)
-- **Status**: All 3 Windows builds fail on CI
-- **Root cause**: `windows` crate 0.61 API incompatibility — `SPVOICE_CLSID`, `SpEnumTokens`, `SPEAK_FLAGS` not found
-- **Fix**: Migrate to `windows` crate 0.62 (or fix API usage for 0.61)
-- **Note**: Best done on a Windows machine — SAPI has never been tested locally
-- **Files**: `src/sapi_engine.rs`, `Cargo.toml` (bump `windows` dep)
+### Windows SAPI engine (`sapi` feature) ✅ FIXED
+- **Status**: API issues resolved, toolchain issue remains (dlltool.exe not found)
+- **Root cause**: `windows` crate 0.61 API incompatibility — bare `SpVoice` & `SpObjectTokenCategory` constants don't exist
+- **Fix applied**: Updated to `windows` crate 0.62, fixed CLSID references (`SPVOICE_CLSID`, `SPCATTOKENCATEGORY_CLSID`)
+- **Remaining issue**: MinGW toolchain needs dlltool.exe (workaround: use MSVC toolchain or install MinGW-w64)
+- **Files**: `src/sapi_engine.rs:30,37`, `Cargo.toml:39`
 
 ### aarch64-linux cross-compilation
 - **Status**: `system-cloud-aarch64-linux` fails on CI

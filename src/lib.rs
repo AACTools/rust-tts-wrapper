@@ -80,6 +80,14 @@ fn set_error(msg: &str) {
     }
 }
 
+/// Helper macro to wrap FFI functions with panic catching
+macro_rules! ffi_catch {
+    ($expr:expr) => {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr))
+            .unwrap_or(-1)
+    };
+}
+
 /// Create a new TTS engine instance.
 ///
 /// Returns an opaque context pointer on success, or null on failure.
@@ -166,22 +174,23 @@ pub extern "C" fn tts_destroy(ctx: *mut tts_ctx) {
 /// `text` must be a valid null-terminated C string.
 #[no_mangle]
 pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
-    if ctx.is_null() || text.is_null() {
-        return -1;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let text_str = unsafe { CStr::from_ptr(text) }
-        .to_string_lossy()
-        .into_owned();
-    let voice = ctx_ref.voice_id.lock().unwrap().clone();
-    let rate = *ctx_ref.rate.lock().unwrap();
-    let pitch = *ctx_ref.pitch.lock().unwrap();
-    let volume = *ctx_ref.volume.lock().unwrap();
+    ffi_catch!({
+        if ctx.is_null() || text.is_null() {
+            return -1;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let text_str = unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        let voice = ctx_ref.voice_id.lock().unwrap().clone();
+        let rate = *ctx_ref.rate.lock().unwrap();
+        let pitch = *ctx_ref.pitch.lock().unwrap();
+        let volume = *ctx_ref.volume.lock().unwrap();
 
-    let audio_cb = *ctx_ref.on_audio.lock().unwrap();
-    let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
-    let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
-    let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
+        let audio_cb = *ctx_ref.on_audio.lock().unwrap();
+        let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
+        let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
+        let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
 
     let mut on_audio_closure: Option<BoxedAudioCb> = match audio_cb {
         Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -231,22 +240,23 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
 /// `text` must be a valid null-terminated C string.
 #[no_mangle]
 pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
-    if ctx.is_null() || text.is_null() {
-        return -1;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let text_str = unsafe { CStr::from_ptr(text) }
-        .to_string_lossy()
-        .into_owned();
-    let voice = ctx_ref.voice_id.lock().unwrap().clone();
-    let rate = *ctx_ref.rate.lock().unwrap();
-    let pitch = *ctx_ref.pitch.lock().unwrap();
-    let volume = *ctx_ref.volume.lock().unwrap();
+    ffi_catch!({
+        if ctx.is_null() || text.is_null() {
+            return -1;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let text_str = unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        let voice = ctx_ref.voice_id.lock().unwrap().clone();
+        let rate = *ctx_ref.rate.lock().unwrap();
+        let pitch = *ctx_ref.pitch.lock().unwrap();
+        let volume = *ctx_ref.volume.lock().unwrap();
 
-    let audio_cb = *ctx_ref.on_audio.lock().unwrap();
-    let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
-    let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
-    let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
+        let audio_cb = *ctx_ref.on_audio.lock().unwrap();
+        let audio_userdata = *ctx_ref.on_audio_userdata.lock().unwrap();
+        let boundary_cb = *ctx_ref.on_boundary.lock().unwrap();
+        let boundary_userdata = *ctx_ref.on_boundary_userdata.lock().unwrap();
 
     let mut on_audio_closure: Option<BoxedAudioCb> = match audio_cb {
         Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -293,12 +303,14 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
 /// `ctx` must be a valid pointer from [`tts_create`].
 #[no_mangle]
 pub extern "C" fn tts_stop(ctx: *mut tts_ctx) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let engine = ctx_ref.engine.lock().unwrap();
-    let _ = engine.stop();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let engine = ctx_ref.engine.lock().unwrap();
+        let _ = engine.stop();
+    }));
 }
 
 /// Retrieve the list of available voices for the engine.
@@ -418,14 +430,16 @@ pub extern "C" fn tts_free_voices(voices: *mut types::tts_voice, count: i32) {
 /// `ctx` must be valid. `voice_id` must be a valid null-terminated C string.
 #[no_mangle]
 pub extern "C" fn tts_set_voice(ctx: *mut tts_ctx, voice_id: *const c_char) {
-    if ctx.is_null() || voice_id.is_null() {
-        return;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let id = unsafe { CStr::from_ptr(voice_id) }
-        .to_string_lossy()
-        .into_owned();
-    *ctx_ref.voice_id.lock().unwrap() = Some(id);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() || voice_id.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let id = unsafe { CStr::from_ptr(voice_id) }
+            .to_string_lossy()
+            .into_owned();
+        *ctx_ref.voice_id.lock().unwrap() = Some(id);
+    }));
 }
 
 /// Set the speech rate (1.0 = normal).
@@ -435,10 +449,12 @@ pub extern "C" fn tts_set_voice(ctx: *mut tts_ctx, voice_id: *const c_char) {
 /// `ctx` must be valid.
 #[no_mangle]
 pub extern "C" fn tts_set_rate(ctx: *mut tts_ctx, rate: f32) {
-    if ctx.is_null() {
-        return;
-    }
-    *unsafe { &*ctx }.rate.lock().unwrap() = rate;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        *unsafe { &*ctx }.rate.lock().unwrap() = rate;
+    }));
 }
 
 /// Set the speech pitch (1.0 = normal).
@@ -448,10 +464,12 @@ pub extern "C" fn tts_set_rate(ctx: *mut tts_ctx, rate: f32) {
 /// `ctx` must be valid.
 #[no_mangle]
 pub extern "C" fn tts_set_pitch(ctx: *mut tts_ctx, pitch: f32) {
-    if ctx.is_null() {
-        return;
-    }
-    *unsafe { &*ctx }.pitch.lock().unwrap() = pitch;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        *unsafe { &*ctx }.pitch.lock().unwrap() = pitch;
+    }));
 }
 
 /// Set the speech volume (1.0 = normal).
@@ -477,12 +495,14 @@ pub extern "C" fn tts_set_on_audio(
     cb: CAudioCb,
     userdata: *mut std::ffi::c_void,
 ) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    *ctx_ref.on_audio.lock().unwrap() = cb;
-    *ctx_ref.on_audio_userdata.lock().unwrap() = userdata;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_audio.lock().unwrap() = cb;
+        *ctx_ref.on_audio_userdata.lock().unwrap() = userdata;
+    }));
 }
 
 /// Set the callback for word boundary events.
@@ -495,12 +515,14 @@ pub extern "C" fn tts_set_on_boundary(
     cb: CBoundaryCb,
     userdata: *mut std::ffi::c_void,
 ) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    *ctx_ref.on_boundary.lock().unwrap() = cb;
-    *ctx_ref.on_boundary_userdata.lock().unwrap() = userdata;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_boundary.lock().unwrap() = cb;
+        *ctx_ref.on_boundary_userdata.lock().unwrap() = userdata;
+    }));
 }
 
 /// Return the number of registered engines.
@@ -509,36 +531,68 @@ pub extern "C" fn tts_get_engine_count() -> i32 {
     factory::engine_count() as i32
 }
 
-/// Write engine descriptors into a caller-allocated array.
+/// Get the list of available engine descriptors.
 ///
-/// `out_engines` must point to at least [`tts_get_engine_count`] entries.
-/// Caller must free each entry's strings and the array with [`tts_free_engine_info`].
+/// On success, writes a heap-allocated array to `*out_engines` and its length
+/// to `*out_count`. Caller must free with [`tts_free_engines`].
+///
+/// Returns 0 on success, -1 on failure.
 ///
 /// # Safety
 ///
-/// `out_engines` must be non-null and point to enough space.
+/// `out_engines` and `out_count` must be non-null.
 #[no_mangle]
-pub extern "C" fn tts_get_engines(out_engines: *mut types::tts_engine_info) {
-    if out_engines.is_null() {
-        return;
-    }
-    let engines = factory::engine_list();
-    for (i, e) in engines.iter().enumerate() {
-        unsafe {
-            let entry = out_engines.add(i);
-            std::ptr::write(
-                entry,
-                types::tts_engine_info {
-                    id: CString::new(e.id.clone()).unwrap().into_raw(),
-                    name: CString::new(e.name.clone()).unwrap().into_raw(),
-                    needs_credentials: e.needs_credentials,
-                    credential_keys_json: CString::new(e.credential_keys_json.clone())
-                        .unwrap()
-                        .into_raw(),
-                },
-            );
+pub extern "C" fn tts_get_engines(
+    out_engines: *mut *mut types::tts_engine_info,
+    out_count: *mut i32,
+) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if out_engines.is_null() || out_count.is_null() {
+            return -1;
         }
-    }
+
+        let engines = factory::engine_list();
+        let count = engines.len();
+
+        if count == 0 {
+            unsafe {
+                *out_engines = ptr::null_mut();
+                *out_count = 0;
+            }
+            return 0;
+        }
+
+        let layout = std::alloc::Layout::array::<types::tts_engine_info>(count).unwrap();
+        let ptr = unsafe { std::alloc::alloc(layout) } as *mut types::tts_engine_info;
+
+        if ptr.is_null() {
+            return -1;
+        }
+
+        for (i, e) in engines.iter().enumerate() {
+            unsafe {
+                let entry = ptr.add(i);
+                std::ptr::write(
+                    entry,
+                    types::tts_engine_info {
+                        id: CString::new(e.id.clone()).unwrap().into_raw(),
+                        name: CString::new(e.name.clone()).unwrap().into_raw(),
+                        needs_credentials: e.needs_credentials,
+                        credential_keys_json: CString::new(e.credential_keys_json.clone())
+                            .unwrap()
+                            .into_raw(),
+                    },
+                );
+            }
+        }
+
+        unsafe {
+            *out_engines = ptr;
+            *out_count = count as i32;
+        }
+
+        0
+    })).unwrap_or(-1)
 }
 
 /// Free an engine info array previously returned by [`tts_get_engines`].
@@ -547,7 +601,7 @@ pub extern "C" fn tts_get_engines(out_engines: *mut types::tts_engine_info) {
 ///
 /// `engines` must be a pointer from `tts_get_engines` with the matching `count`.
 #[no_mangle]
-pub extern "C" fn tts_free_engine_info(engines: *mut types::tts_engine_info, count: i32) {
+pub extern "C" fn tts_free_engines(engines: *mut types::tts_engine_info, count: i32) {
     if engines.is_null() || count <= 0 {
         return;
     }
@@ -573,9 +627,31 @@ pub extern "C" fn tts_free_engine_info(engines: *mut types::tts_engine_info, cou
 
 /// Return the last error message as a C string, or null if none.
 ///
+/// If ctx is provided, returns the per-context error. If ctx is null,
+/// returns the global error (for tts_create failures).
+///
 /// The returned pointer is valid until the next call to any TTS function.
+///
+/// # Safety
+///
+/// `ctx` may be null (returns global error), or a valid context pointer.
 #[no_mangle]
-pub extern "C" fn tts_get_last_error() -> *const c_char {
+pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
+    // If context provided and valid, return per-context error
+    if !ctx.is_null() {
+        let ctx_ref = unsafe { &*ctx };
+        match ctx_ref.last_error.lock() {
+            Ok(guard) => {
+                if !guard.is_empty() {
+                    let cstr = std::ffi::CString::new(guard.as_str()).unwrap_or_else(|_| CString::new("error").unwrap());
+                    return cstr.as_ptr();
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Fallback to global error (for tts_create failures or null context)
     match LAST_ERROR.lock() {
         Ok(guard) => match guard.as_ref() {
             Some(cs) => cs.as_ptr(),
@@ -591,12 +667,14 @@ pub extern "C" fn tts_get_last_error() -> *const c_char {
 /// `ctx` must be valid.
 #[no_mangle]
 pub extern "C" fn tts_pause(ctx: *mut tts_ctx) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let engine = ctx_ref.engine.lock().unwrap();
-    let _ = engine.pause();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let engine = ctx_ref.engine.lock().unwrap();
+        let _ = engine.pause();
+    }));
 }
 
 /// Resume paused speech.
@@ -605,12 +683,14 @@ pub extern "C" fn tts_pause(ctx: *mut tts_ctx) {
 /// `ctx` must be valid.
 #[no_mangle]
 pub extern "C" fn tts_resume(ctx: *mut tts_ctx) {
-    if ctx.is_null() {
-        return;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let engine = ctx_ref.engine.lock().unwrap();
-    let _ = engine.resume();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let engine = ctx_ref.engine.lock().unwrap();
+        let _ = engine.resume();
+    }));
 }
 
 /// Synthesize text to audio bytes without playback.
@@ -627,43 +707,45 @@ pub extern "C" fn tts_synth_to_bytes(
     out_bytes: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    if ctx.is_null() || text.is_null() || out_bytes.is_null() || out_len.is_null() {
-        return -1;
-    }
-    let ctx_ref = unsafe { &*ctx };
-    let text_str = unsafe { CStr::from_ptr(text) }
-        .to_string_lossy()
-        .into_owned();
-    let voice = ctx_ref.voice_id.lock().unwrap().clone();
-    let rate = *ctx_ref.rate.lock().unwrap();
-    let pitch = *ctx_ref.pitch.lock().unwrap();
-    let volume = *ctx_ref.volume.lock().unwrap();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() || text.is_null() || out_bytes.is_null() || out_len.is_null() {
+            return -1;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        let text_str = unsafe { CStr::from_ptr(text) }
+            .to_string_lossy()
+            .into_owned();
+        let voice = ctx_ref.voice_id.lock().unwrap().clone();
+        let rate = *ctx_ref.rate.lock().unwrap();
+        let pitch = *ctx_ref.pitch.lock().unwrap();
+        let volume = *ctx_ref.volume.lock().unwrap();
 
-    let engine = ctx_ref.engine.lock().unwrap();
-    match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
-        Ok(data) => {
-            if data.is_empty() {
-                unsafe {
-                    *out_bytes = ptr::null_mut();
-                    *out_len = 0;
+        let engine = ctx_ref.engine.lock().unwrap();
+        match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
+            Ok(data) => {
+                if data.is_empty() {
+                    unsafe {
+                        *out_bytes = ptr::null_mut();
+                        *out_len = 0;
+                    }
+                    return 0;
                 }
-                return 0;
+                let len = data.len();
+                let layout = std::alloc::Layout::array::<u8>(len).unwrap();
+                let ptr = unsafe { std::alloc::alloc(layout) };
+                unsafe {
+                    ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
+                    *out_bytes = ptr;
+                    *out_len = len;
+                }
+                0
             }
-            let len = data.len();
-            let layout = std::alloc::Layout::array::<u8>(len).unwrap();
-            let ptr = unsafe { std::alloc::alloc(layout) };
-            unsafe {
-                ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
-                *out_bytes = ptr;
-                *out_len = len;
+            Err(e) => {
+                *ctx_ref.last_error.lock().unwrap() = e.to_string();
+                -1
             }
-            0
         }
-        Err(e) => {
-            *ctx_ref.last_error.lock().unwrap() = e.to_string();
-            -1
-        }
-    }
+    })).unwrap_or(-1)
 }
 
 /// Free a byte buffer returned by [`tts_synth_to_bytes`].
