@@ -12,8 +12,8 @@ use windows::{
     core::{Interface, Result, HSTRING, PCWSTR},
     Win32::Media::Speech::{
         IEnumSpObjectTokens, ISpEventSource, ISpObjectToken, ISpObjectTokenCategory, ISpVoice,
-        SPEVENT, SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY, SpObjectTokenCategory, SpVoice,
-        SPCAT_VOICES, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
+        SpObjectTokenCategory, SpVoice, SPCAT_VOICES, SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY,
+        SPEVENT, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
     },
     Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
@@ -123,7 +123,6 @@ impl SapiEngine {
     /// the voice's current output format. We query the format up-front to
     /// avoid per-event overhead.
     fn speak_with_events(
-        &self,
         sp_voice: &ISpVoice,
         input_wide: &HSTRING,
         flags: u32,
@@ -194,7 +193,8 @@ impl SapiEngine {
                     // SPEVENT.eEventId lives in the low 16 bits of the
                     // bitfield; the windows crate doesn't expose a helper, so
                     // mask manually. Values are SPEVENTENUM integers.
-                    let event_id = (event._bitfield & 0xFFFF) as i32;
+                    let event_id = event._bitfield & 0xFFFF;
+                    #[allow(clippy::cast_precision_loss)]
                     let audio_offset_ms = (event.ullAudioStreamOffset as f64 / bytes_per_ms) as u64;
 
                     if event_id == SPEI_END_INPUT_STREAM.0 {
@@ -211,11 +211,11 @@ impl SapiEngine {
                             // Duration: we don't know it yet (it's the time
                             // until the next boundary); report a nominal
                             // 1 ms span. Callers that care can compute deltas.
-                            cb(
-                                &word,
-                                audio_offset_ms as f32 / 1000.0,
-                                (audio_offset_ms + 1) as f32 / 1000.0,
-                            );
+                            #[allow(clippy::cast_precision_loss)]
+                            let start_sec = audio_offset_ms as f32 / 1000.0;
+                            #[allow(clippy::cast_precision_loss)]
+                            let end_sec = (audio_offset_ms + 1) as f32 / 1000.0;
+                            cb(&word, start_sec, end_sec);
                         }
                     }
                 }
@@ -290,7 +290,7 @@ impl TtsEngine for SapiEngine {
         pitch: f32,
         volume: f32,
         _on_audio: Option<crate::engine::OnAudioCallback>,
-        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         let mut guard = self.voice.lock().unwrap();
         let sp_voice = guard
@@ -358,7 +358,7 @@ impl TtsEngine for SapiEngine {
             };
 
             if want_real_boundaries {
-                self.speak_with_events(
+                Self::speak_with_events(
                     sp_voice,
                     &input_wide,
                     flags,
