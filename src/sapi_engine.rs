@@ -205,10 +205,9 @@ impl SapiEngine {
                     if event_id == SPEI_WORD_BOUNDARY.0 {
                         if let Some(cb) = on_boundary.as_mut() {
                             // wParam = char position in WCHARs; lParam = length in WCHARs.
-                            // WPARAM/LPARAM are isize on Windows; word positions
-                            // are always non-negative so a widening cast is safe.
-                            let pos = event.wParam.0.max(0) as usize;
-                            let len = event.lParam.0.max(0) as usize;
+                            // WPARAM/LPARAM wrap usize values on Windows.
+                            let pos = event.wParam.0;
+                            let len = event.lParam.0;
                             let word = word_at(&visible_wide, pos, len);
                             // Duration: we don't know it yet (it's the time
                             // until the next boundary); report a nominal
