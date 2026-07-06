@@ -1,6 +1,6 @@
 //! Windows SAPI (Speech API) engine.
 
-use crate::engine::{estimate_word_boundaries, TtsEngine};
+use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
@@ -149,12 +149,43 @@ impl TtsEngine for SapiEngine {
             let _ = sp_voice.SetRate(rate_to_sapi(rate));
             let _ = sp_voice.SetVolume(volume_to_sapi(volume));
 
-            // Build SSML only when we need pitch (avoids unnecessary XML
-            // parsing for the common case). Use standard `<prosody pitch=...>`
-            // rather than the non-standard `<pitch absmiddle>`.
-            if (pitch - 1.0).abs() > f32::EPSILON {
+            // Run the input through SpeechMarkdown first; users can write
+            // `Hello (world)[emphasis:"strong"]` and have it expanded to
+            // SSML. SAPI accepts the SSML subset that speechmarkdown-rust
+            // emits (Alexa flavour), so we pass it through with SPF_IS_XML.
+            // `is_ssml` also short-circuits when the user passed raw SSML.
+            let (processed, is_ssml) = preprocess_speech_markdown(text, "sapi");
+            let needs_pitch = (pitch - 1.0).abs() > f32::EPSILON;
+
+            if is_ssml {
+                // Input (or SpeechMarkdown expansion) gave us a full SSML
+                // document. If pitch adjustment is also requested, inject a
+                // <prosody pitch="..."> wrapper inside the <speak>.
+                let final_ssml = if needs_pitch {
+                    let pitch_attr = pitch_to_percent(pitch);
+                    processed.replacen(
+                        "<speak",
+                        &format!(
+                            "<speak><prosody pitch=\"{pitch_attr}\""
+                        ),
+                        1,
+                    )
+                    .replacen(
+                        "</speak>",
+                        "</prosody></speak>",
+                        1,
+                    )
+                } else {
+                    processed
+                };
+                let wtext = HSTRING::from(&final_ssml);
+                sp_voice
+                    .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
+                    .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+            } else if needs_pitch {
+                // Plain text + pitch: wrap in a minimal SSML prosody element.
                 let pitch_attr = pitch_to_percent(pitch);
-                let escaped = text
+                let escaped = processed
                     .replace('&', "&amp;")
                     .replace('<', "&lt;")
                     .replace('>', "&gt;");
@@ -163,12 +194,12 @@ impl TtsEngine for SapiEngine {
                      xml:lang=\"en-US\"><prosody pitch=\"{pitch_attr}\">{escaped}</prosody></speak>"
                 );
                 let wtext = HSTRING::from(&ssml);
-                // Surface Speak failures instead of swallowing them.
                 sp_voice
                     .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
             } else {
-                let wtext = HSTRING::from(text);
+                // Plain text, no prosody adjustments — pass straight through.
+                let wtext = HSTRING::from(&processed);
                 sp_voice
                     .Speak(&wtext, SPF_ASYNC.0 as u32, None)
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;

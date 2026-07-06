@@ -18,9 +18,19 @@ pub type OnEndCallback<'a> = &'a mut dyn FnMut();
 /// Callback for error events.
 pub type OnErrorCallback<'a> = &'a mut dyn FnMut(&str);
 
-/// Convert speech markdown to SSML if detected, otherwise return text as-is.
-/// Returns (processed_text, is_ssml).
-#[cfg(feature = "cloud")]
+/// Convert SpeechMarkdown to SSML when detected, otherwise return the text
+/// unchanged. Returns `(processed_text, is_ssml)`.
+///
+/// `platform` picks the SSML flavour:
+///   - `"azure"` → MicrosoftAzure
+///   - `"google"` → GoogleAssistant
+///   - `"sapi"` / `"avsynth"` / anything else → AmazonAlexa (the closest
+///     generic SSML baseline; SAPI's own parser accepts the subset that
+///     speechmarkdown-rust emits for Alexa)
+///
+/// Available whenever the `speechmarkdown` feature is on (auto-enabled by
+/// `cloud`, `sapi`, and `avsynth`). Without it, this is a no-op stub.
+#[cfg(feature = "speechmarkdown")]
 #[must_use]
 pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) {
     use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
@@ -41,7 +51,7 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
     }
 }
 
-#[cfg(not(feature = "cloud"))]
+#[cfg(not(feature = "speechmarkdown"))]
 #[must_use]
 pub fn preprocess_speech_markdown(text: &str, _platform: &str) -> (String, bool) {
     (text.to_string(), false)

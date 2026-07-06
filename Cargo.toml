@@ -14,13 +14,17 @@ crate-type = ["cdylib", "staticlib", "lib"]
 [features]
 default = ["system", "cloud", "sherpaonnx"]
 system = ["speech-dispatcher"]
-cloud = ["reqwest", "serde_json", "base64", "speechmarkdown-rust", "tungstenite", "uuid", "url"]
+cloud = ["reqwest", "serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url"]
 sherpaonnx = ["sherpa-onnx", "serde_json"]
 tungstenite = ["dep:tungstenite"]
 uuid = ["dep:uuid"]
 url = ["dep:url"]
-avsynth = []
-sapi = ["windows"]
+# SpeechMarkdown → SSML preprocessing. Auto-enabled by every engine that
+# can consume SSML (cloud, sapi, avsynth). Turn it off explicitly with
+# `--no-default-features --features ...` if you want a smaller binary.
+speechmarkdown = ["dep:speechmarkdown-rust"]
+avsynth = ["speechmarkdown"]
+sapi = ["windows", "speechmarkdown"]
 
 [dependencies]
 speech-dispatcher = { version = "0.16", optional = true }
@@ -29,7 +33,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "1.13", optional = true }
 base64 = { version = "0.22", optional = true }
-speechmarkdown-rust = { version = "0.1", optional = true }
+speechmarkdown-rust = { version = "0.4", optional = true }
 anyhow = "1"
 tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"], optional = true }
 uuid = { version = "1.23.2", features = ["v4"], optional = true }

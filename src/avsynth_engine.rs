@@ -1,4 +1,4 @@
-use crate::engine::{estimate_word_boundaries, TtsEngine};
+use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_void};
@@ -72,11 +72,25 @@ impl TtsEngine for AvSynthEngine {
             .map(std::string::ToString::to_string)
             .or_else(|| self.voice_id.lock().unwrap().clone());
 
+        // Run the input through SpeechMarkdown. AVSpeechSynthesizer itself
+        // doesn't parse SSML, so when the input (or SpeechMarkdown expansion)
+        // yields an SSML document we strip the tags and pass the inner text —
+        // this matches what js-tts-wrapper does for the avsynth engine. The
+        // upshot is that callers can write SpeechMarkdown on macOS and have
+        // it Just Work, with the prosody directives applied via the utterance
+        // rate/pitch/volume parameters above.
+        let (processed, _is_ssml) = preprocess_speech_markdown(text, "avsynth");
+        let spoken_text = if _is_ssml {
+            strip_ssml_tags(&processed)
+        } else {
+            processed
+        };
+
         unsafe {
             // CString::new fails if the input contains an interior NUL. For TTS
             // text and voice ids that is an error we should surface rather than
             // silently truncate or read past the end of the buffer.
-            let text_c = CString::new(text)
+            let text_c = CString::new(spoken_text.as_str())
                 .map_err(|_| TtsError("text contains interior NUL byte".into()))?;
             let voice_c = match voice_to_use.as_deref() {
                 Some(v) => Some(
@@ -202,6 +216,28 @@ impl TtsEngine for AvSynthEngine {
     fn engine_id(&self) -> &'static str {
         "avsynth"
     }
+}
+
+/// Strip XML/SSML tags from `input`, leaving only the inner text.
+///
+/// AVSpeechSynthesizer doesn't have an SSML parser, so when a caller passes
+/// SSML (or SpeechMarkdown that expands to SSML) we keep just the text
+/// content. Prosody directives are lost — the equivalent knobs (rate, pitch,
+/// volume) are applied via the utterance parameters instead.
+fn strip_ssml_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    // Collapse the run of whitespace that self-closing tags (e.g. `<break/>`)
+    // leave behind.
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 impl Drop for AvSynthEngine {
