@@ -319,6 +319,11 @@ impl TtsEngine for SapiEngine {
             // can let SAPI block on Speak and skip the event plumbing.
             let want_real_boundaries = on_boundary.is_some();
 
+            // We pass the (possibly SSML) input to speak_with_events so it
+            // can map SAPI's WCHAR positions back to the spoken text. Keep a
+            // clone because HSTRING::from below moves `processed`.
+            let processed_for_events = processed.clone();
+
             // Build the final input buffer + flags.
             let (input_wide, flags) = if is_ssml {
                 let final_ssml = if needs_pitch {
@@ -353,7 +358,13 @@ impl TtsEngine for SapiEngine {
             };
 
             if want_real_boundaries {
-                self.speak_with_events(sp_voice, &input_wide, flags, &processed, on_boundary)?;
+                self.speak_with_events(
+                    sp_voice,
+                    &input_wide,
+                    flags,
+                    &processed_for_events,
+                    on_boundary,
+                )?;
             } else {
                 sp_voice
                     .Speak(&input_wide, flags, None)
