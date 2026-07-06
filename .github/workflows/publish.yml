@@ -206,7 +206,12 @@ jobs:
           # in `dotnet nuget push`. The project still targets net8.0.
           dotnet-version: '9.0.x'
       - name: Pack
-        run: dotnet pack bindings/dotnet/RustTtsWrapper.Bindings.csproj -c Release
+        # Pass the version from the git tag (e.g. v0.2.3 → 0.2.3)
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          Write-Host "Packing version $version"
+          dotnet pack bindings/dotnet/RustTtsWrapper.Bindings.csproj -c Release -p:Version=$version
       - name: Upload NuGet package
         uses: actions/upload-artifact@v4
         with:
