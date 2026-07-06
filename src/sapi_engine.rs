@@ -163,18 +163,13 @@ impl TtsEngine for SapiEngine {
                 // <prosody pitch="..."> wrapper inside the <speak>.
                 let final_ssml = if needs_pitch {
                     let pitch_attr = pitch_to_percent(pitch);
-                    processed.replacen(
-                        "<speak",
-                        &format!(
-                            "<speak><prosody pitch=\"{pitch_attr}\""
-                        ),
-                        1,
-                    )
-                    .replacen(
-                        "</speak>",
-                        "</prosody></speak>",
-                        1,
-                    )
+                    processed
+                        .replacen(
+                            "<speak",
+                            &format!("<speak><prosody pitch=\"{pitch_attr}\""),
+                            1,
+                        )
+                        .replacen("</speak>", "</prosody></speak>", 1)
                 } else {
                     processed
                 };

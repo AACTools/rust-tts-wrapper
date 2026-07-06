@@ -79,8 +79,8 @@ impl TtsEngine for AvSynthEngine {
         // upshot is that callers can write SpeechMarkdown on macOS and have
         // it Just Work, with the prosody directives applied via the utterance
         // rate/pitch/volume parameters above.
-        let (processed, _is_ssml) = preprocess_speech_markdown(text, "avsynth");
-        let spoken_text = if _is_ssml {
+        let (processed, is_ssml) = preprocess_speech_markdown(text, "avsynth");
+        let spoken_text = if is_ssml {
             strip_ssml_tags(&processed)
         } else {
             processed
