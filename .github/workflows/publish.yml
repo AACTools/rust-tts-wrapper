@@ -212,19 +212,23 @@ jobs:
         with:
           name: nuget-package
           path: bindings/dotnet/bin/Release/*.nupkg
-      - name: Publish to NuGet (Trusted Publishing / OIDC)
+      - name: Publish to NuGet
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
-        # No --api-key: NuGet.org validates the GitHub OIDC token via the
-        # Trusted Publishing configuration. Requires `id-token: write`
-        # permission and the `environment: nuget` declared above.
+        # Supports both Trusted Publishing (OIDC) and API key auth.
+        # If NUGET_API_KEY secret is set, use it. Otherwise rely on
+        # OIDC Trusted Publishing (requires nuget.org configuration).
         run: |
           $pkg = Get-ChildItem bindings/dotnet/bin/Release/*.nupkg | Select-Object -First 1
-          if ($pkg) {
-            Write-Host "Publishing $($pkg.Name)"
-            dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
+          if (-not $pkg) { Write-Host "No .nupkg found"; exit 0 }
+          Write-Host "Publishing $($pkg.Name)"
+          $apiKey = '${{ secrets.NUGET_API_KEY }}'
+          if ($apiKey) {
+            Write-Host "Using API key authentication"
+            dotnet nuget push $pkg.FullName --api-key $apiKey --source https://api.nuget.org/v3/index.json --skip-duplicate
           } else {
-            Write-Host "No .nupkg found — skipping publish"
+            Write-Host "Using Trusted Publishing (OIDC) — no API key set"
+            dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
           }
 
   release:
