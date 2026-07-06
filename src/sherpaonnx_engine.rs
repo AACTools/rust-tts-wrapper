@@ -5,8 +5,10 @@ use crate::types::{
     Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
 };
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 /// Embedded model registry compiled from `merged_models.json`.
 static MERGED_MODELS_JSON: &str = include_str!("merged_models.json");
@@ -68,13 +70,30 @@ fn iso639_3(lang_code: &str) -> String {
 }
 
 /// Offline TTS engine using [Sherpa-ONNX](https://github.com/k2-fsa/sherpa-onnx).
-#[derive(Debug)]
 pub struct SherpaOnnxEngine {
     models: HashMap<String, SherpaModelInfo>,
     model_dir: PathBuf,
     loaded_model_id: String,
     num_threads: i32,
     provider: Option<String>,
+    // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
+    // expensive (model loading + ONNX init). Cache it so the first speak()
+    // pays the cost and subsequent calls reuse it.
+    tts_instance: Mutex<Option<sherpa_onnx::OfflineTts>>,
+}
+
+impl fmt::Debug for SherpaOnnxEngine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SherpaOnnxEngine")
+            .field("loaded_model_id", &self.loaded_model_id)
+            .field("num_threads", &self.num_threads)
+            .field("provider", &self.provider)
+            .field(
+                "tts_cached",
+                &self.tts_instance.lock().is_ok_and(|g| g.is_some()),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl SherpaOnnxEngine {
@@ -123,6 +142,7 @@ impl SherpaOnnxEngine {
             loaded_model_id: model_id,
             num_threads,
             provider,
+            tts_instance: Mutex::new(None),
         }
     }
 
@@ -328,8 +348,16 @@ impl TtsEngine for SherpaOnnxEngine {
             ..Default::default()
         };
 
-        let tts = sherpa_onnx::OfflineTts::create(&config)
-            .ok_or_else(|| TtsError("Failed to create SherpaOnnx TTS engine".into()))?;
+        // Use cached OfflineTts instance if available; create on first call.
+        // The Mutex guards the Option; we hold it for the entire synthesis
+        // since OfflineTts::generate_with_config needs &self.
+        let mut tts_guard = self.tts_instance.lock().unwrap();
+        if tts_guard.is_none() {
+            let tts = sherpa_onnx::OfflineTts::create(&config)
+                .ok_or_else(|| TtsError("Failed to create SherpaOnnx TTS engine".into()))?;
+            *tts_guard = Some(tts);
+        }
+        let tts = tts_guard.as_ref().expect("tts was just initialised");
 
         let sid = voice.and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
         let gen_config = sherpa_onnx::GenerationConfig {
@@ -386,7 +414,7 @@ impl TtsEngine for SherpaOnnxEngine {
                 let start = b.offset as f32 / 1000.0;
                 #[allow(clippy::cast_precision_loss)]
                 let end = (b.offset + b.duration) as f32 / 1000.0;
-                cb(&b.text, start, end);
+                cb(&b.text, start, end, -1, -1);
             }
         }
 

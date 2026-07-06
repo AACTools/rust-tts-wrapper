@@ -7,7 +7,9 @@ use std::fmt;
 pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 
 /// Callback for word boundary events.
-pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32);
+/// Signature: (word, start_sec, end_sec, char_offset, char_len)
+/// char_offset/char_len are -1 when the engine doesn't report them.
+pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32, i32);
 
 /// Callback for speech-started events.
 pub type OnStartCallback<'a> = &'a mut dyn FnMut();

@@ -41,6 +41,10 @@ typedef void (*CAudioCb)(const uint8_t*, uintptr_t, void*);
 
 typedef void (*CBoundaryCb)(const char*, float, float, void*);
 
+typedef void (*CBoundaryCb2)(const char*, int32_t, int32_t, float, float, void*);
+
+typedef void (*CVisemeCb)(int32_t, float, void*);
+
 typedef void (*CVoidCb)(void*);
 
 typedef void (*CErrorCb)(const char*, void*);
@@ -109,6 +113,22 @@ void tts_destroy(struct tts_ctx *ctx);
  * `text` must be a valid null-terminated C string.
  */
 int32_t tts_speak(struct tts_ctx *ctx, const char *text);
+
+/**
+ * Speak pre-built SSML using the engine in `ctx`.
+ *
+ * The SSML is passed directly to the engine without SpeechMarkdown
+ * conversion or rate/pitch/volume wrapping. Callers are responsible
+ * for embedding all prosody in the SSML.
+ *
+ * Returns 0 on success, -1 on failure.
+ *
+ * # Safety
+ *
+ * `ctx` must be a valid pointer from [`tts_create`].
+ * `ssml` must be a valid null-terminated C string.
+ */
+int32_t tts_speak_ssml(struct tts_ctx *ctx, const char *ssml);
 
 /**
  * Speak `text` synchronously (blocks until complete).
@@ -205,6 +225,24 @@ void tts_set_on_audio(struct tts_ctx *ctx, CAudioCb cb, void *userdata);
  * `ctx` must be valid.
  */
 void tts_set_on_boundary(struct tts_ctx *ctx, CBoundaryCb cb, void *userdata);
+
+/**
+ * Extended boundary callback with source-text char offset and length.
+ * cb(word, char_offset, char_len, start_s, end_s, userdata)
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_boundary2(struct tts_ctx *ctx, CBoundaryCb2 cb, void *userdata);
+
+/**
+ * Viseme callback for lip-sync / facial animation.
+ * cb(viseme_id, audio_offset_sec, userdata)
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_viseme(struct tts_ctx *ctx, CVisemeCb cb, void *userdata);
 
 /**
  * Set the callback fired when speech starts.

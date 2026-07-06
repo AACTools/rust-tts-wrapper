@@ -216,7 +216,7 @@ impl SapiEngine {
                             let start_sec = audio_offset_ms as f32 / 1000.0;
                             #[allow(clippy::cast_precision_loss)]
                             let end_sec = (audio_offset_ms + 1) as f32 / 1000.0;
-                            cb(&word, start_sec, end_sec);
+                            cb(&word, start_sec, end_sec, pos as i32, len as i32);
                         }
                     }
                 }

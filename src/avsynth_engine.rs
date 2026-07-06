@@ -116,6 +116,8 @@ impl TtsEngine for AvSynthEngine {
                     &b.text,
                     b.offset as f32 / 1000.0,
                     (b.offset + b.duration) as f32 / 1000.0,
+                    -1,
+                    -1,
                 );
             }
         }

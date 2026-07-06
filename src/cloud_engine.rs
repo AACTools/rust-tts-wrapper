@@ -4,6 +4,21 @@
 //! providers. Includes voice fetching for engines with list endpoints and
 //! word boundary support where APIs provide timing data.
 
+// Thread-local bridge for viseme callbacks. The FFI layer sets this before
+// calling speak(); the Azure WS loop reads it when viseme events arrive.
+// This avoids a trait-level change to add a viseme callback parameter.
+type VisemeFn = Box<dyn FnMut(i32, f32)>;
+
+thread_local! {
+    pub(crate) static VISEME_CB: std::cell::RefCell<Option<VisemeFn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set the thread-local viseme callback. Called by the FFI layer before speak().
+pub fn set_viseme_callback(cb: Option<Box<dyn FnMut(i32, f32)>>) {
+    VISEME_CB.with(|cell| *cell.borrow_mut() = cb);
+}
+
 use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
@@ -651,8 +666,6 @@ impl TtsEngine for CloudEngine {
                 .send(Message::Text(ssml_msg.into()))
                 .map_err(|e| TtsError(format!("WS ssml send error: {e}")))?;
 
-            let mut collected_boundaries = Vec::new();
-
             // Overall timeout for the WS session. Azure typically completes
             // within a few seconds; 60s is a generous safety net that prevents
             // tts_speak from hanging indefinitely if the service stalls.
@@ -722,6 +735,7 @@ impl TtsEngine for CloudEngine {
                                         if item.get("Type").and_then(|v| v.as_str())
                                             == Some("WordBoundary")
                                         {
+                                            // ... word boundary handling (existing code) ...
                                             if let Some(data) = item.get("Data") {
                                                 let offset_ticks = data
                                                     .get("Offset")
@@ -753,10 +767,46 @@ impl TtsEngine for CloudEngine {
                                                 };
 
                                                 if !word.is_empty() {
-                                                    collected_boundaries.push(WordBoundary {
-                                                        text: word.to_string(),
-                                                        offset: (offset_ticks / 10_000) as u64,
-                                                        duration: (duration_ticks / 10_000) as u64,
+                                                    // Fire boundary inline for real-time
+                                                    // word highlighting (SAPI clients need
+                                                    // interleaved delivery, not batched).
+                                                    let offset_ms = (offset_ticks / 10_000) as f64;
+                                                    let duration_ms =
+                                                        (duration_ticks / 10_000) as f64;
+                                                    #[allow(clippy::cast_precision_loss)]
+                                                    on_boundary(
+                                                        word,
+                                                        offset_ms as f32 / 1000.0,
+                                                        (offset_ms + duration_ms) as f32 / 1000.0,
+                                                        -1,
+                                                        -1,
+                                                    );
+                                                }
+                                            }
+
+                                            // Viseme events (Azure WS only).
+                                            // Format: {"Type":"Viseme","Data":{"VisemeId":1,"Offset":1234567}}
+                                            if item.get("Type").and_then(|v| v.as_str())
+                                                == Some("Viseme")
+                                            {
+                                                if let Some(data) = item.get("Data") {
+                                                    let viseme_id = data
+                                                        .get("VisemeId")
+                                                        .and_then(serde_json::Value::as_i64)
+                                                        .unwrap_or(0)
+                                                        as i32;
+                                                    let offset_ticks = data
+                                                        .get("Offset")
+                                                        .and_then(serde_json::Value::as_i64)
+                                                        .unwrap_or(0);
+                                                    #[allow(clippy::cast_precision_loss)]
+                                                    let offset_sec =
+                                                        (offset_ticks as f64 / 10_000_000.0) as f32;
+                                                    VISEME_CB.with(|cell| {
+                                                        if let Some(ref mut cb) = *cell.borrow_mut()
+                                                        {
+                                                            cb(viseme_id, offset_sec);
+                                                        }
                                                     });
                                                 }
                                             }
@@ -777,15 +827,6 @@ impl TtsEngine for CloudEngine {
                     }
                     _ => {}
                 }
-            }
-
-            compute_durations(&mut collected_boundaries);
-            for b in &collected_boundaries {
-                on_boundary(
-                    &b.text,
-                    b.offset as f32 / 1000.0,
-                    (b.offset + b.duration) as f32 / 1000.0,
-                );
             }
 
             return Ok(());
@@ -910,7 +951,7 @@ impl TtsEngine for CloudEngine {
 
                             if char_str.trim().is_empty() {
                                 if has_started {
-                                    cb(&current_word, word_start, end_time);
+                                    cb(&current_word, word_start, end_time, -1, -1);
                                     current_word.clear();
                                     has_started = false;
                                 }
@@ -928,7 +969,7 @@ impl TtsEngine for CloudEngine {
                                 .last()
                                 .and_then(serde_json::Value::as_f64)
                                 .unwrap_or(0.0) as f32;
-                            cb(&current_word, word_start, end_time);
+                            cb(&current_word, word_start, end_time, -1, -1);
                         }
                     }
                 }
@@ -962,6 +1003,8 @@ impl TtsEngine for CloudEngine {
                             &b.text,
                             b.offset as f32 / 1000.0,
                             (b.offset + b.duration) as f32 / 1000.0,
+                            -1,
+                            -1,
                         );
                     }
                 } else {
@@ -971,6 +1014,8 @@ impl TtsEngine for CloudEngine {
                             &b.text,
                             b.offset as f32 / 1000.0,
                             (b.offset + b.duration) as f32 / 1000.0,
+                            -1,
+                            -1,
                         );
                     }
                 }
@@ -996,6 +1041,8 @@ impl TtsEngine for CloudEngine {
                         &b.text,
                         b.offset as f32 / 1000.0,
                         (b.offset + b.duration) as f32 / 1000.0,
+                        -1,
+                        -1,
                     );
                 }
             }

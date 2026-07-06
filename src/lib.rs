@@ -62,10 +62,13 @@ type BoxedEngine = Arc<dyn TtsEngine>;
 /// Opaque context holding an engine instance and its per-instance settings.
 pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void)>;
 pub type CBoundaryCb = Option<extern "C" fn(*const c_char, f32, f32, *mut std::ffi::c_void)>;
+pub type CBoundaryCb2 =
+    Option<extern "C" fn(*const c_char, i32, i32, f32, f32, *mut std::ffi::c_void)>;
+pub type CVisemeCb = Option<extern "C" fn(i32, f32, *mut std::ffi::c_void)>;
 pub type CVoidCb = Option<extern "C" fn(*mut std::ffi::c_void)>;
 pub type CErrorCb = Option<extern "C" fn(*const c_char, *mut std::ffi::c_void)>;
 type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
-type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32)>;
+type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32, i32, i32)>;
 
 pub struct tts_ctx {
     // The TtsEngine trait already requires Send + Sync, and every engine
@@ -88,6 +91,8 @@ pub struct tts_ctx {
     on_start: Mutex<VoidCallback>,
     on_end: Mutex<VoidCallback>,
     on_error: Mutex<ErrorCallback>,
+    on_boundary2: Mutex<BoundaryCallback2>,
+    on_viseme: Mutex<VisemeCallback>,
 }
 
 /// Bundled audio callback + userdata so updates are atomic.
@@ -118,6 +123,20 @@ struct ErrorCallback {
     userdata: *mut std::ffi::c_void,
 }
 
+/// Extended boundary callback with source-text offsets.
+#[derive(Clone, Copy)]
+struct BoundaryCallback2 {
+    cb: CBoundaryCb2,
+    userdata: *mut std::ffi::c_void,
+}
+
+/// Bundled viseme callback.
+#[derive(Clone, Copy)]
+struct VisemeCallback {
+    cb: CVisemeCb,
+    userdata: *mut std::ffi::c_void,
+}
+
 // SAFETY: the raw userdata pointers are only dereferenced via the C callback
 // signatures, and access is serialised by the surrounding Mutex on each
 // `tts_ctx` field. The host is responsible for the userdata lifetime, which
@@ -130,6 +149,10 @@ unsafe impl Send for VoidCallback {}
 unsafe impl Sync for VoidCallback {}
 unsafe impl Send for ErrorCallback {}
 unsafe impl Sync for ErrorCallback {}
+unsafe impl Send for BoundaryCallback2 {}
+unsafe impl Sync for BoundaryCallback2 {}
+unsafe impl Send for VisemeCallback {}
+unsafe impl Sync for VisemeCallback {}
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
@@ -215,6 +238,14 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
                 cb: None,
                 userdata: ptr::null_mut(),
             }),
+            on_boundary2: Mutex::new(BoundaryCallback2 {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_viseme: Mutex::new(VisemeCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
         });
         Box::into_raw(ctx)
     } else {
@@ -258,6 +289,28 @@ pub extern "C" fn tts_destroy(ctx: *mut tts_ctx) {
 /// `text` must be a valid null-terminated C string.
 #[no_mangle]
 pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
+    tts_speak_impl(ctx, text, false)
+}
+
+/// Speak pre-built SSML using the engine in `ctx`.
+///
+/// The SSML is passed directly to the engine without SpeechMarkdown
+/// conversion or rate/pitch/volume wrapping. Callers are responsible
+/// for embedding all prosody in the SSML.
+///
+/// Returns 0 on success, -1 on failure.
+///
+/// # Safety
+///
+/// `ctx` must be a valid pointer from [`tts_create`].
+/// `ssml` must be a valid null-terminated C string.
+#[no_mangle]
+pub extern "C" fn tts_speak_ssml(ctx: *mut tts_ctx, ssml: *const c_char) -> i32 {
+    tts_speak_impl(ctx, ssml, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn tts_speak_impl(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) -> i32 {
     ffi_catch!({
         if ctx.is_null() || text.is_null() {
             return -1;
@@ -267,13 +320,25 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
             .to_string_lossy()
             .into_owned();
         let voice = ctx_ref.voice_id.lock().unwrap().clone();
-        let rate = *ctx_ref.rate.lock().unwrap();
-        let pitch = *ctx_ref.pitch.lock().unwrap();
-        let volume = *ctx_ref.volume.lock().unwrap();
+        let rate = if raw_ssml {
+            1.0
+        } else {
+            *ctx_ref.rate.lock().unwrap()
+        };
+        let pitch = if raw_ssml {
+            1.0
+        } else {
+            *ctx_ref.pitch.lock().unwrap()
+        };
+        let volume = if raw_ssml {
+            1.0
+        } else {
+            *ctx_ref.volume.lock().unwrap()
+        };
 
-        // Snapshot callback + userdata atomically.
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
+        let boundary2 = { *ctx_ref.on_boundary2.lock().unwrap() };
 
         let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
             Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -282,23 +347,49 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
             None => None,
         };
 
-        let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
-            Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
-                if let Ok(c_word) = CString::new(word) {
-                    cb(c_word.as_ptr(), start, end, boundary.userdata);
-                }
-            })),
-            None => None,
+        let mut on_boundary_closure: Option<BoxedBoundaryCb> = match (boundary.cb, boundary2.cb) {
+            (None, None) => None,
+            _ => Some(Box::new(
+                move |word: &str, start: f32, end: f32, char_offset: i32, char_len: i32| {
+                    if let Some(cb) = boundary.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(c_word.as_ptr(), start, end, boundary.userdata);
+                        }
+                    }
+                    if let Some(cb) = boundary2.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(
+                                c_word.as_ptr(),
+                                char_offset,
+                                char_len,
+                                start,
+                                end,
+                                boundary2.userdata,
+                            );
+                        }
+                    }
+                },
+            )),
         };
 
-        // Snapshot lifecycle callbacks atomically.
         let start_cb = { *ctx_ref.on_start.lock().unwrap() };
         let end_cb = { *ctx_ref.on_end.lock().unwrap() };
         let error_cb = { *ctx_ref.on_error.lock().unwrap() };
 
-        // Fire on_start before synthesis.
         if let Some(cb) = start_cb.cb {
             cb(start_cb.userdata);
+        }
+
+        #[cfg(feature = "cloud")]
+        {
+            let vis = { *ctx_ref.on_viseme.lock().unwrap() };
+            let vbox: Option<Box<dyn FnMut(i32, f32)>> = vis.cb.map(|cb| {
+                let ud = vis.userdata;
+                Box::new(move |id: i32, off: f32| {
+                    cb(id, off, ud);
+                }) as Box<dyn FnMut(i32, f32)>
+            });
+            crate::cloud_engine::set_viseme_callback(vbox);
         }
 
         let engine = &ctx_ref.engine;
@@ -313,7 +404,7 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
                 .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
             on_boundary_closure
                 .as_mut()
-                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32)),
         );
 
         match result {
@@ -362,6 +453,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
 
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
+        let boundary2 = { *ctx_ref.on_boundary2.lock().unwrap() };
 
         let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
             Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -370,13 +462,29 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             None => None,
         };
 
-        let mut on_boundary_closure: Option<BoxedBoundaryCb> = match boundary.cb {
-            Some(cb) => Some(Box::new(move |word: &str, start: f32, end: f32| {
-                if let Ok(c_word) = CString::new(word) {
-                    cb(c_word.as_ptr(), start, end, boundary.userdata);
-                }
-            })),
-            None => None,
+        let mut on_boundary_closure: Option<BoxedBoundaryCb> = match (boundary.cb, boundary2.cb) {
+            (None, None) => None,
+            _ => Some(Box::new(
+                move |word: &str, start: f32, end: f32, char_offset: i32, char_len: i32| {
+                    if let Some(cb) = boundary.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(c_word.as_ptr(), start, end, boundary.userdata);
+                        }
+                    }
+                    if let Some(cb) = boundary2.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(
+                                c_word.as_ptr(),
+                                char_offset,
+                                char_len,
+                                start,
+                                end,
+                                boundary2.userdata,
+                            );
+                        }
+                    }
+                },
+            )),
         };
 
         // Snapshot lifecycle callbacks atomically.
@@ -387,6 +495,18 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         // Fire on_start before synthesis.
         if let Some(cb) = start_cb.cb {
             cb(start_cb.userdata);
+        }
+
+        #[cfg(feature = "cloud")]
+        {
+            let vis = { *ctx_ref.on_viseme.lock().unwrap() };
+            let vbox: Option<Box<dyn FnMut(i32, f32)>> = vis.cb.map(|cb| {
+                let ud = vis.userdata;
+                Box::new(move |id: i32, off: f32| {
+                    cb(id, off, ud);
+                }) as Box<dyn FnMut(i32, f32)>
+            });
+            crate::cloud_engine::set_viseme_callback(vbox);
         }
 
         let engine = &ctx_ref.engine;
@@ -401,7 +521,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
                 .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
             on_boundary_closure
                 .as_mut()
-                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32)),
         );
 
         match result {
@@ -650,6 +770,46 @@ pub extern "C" fn tts_set_on_boundary(
         }
         let ctx_ref = unsafe { &*ctx };
         *ctx_ref.on_boundary.lock().unwrap() = BoundaryCallback { cb, userdata };
+    }));
+}
+
+/// Extended boundary callback with source-text char offset and length.
+/// cb(word, char_offset, char_len, start_s, end_s, userdata)
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_boundary2(
+    ctx: *mut tts_ctx,
+    cb: CBoundaryCb2,
+    userdata: *mut std::ffi::c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_boundary2.lock().unwrap() = BoundaryCallback2 { cb, userdata };
+    }));
+}
+
+/// Viseme callback for lip-sync / facial animation.
+/// cb(viseme_id, audio_offset_sec, userdata)
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_viseme(
+    ctx: *mut tts_ctx,
+    cb: CVisemeCb,
+    userdata: *mut std::ffi::c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_viseme.lock().unwrap() = VisemeCallback { cb, userdata };
     }));
 }
 
