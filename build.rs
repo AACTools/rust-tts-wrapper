@@ -27,7 +27,10 @@ fn main() {
         }
     }
 
-    if env::var("TARGET").unwrap_or_default().contains("apple") {
+    // The avsynth shim is only compiled on macOS (it wraps AVSpeechSynthesizer).
+    // The `cc` crate is a macOS-only build-dependency for this reason.
+    #[cfg(target_os = "macos")]
+    {
         cc::Build::new()
             .file("extern/avsynth_shim.m")
             .compiler("clang")

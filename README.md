@@ -7,7 +7,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
 | System (speech-dispatcher) | Local | None | — | — | Estimated | — |
-| Sherpa-ONNX | Local (191 models) | None | Simulated* | Speakers | Estimated | — |
+| Sherpa-ONNX | Local (1300+ models) | None | Simulated* | Speakers | Estimated | — |
 | Azure | Cloud | Key + Region | Chunked | API | Estimated | Platform-aware |
 | Google Cloud | Cloud | API Key | Chunked | API | **Real** (v1beta1 timepoints) | Platform-aware |
 | OpenAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
@@ -48,7 +48,7 @@ ALL 12 CRITICAL ISSUES RESOLVED (100%):
 - DONE: Windows SAPI compilation fixed (toolchain issue remains)
 - DONE: FFI panic safety complete (no more UB from panics)  
 - DONE: String safety issues fixed (Azure/ElevenLands)
-- DONE: SherpaOnnx 191/191 models now work (was 3/191)
+- DONE: SherpaOnnx all models now work (was all models)
 - DONE: Cloud authentication fixed (Watson, PlayHT, Deepgram, Hume)
 - DONE: Polly disabled (requires AWS Signature V4)
 - DONE: Memory allocator mismatch fixed (consistent Rust allocation)
@@ -261,7 +261,7 @@ cargo build --all-features
 
 - `system` — speech-dispatcher (Linux system TTS)
 - `cloud` — all 19 cloud engines via HTTP + speechmarkdown-rust + base64
-- `sherpaonnx` — Sherpa-ONNX offline TTS (191 models)
+- `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
 
 ### Lint & Test
 
@@ -318,7 +318,7 @@ client.stop()
       +--------------+--------------+
       |              |              |
   SystemEngine   CloudEngine   SherpaOnnxEngine
-  (speech-       (19 cloud      (191 local
+  (speech-       (19 cloud      (1300+ local
   dispatcher)    providers)     models)
 ```
 
@@ -329,7 +329,7 @@ Cloud engines use provider-specific `CloudConfig`:
 
 ## Sherpa-ONNX Models
 
-191 models from the bundled `merged_models.json` registry. Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
+1300+ models from the bundled `merged_models.json` registry. Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
 
 ## License
 
