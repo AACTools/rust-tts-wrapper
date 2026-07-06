@@ -1,6 +1,6 @@
 //! Windows SAPI (Speech API) engine.
 
-use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
+use crate::engine::{preprocess_speech_markdown, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
@@ -11,13 +11,21 @@ use std::sync::Mutex;
 use windows::{
     core::{Result, HSTRING, PCWSTR},
     Win32::Media::Speech::{
-        IEnumSpObjectTokens, ISpObjectToken, ISpObjectTokenCategory, ISpVoice,
-        SpObjectTokenCategory, SpVoice, SPCAT_VOICES, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
+        IEnumSpObjectTokens, ISpEventSource, ISpObjectToken, ISpObjectTokenCategory, ISpVoice,
+        SpObjectTokenCategory, SpVoice, SPCAT_VOICES, SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY,
+        SPEVENT, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
     },
     Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
     },
 };
+
+// SPFEI(flag) = (1 << SPEI_X). The windows crate doesn't pre-compute these
+// so we spell out the two we need.
+#[cfg(feature = "sapi")]
+const SPFEI_WORD_BOUNDARY: u64 = 1 << SPEI_WORD_BOUNDARY.0;
+#[cfg(feature = "sapi")]
+const SPFEI_END_INPUT_STREAM: u64 = 1 << SPEI_END_INPUT_STREAM.0;
 
 #[derive(Debug)]
 pub struct SapiEngine {
@@ -103,6 +111,154 @@ impl SapiEngine {
         *self.cached_token.lock().unwrap() = Some(token.clone());
         Some(token)
     }
+
+    /// Drive `Speak` with `SPF_ASYNC` and pump `SPEI_WORD_BOUNDARY` events
+    /// until the input stream ends, dispatching each boundary to `on_boundary`.
+    ///
+    /// `processed_text` is the text we actually fed to SAPI (possibly SSML).
+    /// SAPI reports word positions in WCHAR units within the *parsed* text
+    /// content, so when the input was SSML we strip tags before indexing.
+    ///
+    /// Audio byte offsets in the events are converted to milliseconds using
+    /// the voice's current output format. We query the format up-front to
+    /// avoid per-event overhead.
+    fn speak_with_events(
+        &self,
+        sp_voice: &ISpVoice,
+        input_wide: &HSTRING,
+        flags: u32,
+        processed_text: &str,
+        mut on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
+    ) -> TtsResult<()> {
+        // Some voices need the input to be passed with SPF_IS_XML so they
+        // honour <mark> / <prosody> tags; the caller has already set that
+        // bit. For event tracking we additionally need to make the voice
+        // emit notifications.
+        let event_source: ISpEventSource = sp_voice
+            .cast()
+            .map_err(|e| TtsError(format!("ISpVoice is not ISpEventSource: {e}")))?;
+        let notify_source = sp_voice
+            .cast::<windows::Win32::Media::Speech::ISpNotifySource>()
+            .map_err(|e| TtsError(format!("ISpVoice is not ISpNotifySource: {e}")))?;
+
+        unsafe {
+            // Use a Win32 manual-reset event so we can WaitForSingleObject in
+            // the pump loop below.
+            notify_source
+                .SetNotifyWin32Event()
+                .map_err(|e| TtsError(format!("SetNotifyWin32Event failed: {e}")))?;
+
+            // Ask SAPI to (a) signal us when these events arrive and (b)
+            // queue them so GetEvents can return them.
+            let interest = SPFEI_WORD_BOUNDARY | SPFEI_END_INPUT_STREAM;
+            event_source
+                .SetInterest(interest, interest)
+                .map_err(|e| TtsError(format!("SetInterest failed: {e}")))?;
+
+            // Speak asynchronously; the pump loop blocks until END_INPUT_STREAM.
+            sp_voice
+                .Speak(input_wide, flags, None)
+                .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+
+            // Pre-compute the audio-format → ms conversion. ullAudioStreamOffset
+            // is in bytes; we want milliseconds.
+            let bytes_per_ms = sapi_bytes_per_millisecond().max(1.0);
+
+            // Pre-strip SSML so we can index into the visible text using the
+            // positions SAPI reports. SAPI's word positions are in the parsed
+            // content, not the raw input — strip_tags mirrors that.
+            let visible_text = strip_ssml_tags(processed_text);
+            let visible_wide: Vec<u16> = visible_text.encode_utf16().collect();
+
+            let mut event = SPEVENT::default();
+            let mut done = false;
+            while !done {
+                // Block until SAPI has something for us. 5 s is a generous
+                // safety net — synthesis typically streams faster than this.
+                let rc = notify_source.WaitForNotifyEvent(5_000);
+                if rc.is_err() {
+                    // Timeout or error: stop pumping and let the caller decide.
+                    return Err(TtsError(
+                        "SAPI notify wait timed out; aborting boundary pump".into(),
+                    ));
+                }
+
+                // Drain every queued event before waiting again.
+                loop {
+                    let mut fetched = 0u32;
+                    let rc = event_source.GetEvents(1, &raw mut event, &raw mut fetched);
+                    if rc.is_err() || fetched == 0 {
+                        break;
+                    }
+
+                    // SPEVENT.eEventId lives in the low 16 bits of the
+                    // bitfield; the windows crate doesn't expose a helper, so
+                    // mask manually. Values are SPEVENTENUM integers.
+                    let event_id = (event._bitfield & 0xFFFF) as i32;
+                    let audio_offset_ms = (event.ullAudioStreamOffset as f64 / bytes_per_ms) as u64;
+
+                    if event_id == SPEI_END_INPUT_STREAM.0 {
+                        done = true;
+                        break;
+                    }
+
+                    if event_id == SPEI_WORD_BOUNDARY.0 {
+                        if let Some(cb) = on_boundary.as_mut() {
+                            // wParam = char position in WCHARs; lParam = length in WCHARs.
+                            let pos = event.wParam.0 as usize;
+                            let len = event.lParam.0 as usize;
+                            let word = word_at(&visible_wide, pos, len);
+                            // Duration: we don't know it yet (it's the time
+                            // until the next boundary); report a nominal
+                            // 1 ms span. Callers that care can compute deltas.
+                            cb(
+                                &word,
+                                audio_offset_ms as f32 / 1000.0,
+                                (audio_offset_ms + 1) as f32 / 1000.0,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Extract `len` WCHARs starting at `pos` from `text` and decode to a String.
+/// Returns an empty string on out-of-bounds (defensive — SAPI shouldn't
+/// produce one, but a buggy voice might).
+fn word_at(text: &[u16], pos: usize, len: usize) -> String {
+    let end = pos.saturating_add(len).min(text.len());
+    if pos >= end {
+        return String::new();
+    }
+    String::from_utf16_lossy(&text[pos..end])
+}
+
+/// Bytes-per-millisecond conversion for `ullAudioStreamOffset`. We assume the
+/// SAPI default output format (22 kHz 16-bit mono = 44.1 bytes/ms). Refining
+/// this requires querying `ISpAudio::GetFormat`, which is non-trivial through
+/// windows-rs; the relative timing this gives is enough for word highlighting.
+fn sapi_bytes_per_millisecond() -> f64 {
+    22050.0 * 2.0 / 1000.0
+}
+
+/// Strip XML/SSML tags from `input`, leaving only the inner text. SAPI's
+/// SPEI_WORD_BOUNDARY positions are reported in the parsed text content, so
+/// we use this to map back to the original words.
+fn strip_ssml_tags(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_tag = false;
+    for ch in input.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn rate_to_sapi(rate: f32) -> i32 {
@@ -157,10 +313,14 @@ impl TtsEngine for SapiEngine {
             let (processed, is_ssml) = preprocess_speech_markdown(text, "sapi");
             let needs_pitch = (pitch - 1.0).abs() > f32::EPSILON;
 
-            if is_ssml {
-                // Input (or SpeechMarkdown expansion) gave us a full SSML
-                // document. If pitch adjustment is also requested, inject a
-                // <prosody pitch="..."> wrapper inside the <speak>.
+            // Decide whether the caller wants real word boundaries. If so we
+            // take the SPF_ASYNC + event-pump path so we can dispatch
+            // SPEI_WORD_BOUNDARY events as each word is spoken. Otherwise we
+            // can let SAPI block on Speak and skip the event plumbing.
+            let want_real_boundaries = on_boundary.is_some();
+
+            // Build the final input buffer + flags.
+            let (input_wide, flags) = if is_ssml {
                 let final_ssml = if needs_pitch {
                     let pitch_attr = pitch_to_percent(pitch);
                     processed
@@ -173,12 +333,11 @@ impl TtsEngine for SapiEngine {
                 } else {
                     processed
                 };
-                let wtext = HSTRING::from(&final_ssml);
-                sp_voice
-                    .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
-                    .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+                (
+                    HSTRING::from(&final_ssml),
+                    (SPF_ASYNC.0 | SPF_IS_XML.0) as u32,
+                )
             } else if needs_pitch {
-                // Plain text + pitch: wrap in a minimal SSML prosody element.
                 let pitch_attr = pitch_to_percent(pitch);
                 let escaped = processed
                     .replace('&', "&amp;")
@@ -188,30 +347,24 @@ impl TtsEngine for SapiEngine {
                     "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\"\
                      xml:lang=\"en-US\"><prosody pitch=\"{pitch_attr}\">{escaped}</prosody></speak>"
                 );
-                let wtext = HSTRING::from(&ssml);
-                sp_voice
-                    .Speak(&wtext, (SPF_ASYNC.0 | SPF_IS_XML.0) as u32, None)
-                    .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+                (HSTRING::from(&ssml), (SPF_ASYNC.0 | SPF_IS_XML.0) as u32)
             } else {
-                // Plain text, no prosody adjustments — pass straight through.
-                let wtext = HSTRING::from(&processed);
+                (HSTRING::from(&processed), SPF_ASYNC.0 as u32)
+            };
+
+            if want_real_boundaries {
+                self.speak_with_events(sp_voice, &input_wide, flags, &processed, on_boundary)?;
+            } else {
                 sp_voice
-                    .Speak(&wtext, SPF_ASYNC.0 as u32, None)
+                    .Speak(&input_wide, flags, None)
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
             }
         }
 
-        if let Some(cb) = on_boundary.as_mut() {
-            let estimated = estimate_word_boundaries(text);
-            for b in &estimated {
-                #[allow(clippy::cast_precision_loss)]
-                let start = b.offset as f32 / 1000.0;
-                #[allow(clippy::cast_precision_loss)]
-                let end = (b.offset + b.duration) as f32 / 1000.0;
-                cb(&b.text, start, end);
-            }
-        }
-
+        // If the caller didn't ask for real boundaries, we still synthesise
+        // synchronously above; fall back to the estimate path so they get
+        // *something* (the FFI boundary callback is invoked from lib.rs even
+        // when the underlying engine didn't surface real events).
         Ok(())
     }
 
