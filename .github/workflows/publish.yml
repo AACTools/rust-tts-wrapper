@@ -202,7 +202,9 @@ jobs:
           }
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          # .NET 9 SDK is required for OIDC Trusted Publishing support
+          # in `dotnet nuget push`. The project still targets net8.0.
+          dotnet-version: '9.0.x'
       - name: Pack
         run: dotnet pack bindings/dotnet/RustTtsWrapper.Bindings.csproj -c Release
       - name: Upload NuGet package
