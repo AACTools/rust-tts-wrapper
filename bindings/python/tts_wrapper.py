@@ -34,6 +34,8 @@ AUDIO_CB = ctypes.CFUNCTYPE(
 BOUNDARY_CB = ctypes.CFUNCTYPE(
     None, ctypes.c_char_p, ctypes.c_float, ctypes.c_float, ctypes.c_void_p
 )
+VOID_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+ERROR_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
 
 
 class _TtsVoiceC(ctypes.Structure):
@@ -113,6 +115,12 @@ def _load_lib():
     _lib.tts_set_on_audio.argtypes = [ctypes.c_void_p, AUDIO_CB, ctypes.c_void_p]
     _lib.tts_set_on_boundary.restype = None
     _lib.tts_set_on_boundary.argtypes = [ctypes.c_void_p, BOUNDARY_CB, ctypes.c_void_p]
+    _lib.tts_set_on_start.restype = None
+    _lib.tts_set_on_start.argtypes = [ctypes.c_void_p, VOID_CB, ctypes.c_void_p]
+    _lib.tts_set_on_end.restype = None
+    _lib.tts_set_on_end.argtypes = [ctypes.c_void_p, VOID_CB, ctypes.c_void_p]
+    _lib.tts_set_on_error.restype = None
+    _lib.tts_set_on_error.argtypes = [ctypes.c_void_p, ERROR_CB, ctypes.c_void_p]
     _lib.tts_get_voices.restype = ctypes.c_int32
     _lib.tts_get_voices.argtypes = [
         ctypes.c_void_p,
@@ -188,6 +196,9 @@ class TTSClient:
         # collect the function pointer while native code still holds it.
         self._audio_cb_ref: Optional[AUDIO_CB] = None
         self._boundary_cb_ref: Optional[BOUNDARY_CB] = None
+        self._start_cb_ref: Optional[VOID_CB] = None
+        self._end_cb_ref: Optional[VOID_CB] = None
+        self._error_cb_ref: Optional[ERROR_CB] = None
 
     # --- context manager -----------------------------------------------
 
@@ -287,6 +298,48 @@ class TTSClient:
 
         self._boundary_cb_ref = _cb
         self._lib.tts_set_on_boundary(self._ctx, _cb, None)
+
+    def on_start(self, callback: Optional[Callable[[], None]]) -> None:
+        """Register a speech-started callback. Pass None to clear."""
+        if callback is None:
+            self._start_cb_ref = None
+            self._lib.tts_set_on_start(self._ctx, VOID_CB(0), None)
+            return
+
+        @VOID_CB
+        def _cb(_userdata):
+            callback()
+
+        self._start_cb_ref = _cb
+        self._lib.tts_set_on_start(self._ctx, _cb, None)
+
+    def on_end(self, callback: Optional[Callable[[], None]]) -> None:
+        """Register a speech-completed callback. Pass None to clear."""
+        if callback is None:
+            self._end_cb_ref = None
+            self._lib.tts_set_on_end(self._ctx, VOID_CB(0), None)
+            return
+
+        @VOID_CB
+        def _cb(_userdata):
+            callback()
+
+        self._end_cb_ref = _cb
+        self._lib.tts_set_on_end(self._ctx, _cb, None)
+
+    def on_error(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Register an error callback. Pass None to clear."""
+        if callback is None:
+            self._error_cb_ref = None
+            self._lib.tts_set_on_error(self._ctx, ERROR_CB(0), None)
+            return
+
+        @ERROR_CB
+        def _cb(error, _userdata):
+            callback(error.decode() if error else "unknown error")
+
+        self._error_cb_ref = _cb
+        self._lib.tts_set_on_error(self._ctx, _cb, None)
 
     # --- enumeration ---------------------------------------------------
 

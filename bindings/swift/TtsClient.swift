@@ -50,6 +50,8 @@ public struct TtsError: Error, CustomStringConvertible {
 /// Strongly-typed closure aliases.
 public typealias AudioCallback = @Sendable (Data) -> Void
 public typealias BoundaryCallback = @Sendable (_ word: String, _ start: Double, _ end: Double) -> Void
+public typealias LifecycleCallback = @Sendable () -> Void
+public typealias ErrorCallback = @Sendable (_ error: String) -> Void
 
 /// High-level Swift client for rust-tts-wrapper.
 ///
@@ -61,6 +63,9 @@ public final class TtsClient: @unchecked Sendable {
     // remains valid for as long as the client lives.
     private var audioBox: CallbackBox<AudioCallback>?
     private var boundaryBox: CallbackBox<BoundaryCallback>?
+    private var startBox: CallbackBox<LifecycleCallback>?
+    private var endBox: CallbackBox<LifecycleCallback>?
+    private var errorBox: CallbackBox<ErrorCallback>?
 
     public init(engineId: String = "system", credentials: [String: String] = [:]) throws {
         let credsJson = (try? JSONSerialization.data(withJSONObject: credentials))
@@ -194,6 +199,73 @@ public final class TtsClient: @unchecked Sendable {
         } else {
             boundaryBox = nil
             rust_tts_wrapper.tts_set_on_boundary(ctx, nil, nil)
+        }
+    }
+
+    /// Register a speech-started callback. Pass `nil` to clear.
+    public func setOnStart(_ callback: LifecycleCallback?) {
+        guard let ctx else { return }
+        if let callback {
+            let box = CallbackBox(callback)
+            startBox = box
+            let opaque = Unmanaged.passUnretained(box).toOpaque()
+            rust_tts_wrapper.tts_set_on_start(
+                ctx,
+                { userdata in
+                    guard let userdata else { return }
+                    let box = Unmanaged<CallbackBox<LifecycleCallback>>.fromOpaque(userdata).takeUnretainedValue()
+                    box.callback()
+                },
+                opaque
+            )
+        } else {
+            startBox = nil
+            rust_tts_wrapper.tts_set_on_start(ctx, nil, nil)
+        }
+    }
+
+    /// Register a speech-completed callback. Pass `nil` to clear.
+    public func setOnEnd(_ callback: LifecycleCallback?) {
+        guard let ctx else { return }
+        if let callback {
+            let box = CallbackBox(callback)
+            endBox = box
+            let opaque = Unmanaged.passUnretained(box).toOpaque()
+            rust_tts_wrapper.tts_set_on_end(
+                ctx,
+                { userdata in
+                    guard let userdata else { return }
+                    let box = Unmanaged<CallbackBox<LifecycleCallback>>.fromOpaque(userdata).takeUnretainedValue()
+                    box.callback()
+                },
+                opaque
+            )
+        } else {
+            endBox = nil
+            rust_tts_wrapper.tts_set_on_end(ctx, nil, nil)
+        }
+    }
+
+    /// Register an error callback. Pass `nil` to clear.
+    public func setOnError(_ callback: ErrorCallback?) {
+        guard let ctx else { return }
+        if let callback {
+            let box = CallbackBox(callback)
+            errorBox = box
+            let opaque = Unmanaged.passUnretained(box).toOpaque()
+            rust_tts_wrapper.tts_set_on_error(
+                ctx,
+                { errorPtr, userdata in
+                    guard let userdata else { return }
+                    let box = Unmanaged<CallbackBox<ErrorCallback>>.fromOpaque(userdata).takeUnretainedValue()
+                    let msg = errorPtr.map { String(cString: $0) } ?? "unknown error"
+                    box.callback(msg)
+                },
+                opaque
+            )
+        } else {
+            errorBox = nil
+            rust_tts_wrapper.tts_set_on_error(ctx, nil, nil)
         }
     }
 

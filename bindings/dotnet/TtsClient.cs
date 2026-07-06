@@ -38,6 +38,15 @@ public static class Native
     [DllImport(Lib)] public static extern void tts_set_on_audio(IntPtr ctx, AudioCallbackNative? cb, IntPtr userdata);
     [DllImport(Lib)] public static extern void tts_set_on_boundary(IntPtr ctx, BoundaryCallbackNative? cb, IntPtr userdata);
 
+    // Lifecycle callbacks
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void VoidCallbackNative(IntPtr userdata);
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void ErrorCallbackNative(IntPtr error, IntPtr userdata);
+    [DllImport(Lib)] public static extern void tts_set_on_start(IntPtr ctx, VoidCallbackNative? cb, IntPtr userdata);
+    [DllImport(Lib)] public static extern void tts_set_on_end(IntPtr ctx, VoidCallbackNative? cb, IntPtr userdata);
+    [DllImport(Lib)] public static extern void tts_set_on_error(IntPtr ctx, ErrorCallbackNative? cb, IntPtr userdata);
+
     [DllImport(Lib)] public static extern int tts_get_voices(IntPtr ctx, out IntPtr voices, out int count);
     [DllImport(Lib)] public static extern void tts_free_voices(IntPtr voices, int count);
 
@@ -135,6 +144,12 @@ public delegate void AudioCallback(byte[] chunk);
 /// <summary>Word-boundary event handed to <see cref="TtsClient.SetOnBoundary"/>.</summary>
 public delegate void BoundaryCallback(string word, float startTime, float endTime);
 
+/// <summary>Lifecycle callback (no payload).</summary>
+public delegate void LifecycleCallback();
+
+/// <summary>Error callback. <paramref name="error"/> is the error message.</summary>
+public delegate void ErrorCallback(string error);
+
 /// <summary>
 /// Exception thrown when a TTS operation fails. The message comes from
 /// <c>tts_get_last_error</c> on the owning context.
@@ -158,6 +173,9 @@ public class TtsClient : IDisposable
     // them while native code still holds a function pointer.
     private Native.AudioCallbackNative? _audioNative;
     private Native.BoundaryCallbackNative? _boundaryNative;
+    private Native.VoidCallbackNative? _startNative;
+    private Native.VoidCallbackNative? _endNative;
+    private Native.ErrorCallbackNative? _errorNative;
 
     public TtsClient(string engineId = "system", Dictionary<string, string>? credentials = null)
     {
@@ -271,6 +289,60 @@ public class TtsClient : IDisposable
             callback(word, start, end);
         };
         Native.tts_set_on_boundary(_ctx, _boundaryNative, IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// Register a callback fired when speech starts. Pass <c>null</c> to clear.
+    /// </summary>
+    public void SetOnStart(LifecycleCallback? callback)
+    {
+        ThrowIfDisposed();
+        if (callback == null)
+        {
+            _startNative = null;
+            Native.tts_set_on_start(_ctx, null, IntPtr.Zero);
+            return;
+        }
+        _startNative = (IntPtr _userdata) => callback();
+        Native.tts_set_on_start(_ctx, _startNative, IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// Register a callback fired when speech completes successfully.
+    /// Pass <c>null</c> to clear.
+    /// </summary>
+    public void SetOnEnd(LifecycleCallback? callback)
+    {
+        ThrowIfDisposed();
+        if (callback == null)
+        {
+            _endNative = null;
+            Native.tts_set_on_end(_ctx, null, IntPtr.Zero);
+            return;
+        }
+        _endNative = (IntPtr _userdata) => callback();
+        Native.tts_set_on_end(_ctx, _endNative, IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// Register a callback fired when speech fails. The error message is
+    /// valid only for the duration of the callback. Pass <c>null</c> to clear.
+    /// </summary>
+    public void SetOnError(ErrorCallback? callback)
+    {
+        ThrowIfDisposed();
+        if (callback == null)
+        {
+            _errorNative = null;
+            Native.tts_set_on_error(_ctx, null, IntPtr.Zero);
+            return;
+        }
+        _errorNative = (IntPtr errorPtr, IntPtr _userdata) =>
+        {
+            string msg = errorPtr == IntPtr.Zero ? "unknown error" : Marshal.PtrToStringAnsi(errorPtr) ?? "unknown error";
+            callback(msg);
+        };
+        Native.tts_set_on_error(_ctx, _errorNative, IntPtr.Zero);
     }
 
     // --- enumeration ---------------------------------------------------
