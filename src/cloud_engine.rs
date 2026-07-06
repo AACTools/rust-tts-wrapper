@@ -599,7 +599,19 @@ impl TtsEngine for CloudEngine {
             let (mut socket, _) = connect(ws_url.as_str())
                 .map_err(|e| TtsError(format!("Azure WS Connect error: {e}")))?;
 
-            let output_format = "audio-24khz-96kbitrate-mono-mp3"; // Or another default
+            // Output format: configurable via credentials["outputFormat"].
+            // Azure supports many formats; the default is a high-quality MP3.
+            // Common alternatives:
+            //   audio-16khz-32kbitrate-mono-mp3      (lower bitrate)
+            //   riff-24khz-16bit-mono-pcm            (raw WAV/PCM)
+            //   raw-24khz-16bit-mono-pcm             (no WAV header)
+            //   webm-24khz-16bit-mono-opus           (Opus in WebM)
+            //   ogg-48khz-16bit-mono-opus            (Opus in OGG)
+            //   audio-48khz-192kbitrate-mono-mp3     (higher quality)
+            let output_format = self
+                .credentials
+                .get("outputFormat")
+                .map_or("audio-24khz-96kbitrate-mono-mp3", String::as_str);
 
             // Helper to produce an ISO 8601 timestamp for the X-Timestamp header.
             let now_timestamp = || {
@@ -652,7 +664,18 @@ impl TtsEngine for CloudEngine {
 
             let mut collected_boundaries = Vec::new();
 
+            // Overall timeout for the WS session. Azure typically completes
+            // within a few seconds; 60s is a generous safety net that prevents
+            // tts_speak from hanging indefinitely if the service stalls.
+            let ws_deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+
             loop {
+                if std::time::Instant::now() > ws_deadline {
+                    let _ = socket.close(None);
+                    return Err(TtsError(
+                        "Azure WebSocket synthesis timed out after 60 seconds".into(),
+                    ));
+                }
                 let msg = match socket.read() {
                     Ok(m) => m,
                     Err(
