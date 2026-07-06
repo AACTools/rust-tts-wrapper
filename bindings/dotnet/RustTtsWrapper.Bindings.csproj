@@ -11,7 +11,7 @@
 
     <!-- NuGet packaging — drop-in replacement for DotNetTtsWrapper backends. -->
     <PackageId>RustTtsWrapper.Bindings</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.3</Version>
     <Authors>AACTools</Authors>
     <Description>
       .NET bindings for rust-tts-wrapper. Includes a low-level P/Invoke
