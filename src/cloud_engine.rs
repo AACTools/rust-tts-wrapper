@@ -332,36 +332,25 @@ fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32)
         .replace('"', "&quot;");
 
     let mut prosody_attrs = Vec::new();
-    let rate_str = match rate {
-        r if r < 0.7 => "x-slow",
-        r if r < 0.85 => "slow",
-        r if r < 1.15 => "medium",
-        r if r < 1.4 => "fast",
-        _ => "x-fast",
-    };
-    let pitch_str = match pitch {
-        p if p < 0.7 => "x-low",
-        p if p < 0.85 => "low",
-        p if p < 1.15 => "medium",
-        p if p < 1.4 => "high",
-        _ => "x-high",
-    };
-    let volume_str = match volume {
-        v if v < 0.4 => "x-soft",
-        v if v < 0.7 => "soft",
-        v if v < 1.15 => "medium",
-        v if v < 1.5 => "loud",
-        _ => "x-loud",
-    };
+    // Use percentage-based prosody instead of discrete buckets (x-slow, slow,
+    // medium, fast, x-fast). This preserves precision: rate 1.2 and 1.4 no
+    // longer map to the same "fast" bucket. Azure supports:
+    //   rate="+20%"    pitch="+10%"    volume="+20%"
+    //   rate="-10%"    pitch="-5%"     volume="-10%"
     if (rate - 1.0).abs() > f32::EPSILON {
-        prosody_attrs.push(format!("rate=\"{rate_str}\""));
+        let pct = ((rate - 1.0) * 100.0).round() as i32;
+        let sign = if pct >= 0 { "+" } else { "" };
+        prosody_attrs.push(format!("rate=\"{sign}{pct}%\""));
     }
     if (pitch - 1.0).abs() > f32::EPSILON {
-        prosody_attrs.push(format!("pitch=\"{pitch_str}\""));
+        let pct = ((pitch - 1.0) * 50.0).round() as i32;
+        let sign = if pct >= 0 { "+" } else { "" };
+        prosody_attrs.push(format!("pitch=\"{sign}{pct}%\""));
     }
-    // Volume was previously dropped silently.
     if (volume - 1.0).abs() > f32::EPSILON {
-        prosody_attrs.push(format!("volume=\"{volume_str}\""));
+        let pct = ((volume - 1.0) * 100.0).round() as i32;
+        let sign = if pct >= 0 { "+" } else { "" };
+        prosody_attrs.push(format!("volume=\"{sign}{pct}%\""));
     }
 
     let inner = if prosody_attrs.is_empty() {
@@ -1217,9 +1206,10 @@ mod tests {
     fn test_build_azure_ssml_with_prosody() {
         let ssml = build_azure_ssml("Hello world", "en-US-AriaNeural", 1.5, 0.8, 1.4);
         assert!(ssml.contains("<prosody"));
-        assert!(ssml.contains("rate="));
-        assert!(ssml.contains("pitch="));
-        assert!(ssml.contains("volume="));
+        // Percentage-based prosody: rate=1.5 → +50%, pitch=0.8 → -10%, volume=1.4 → +40%
+        assert!(ssml.contains("rate=\"+50%\""));
+        assert!(ssml.contains("pitch=\"-10%\""));
+        assert!(ssml.contains("volume=\"+40%\""));
     }
 
     #[test]
