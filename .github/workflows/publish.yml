@@ -69,8 +69,8 @@ jobs:
             lib_ext: so
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "system,cloud"
-            label: "system-cloud-aarch64-linux"
+            features: "cloud"
+            label: "cloud-aarch64-linux"
             lib_ext: so
             cross: true
           - target: x86_64-apple-darwin
