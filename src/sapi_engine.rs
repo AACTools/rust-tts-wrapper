@@ -9,11 +9,11 @@ use std::sync::Mutex;
 // the list is long but unambiguous.
 #[cfg(feature = "sapi")]
 use windows::{
-    core::{Result, HSTRING, PCWSTR},
+    core::{Interface, Result, HSTRING, PCWSTR},
     Win32::Media::Speech::{
         IEnumSpObjectTokens, ISpEventSource, ISpObjectToken, ISpObjectTokenCategory, ISpVoice,
-        SpObjectTokenCategory, SpVoice, SPCAT_VOICES, SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY,
-        SPEVENT, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
+        SPEVENT, SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY, SpObjectTokenCategory, SpVoice,
+        SPCAT_VOICES, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
     },
     Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
