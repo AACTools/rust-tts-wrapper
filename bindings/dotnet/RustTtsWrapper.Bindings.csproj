@@ -23,15 +23,42 @@
     <PackageProjectUrl>https://github.com/AACTools/rust-tts-wrapper</PackageProjectUrl>
     <RepositoryUrl>https://github.com/AACTools/rust-tts-wrapper</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <!--
+      Path to the compiled native library. Set this via:
+        dotnet pack -p:NativeLibPath=/path/to/rust_tts_wrapper.dll
+      or let the build script populate it. The DLL is bundled under
+      runtimes/win-x64/native/ so MSBuild's RID-based resolution picks
+      it up automatically in consuming projects.
+    -->
+    <NativeLibPath Condition="'$(NativeLibPath)' == ''">$(MSBuildProjectDirectory)/../../target/release/rust_tts_wrapper.dll</NativeLibPath>
   </PropertyGroup>
 
   <ItemGroup>
-    <!--
-      The adapter (RustTtsClient.cs) subclasses DotNetTtsWrapper's
-      AbstractTtsClient. Projects that only want the low-level P/Invoke
-      surface can compile TtsClient.cs on its own.
-    -->
     <PackageReference Include="DotNetTtsWrapper" Version="1.1.4" />
   </ItemGroup>
+
+  <!--
+    Bundle the native DLL into the NuGet package. The standard convention
+    is runtimes/{RID}/native/{file}. MSBuild auto-resolves the correct
+    file at build time based on the consuming project's RuntimeIdentifier.
+  -->
+  <ItemGroup Condition="Exists('$(NativeLibPath)')">
+    <Content Include="$(NativeLibPath)"
+             Pack="true"
+             PackagePath="runtimes/win-x64/native/rust_tts_wrapper.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             Link="runtimes/win-x64/native/rust_tts_wrapper.dll" />
+  </ItemGroup>
+
+  <!--
+    Build target: before packing, verify the native lib exists.
+    Skip with -p:SkipNativeLibCheck=true if you want a managed-only package.
+  -->
+  <Target Name="EnsureNativeLibExists"
+          BeforeTargets="Pack"
+          Condition="'$(SkipNativeLibCheck)' != 'true' AND !Exists('$(NativeLibPath)')">
+    <Warning Text="Native library not found at '$(NativeLibPath)'. Build the Rust library first: cargo build --release. The NuGet package will not include the native DLL. Override with -p:SkipNativeLibCheck=true to suppress." />
+  </Target>
 
 </Project>
