@@ -295,6 +295,12 @@ impl TtsEngine for SherpaOnnxEngine {
             || id_lower.starts_with("mms_zho")
             || id_lower.starts_with("mms_cmn");
 
+        // Piper and GitHub archives often extract to a nested subdirectory
+        // (e.g. vits-piper-en_US-amy-low/en_US-amy-low.onnx). If the model
+        // dir has no top-level model files, descend into the single child
+        // directory (mirrors VoiceGarden's ResolveModelScanDir).
+        let model_dir = resolve_model_scan_dir(&model_dir);
+
         let model_config = match model_info.model_type.as_str() {
             "kokoro" => sherpa_onnx::OfflineTtsModelConfig {
                 kokoro: build_kokoro_config(&model_dir),
@@ -594,6 +600,66 @@ fn play_wav_file(path: &std::path::Path) {
 // Matcha, and the various VITS flavours (Piper, MMS, Coqui, Chinese, ...).
 // They mirror the per-model logic in js-tts-wrapper / dotnet-tts-wrapper.
 
+/// If `dir` has no top-level model files but has exactly one subdirectory,
+/// return that subdirectory. Mirrors VoiceGarden's `ResolveModelScanDir`.
+fn resolve_model_scan_dir(dir: &std::path::Path) -> std::path::PathBuf {
+    let has_top = dir.join("tokens.txt").exists()
+        || dir.join("model.onnx").exists()
+        || dir.join("voices.bin").exists()
+        || dir.join("espeak-ng-data").exists()
+        || std::fs::read_dir(dir).ok().is_some_and(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .any(|e| e.path().extension().is_some_and(|ext| ext == "onnx"))
+        });
+    if has_top {
+        return dir.to_path_buf();
+    }
+    // No top-level files — look for a single subdirectory.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let subdirs: Vec<_> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.path().is_dir())
+            .collect();
+        if subdirs.len() == 1 {
+            return subdirs[0].path();
+        }
+    }
+    dir.to_path_buf()
+}
+
+/// Find the primary model .onnx in a directory. Prefers `model.onnx`,
+/// then falls back to the first .onnx that isn't an acoustic model or
+/// vocoder. Mirrors VoiceGarden's `FindPrimaryModelOnnx`.
+fn find_primary_model_onnx(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let model_onnx = dir.join("model.onnx");
+    if model_onnx.exists() {
+        return Some(model_onnx);
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "onnx") {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .unwrap_or_default();
+                // Skip acoustic models and vocoders.
+                if !name.starts_with("model-steps")
+                    && !name.starts_with("vocos")
+                    && !name.starts_with("vocoder")
+                    && !name.starts_with("hifigan")
+                {
+                    return Some(path);
+                }
+            }
+            None
+        })
+}
+
 /// Return `Some(path)` only when `dir/name` exists on disk; otherwise `None`.
 fn existing_path(dir: &std::path::Path, name: &str) -> Option<String> {
     let p = dir.join(name);
@@ -718,13 +784,11 @@ fn build_vits_config(
     is_piper_or_github: bool,
     is_chinese: bool,
 ) -> sherpa_onnx::OfflineTtsVitsModelConfig {
-    // Always point at model.onnx if present; for models whose archive uses
-    // a different filename (e.g. older MMS releases), look it up by suffix.
-    let model = first_existing(
-        model_dir,
-        &["model.onnx", "vits-model.onnx", "generator.onnx"],
-    )
-    .unwrap_or_else(|| model_dir.join("model.onnx"));
+    // Try the canonical name first, then scan for any non-acoustic .onnx
+    // (handles Piper's en_US-amy-low.onnx naming convention).
+    let model = find_primary_model_onnx(model_dir)
+        .or_else(|| first_existing(model_dir, &["vits-model.onnx", "generator.onnx"]))
+        .unwrap_or_else(|| model_dir.join("model.onnx"));
 
     // Pick the right phonetic back-end.
     let (data_dir, dict_dir) = if is_piper_or_github {
