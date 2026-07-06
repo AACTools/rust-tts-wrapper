@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0</TargetFrameworks>
+    <RootNamespace>RustTtsWrapper</RootNamespace>
+    <AssemblyName>RustTtsWrapper.Bindings</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- NuGet packaging — drop-in replacement for DotNetTtsWrapper backends. -->
+    <PackageId>RustTtsWrapper.Bindings</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>AACTools</Authors>
+    <Description>
+      .NET bindings for rust-tts-wrapper. Includes a low-level P/Invoke
+      client (TtsClient) and a drop-in DotNetTtsWrapper.AbstractTtsClient
+      adapter (RustTtsClient) so projects like VoiceGarden-SAPI can swap
+      backends without touching their TTS code.
+    </Description>
+    <PackageTags>tts;text-to-speech;speech;accessibility;sherpa-onnx;azure;google;sapi</PackageTags>
+    <PackageProjectUrl>https://github.com/AACTools/rust-tts-wrapper</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/AACTools/rust-tts-wrapper</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      The adapter (RustTtsClient.cs) subclasses DotNetTtsWrapper's
+      AbstractTtsClient. Projects that only want the low-level P/Invoke
+      surface can compile TtsClient.cs on its own.
+    -->
+    <PackageReference Include="DotNetTtsWrapper" Version="1.1.4" />
+  </ItemGroup>
+
+</Project>
