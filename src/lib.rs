@@ -62,6 +62,8 @@ type BoxedEngine = Arc<dyn TtsEngine>;
 /// Opaque context holding an engine instance and its per-instance settings.
 pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void)>;
 pub type CBoundaryCb = Option<extern "C" fn(*const c_char, f32, f32, *mut std::ffi::c_void)>;
+pub type CVoidCb = Option<extern "C" fn(*mut std::ffi::c_void)>;
+pub type CErrorCb = Option<extern "C" fn(*const c_char, *mut std::ffi::c_void)>;
 type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
 type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32)>;
 
@@ -79,10 +81,13 @@ pub struct tts_ctx {
     last_error: Mutex<String>,
     // Callback + userdata are bundled into a single Mutex each so a reader
     // can never observe a new callback paired with stale userdata (or vice
-    // versa) The `Send` wrapper below lets us ship the raw
-    // pointer across threads safely because access is mediated by the Mutex.
+    // versa). The `Send` wrapper below lets us ship the raw pointer across
+    // threads safely because access is mediated by the Mutex.
     on_audio: Mutex<AudioCallback>,
     on_boundary: Mutex<BoundaryCallback>,
+    on_start: Mutex<VoidCallback>,
+    on_end: Mutex<VoidCallback>,
+    on_error: Mutex<ErrorCallback>,
 }
 
 /// Bundled audio callback + userdata so updates are atomic.
@@ -99,6 +104,20 @@ struct BoundaryCallback {
     userdata: *mut std::ffi::c_void,
 }
 
+/// Bundled start/end callback (no payload, just a lifecycle signal).
+#[derive(Clone, Copy)]
+struct VoidCallback {
+    cb: CVoidCb,
+    userdata: *mut std::ffi::c_void,
+}
+
+/// Bundled error callback (error message + userdata).
+#[derive(Clone, Copy)]
+struct ErrorCallback {
+    cb: CErrorCb,
+    userdata: *mut std::ffi::c_void,
+}
+
 // SAFETY: the raw userdata pointers are only dereferenced via the C callback
 // signatures, and access is serialised by the surrounding Mutex on each
 // `tts_ctx` field. The host is responsible for the userdata lifetime, which
@@ -107,6 +126,10 @@ unsafe impl Send for AudioCallback {}
 unsafe impl Sync for AudioCallback {}
 unsafe impl Send for BoundaryCallback {}
 unsafe impl Sync for BoundaryCallback {}
+unsafe impl Send for VoidCallback {}
+unsafe impl Sync for VoidCallback {}
+unsafe impl Send for ErrorCallback {}
+unsafe impl Sync for ErrorCallback {}
 
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
@@ -177,6 +200,18 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
                 userdata: ptr::null_mut(),
             }),
             on_boundary: Mutex::new(BoundaryCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_start: Mutex::new(VoidCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_end: Mutex::new(VoidCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_error: Mutex::new(ErrorCallback {
                 cb: None,
                 userdata: ptr::null_mut(),
             }),
@@ -256,8 +291,18 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
             None => None,
         };
 
+        // Snapshot lifecycle callbacks atomically.
+        let start_cb = { *ctx_ref.on_start.lock().unwrap() };
+        let end_cb = { *ctx_ref.on_end.lock().unwrap() };
+        let error_cb = { *ctx_ref.on_error.lock().unwrap() };
+
+        // Fire on_start before synthesis.
+        if let Some(cb) = start_cb.cb {
+            cb(start_cb.userdata);
+        }
+
         let engine = &ctx_ref.engine;
-        match engine.speak(
+        let result = engine.speak(
             &text_str,
             voice.as_deref(),
             rate,
@@ -269,10 +314,23 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
             on_boundary_closure
                 .as_mut()
                 .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
-        ) {
-            Ok(()) => 0,
+        );
+
+        match result {
+            Ok(()) => {
+                if let Some(cb) = end_cb.cb {
+                    cb(end_cb.userdata);
+                }
+                0
+            }
             Err(e) => {
-                *ctx_ref.last_error.lock().unwrap() = e.to_string();
+                let msg = e.to_string();
+                ctx_ref.last_error.lock().unwrap().clone_from(&msg);
+                if let Some(cb) = error_cb.cb {
+                    if let Ok(c_msg) = CString::new(msg) {
+                        cb(c_msg.as_ptr(), error_cb.userdata);
+                    }
+                }
                 -1
             }
         }
@@ -321,8 +379,18 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             None => None,
         };
 
+        // Snapshot lifecycle callbacks atomically.
+        let start_cb = { *ctx_ref.on_start.lock().unwrap() };
+        let end_cb = { *ctx_ref.on_end.lock().unwrap() };
+        let error_cb = { *ctx_ref.on_error.lock().unwrap() };
+
+        // Fire on_start before synthesis.
+        if let Some(cb) = start_cb.cb {
+            cb(start_cb.userdata);
+        }
+
         let engine = &ctx_ref.engine;
-        match engine.speak_sync(
+        let result = engine.speak_sync(
             &text_str,
             voice.as_deref(),
             rate,
@@ -334,10 +402,23 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             on_boundary_closure
                 .as_mut()
                 .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32)),
-        ) {
-            Ok(()) => 0,
+        );
+
+        match result {
+            Ok(()) => {
+                if let Some(cb) = end_cb.cb {
+                    cb(end_cb.userdata);
+                }
+                0
+            }
             Err(e) => {
-                *ctx_ref.last_error.lock().unwrap() = e.to_string();
+                let msg = e.to_string();
+                ctx_ref.last_error.lock().unwrap().clone_from(&msg);
+                if let Some(cb) = error_cb.cb {
+                    if let Ok(c_msg) = CString::new(msg) {
+                        cb(c_msg.as_ptr(), error_cb.userdata);
+                    }
+                }
                 -1
             }
         }
@@ -569,6 +650,62 @@ pub extern "C" fn tts_set_on_boundary(
         }
         let ctx_ref = unsafe { &*ctx };
         *ctx_ref.on_boundary.lock().unwrap() = BoundaryCallback { cb, userdata };
+    }));
+}
+
+/// Set the callback fired when speech starts.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_start(
+    ctx: *mut tts_ctx,
+    cb: CVoidCb,
+    userdata: *mut std::ffi::c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_start.lock().unwrap() = VoidCallback { cb, userdata };
+    }));
+}
+
+/// Set the callback fired when speech completes successfully.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_end(ctx: *mut tts_ctx, cb: CVoidCb, userdata: *mut std::ffi::c_void) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_end.lock().unwrap() = VoidCallback { cb, userdata };
+    }));
+}
+
+/// Set the callback fired when speech fails.
+///
+/// The error message is a null-terminated C string valid for the duration
+/// of the callback only.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_error(
+    ctx: *mut tts_ctx,
+    cb: CErrorCb,
+    userdata: *mut std::ffi::c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_error.lock().unwrap() = ErrorCallback { cb, userdata };
     }));
 }
 

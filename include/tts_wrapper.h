@@ -41,6 +41,10 @@ typedef void (*CAudioCb)(const uint8_t*, uintptr_t, void*);
 
 typedef void (*CBoundaryCb)(const char*, float, float, void*);
 
+typedef void (*CVoidCb)(void*);
+
+typedef void (*CErrorCb)(const char*, void*);
+
 /**
  * C-compatible engine descriptor returned by [`tts_get_engines`](crate::tts_get_engines).
  */
@@ -201,6 +205,33 @@ void tts_set_on_audio(struct tts_ctx *ctx, CAudioCb cb, void *userdata);
  * `ctx` must be valid.
  */
 void tts_set_on_boundary(struct tts_ctx *ctx, CBoundaryCb cb, void *userdata);
+
+/**
+ * Set the callback fired when speech starts.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_start(struct tts_ctx *ctx, CVoidCb cb, void *userdata);
+
+/**
+ * Set the callback fired when speech completes successfully.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_end(struct tts_ctx *ctx, CVoidCb cb, void *userdata);
+
+/**
+ * Set the callback fired when speech fails.
+ *
+ * The error message is a null-terminated C string valid for the duration
+ * of the callback only.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_error(struct tts_ctx *ctx, CErrorCb cb, void *userdata);
 
 /**
  * Return the number of registered engines.
