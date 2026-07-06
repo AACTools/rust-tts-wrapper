@@ -44,7 +44,7 @@ jobs:
       - name: Test (Linux features)
         run: cargo test --no-default-features --features system,cloud
       - name: Clippy (Linux + sherpaonnx)
-        continue-on-error: true
+        continue-on-error: true  # sherpa-onnx 504 download issue (see TODO.md)
         run: cargo clippy --no-default-features --features system,cloud,sherpaonnx -- -D warnings
       - name: Build system-only
         run: cargo build --no-default-features --features system
@@ -54,20 +54,18 @@ jobs:
   build:
     name: Build ${{ matrix.label }}
     needs: test
-    continue-on-error: true
+    # Per-matrix-entry: sherpa-onnx builds may fail due to upstream 504
+    # download issues (see TODO.md). Core builds are strict.
+    continue-on-error: ${{ matrix.allow_failure == true }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # --- Core builds (strict: failures block the release) ---
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             features: "system,cloud"
             label: "system-cloud-x86_64-linux"
-            lib_ext: so
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            features: "system,cloud,sherpaonnx"
-            label: "system-cloud-sherpaonnx-x86_64-linux"
             lib_ext: so
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
@@ -85,16 +83,6 @@ jobs:
             features: "avsynth,cloud"
             label: "avsynth-cloud-aarch64-macos"
             lib_ext: dylib
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            features: "avsynth,cloud,sherpaonnx"
-            label: "avsynth-cloud-sherpaonnx-x86_64-macos"
-            lib_ext: dylib
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            features: "avsynth,cloud,sherpaonnx"
-            label: "avsynth-cloud-sherpaonnx-aarch64-macos"
-            lib_ext: dylib
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             features: "sapi,cloud"
@@ -105,11 +93,32 @@ jobs:
             features: "sapi,cloud"
             label: "sapi-cloud-aarch64-windows"
             lib_ext: dll
+
+          # --- Sherpa-onnx builds (non-blocking: 504 download may fail) ---
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud,sherpaonnx"
+            label: "system-cloud-sherpaonnx-x86_64-linux"
+            lib_ext: so
+            allow_failure: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,sherpaonnx"
+            label: "avsynth-cloud-sherpaonnx-x86_64-macos"
+            lib_ext: dylib
+            allow_failure: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,sherpaonnx"
+            label: "avsynth-cloud-sherpaonnx-aarch64-macos"
+            lib_ext: dylib
+            allow_failure: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             features: "sapi,cloud,sherpaonnx"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
+            allow_failure: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -161,6 +170,46 @@ jobs:
           name: static-${{ matrix.label }}
           path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.lib
 
+  nuget:
+    name: Pack .NET NuGet
+    needs: build
+    runs-on: windows-latest
+    # Don't block the release if NuGet packing fails — it's additive.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-sapi-cloud-x86_64-windows
+          path: native
+      - name: Place native DLL for packaging
+        shell: pwsh
+        run: |
+          # Copy the Windows x64 DLL to the path the csproj expects.
+          $dll = Get-ChildItem native/*.dll | Select-Object -First 1
+          if ($dll) {
+            New-Item -ItemType Directory -Force -Path target/release
+            Copy-Item $dll.FullName target/release/rust_tts_wrapper.dll
+            Write-Host "Placed $($dll.Name) → target/release/rust_tts_wrapper.dll"
+          } else {
+            Write-Host "No Windows DLL found — packing managed-only"
+          }
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Pack
+        run: dotnet pack bindings/dotnet/RustTtsWrapper.Bindings.csproj -c Release
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: bindings/dotnet/bin/Release/*.nupkg
+      - name: Publish to NuGet
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && env.NUGET_API_KEY != ''
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: dotnet nuget push bindings/dotnet/bin/Release/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+
   release:
     name: GitHub Release
     needs: [build]
@@ -185,4 +234,6 @@ jobs:
         with:
           generate_release_notes: true
           files: release-assets/*
-          fail_on_unmatched_files: false
+          # CHANGED: fail if no artifacts were uploaded — catches broken
+          # builds that previously shipped with zero artifacts.
+          fail_on_unmatched_files: true
