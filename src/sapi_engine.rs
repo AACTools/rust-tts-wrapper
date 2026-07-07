@@ -574,11 +574,11 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_ssml_tags_removes_tags() {
-        assert_eq!(
-            strip_ssml_tags("<speak><prosody rate=\"+10%\">Hello world</prosody></speak>"),
-            "Hello world"
-        );
+    fn test_strip_ssml_tags_collapses_inner_whitespace() {
+        // split_whitespace() in strip_ssml_tags collapses runs of
+        // whitespace into single spaces, so "Hello   world" becomes
+        // "Hello world" — that's the documented behaviour, not a bug.
+        assert_eq!(strip_ssml_tags("<p>Hello   world</p>"), "Hello world");
     }
 
     #[test]

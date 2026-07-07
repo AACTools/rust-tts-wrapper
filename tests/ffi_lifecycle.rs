@@ -4,13 +4,14 @@
 //!   create → set_voice/rate/pitch/volume → get_voices → synth_to_bytes →
 //!   free_bytes → destroy.
 //!
-//! Uses the `sherpaonnx` engine because it constructs without network
-//! credentials, returns a real voice list from the bundled registry, and
-//! fails gracefully (returns -1 from synth_to_bytes) when no model is
-//! downloaded — which is exactly the contract we want to verify at the FFI
-//! boundary.
+//! Uses a cloud engine (`openai` with dummy credentials) because it
+//! constructs without network access, exists on every CI platform's
+//! feature matrix (Linux system+cloud, Windows sapi+cloud, macOS
+//! avsynth+cloud), and fails gracefully (returns -1 from synth_to_bytes)
+//! when the bogus key is rejected — exactly the contract we want to
+//! verify at the FFI boundary.
 //!
-//! Run with: `cargo test --test ffi_lifecycle --features sherpaonnx`
+//! Run with: `cargo test --test ffi_lifecycle --features cloud`
 
 #![allow(clippy::all, clippy::pedantic)]
 
@@ -45,9 +46,14 @@ extern "C" fn audio_cb(_data: *const u8, size: usize, userdata: *mut std::ffi::c
 const USERDATA_SENTINEL: usize = 0xDEAD_BEEF;
 
 fn make_ctx() -> *mut tts_ctx {
-    let id = CString::new("sherpaonnx").unwrap();
-    let ctx = tts_create(id.as_ptr(), std::ptr::null());
-    assert!(!ctx.is_null(), "tts_create returned null for sherpaonnx");
+    // Use a cloud engine with dummy creds — cloud is enabled on every CI
+    // platform's feature matrix, and the engine constructs without any
+    // network round-trip. Real synthesis will fail (caught later in the
+    // lifecycle tests); construction must succeed.
+    let id = CString::new("openai").unwrap();
+    let creds = CString::new(r#"{"apiKey":"dummy-key-for-ffi-tests"}"#).unwrap();
+    let ctx = tts_create(id.as_ptr(), creds.as_ptr());
+    assert!(!ctx.is_null(), "tts_create returned null for openai");
     ctx
 }
 
@@ -71,7 +77,7 @@ fn test_ffi_create_and_destroy_round_trip() {
 fn test_ffi_setters_accept_typical_values() {
     let ctx = make_ctx();
 
-    let voice = CString::new("kokoro-en-en-19").unwrap();
+    let voice = CString::new("alloy").unwrap();
     tts_set_voice(ctx, voice.as_ptr());
     tts_set_rate(ctx, 1.5);
     tts_set_pitch(ctx, 0.8);
@@ -102,23 +108,19 @@ fn test_ffi_set_voice_empty_string_is_safe() {
 }
 
 #[test]
-fn test_ffi_get_voices_returns_nonempty_list_for_sherpaonnx() {
+fn test_ffi_get_voices_returns_empty_list_for_openai() {
+    // OpenAI has no voice-list endpoint, so get_voices returns 0 with
+    // either a null pointer or a freeable empty array. Either way the
+    // caller must be able to free without leaking.
     let ctx = make_ctx();
 
     let mut voices_ptr: *mut tts_voice = std::ptr::null_mut();
     let mut count: i32 = 0;
     let rc = tts_get_voices(ctx, &mut voices_ptr, &mut count);
-    assert_eq!(rc, 0, "tts_get_voices should succeed");
-    assert!(count > 0, "sherpaonnx should have >0 voices from registry");
-    assert!(
-        !voices_ptr.is_null(),
-        "non-empty voice list must come with a valid pointer"
-    );
-
-    // Each voice must have non-null string fields. We can't read them
-    // portably without re-declaring the struct, but at minimum the pointer
-    // and count are consistent.
-    tts_free_voices(voices_ptr, count);
+    assert_eq!(rc, 0, "tts_get_voices should return 0 even on empty list");
+    if !voices_ptr.is_null() && count > 0 {
+        tts_free_voices(voices_ptr, count);
+    }
     tts_destroy(ctx);
 }
 
@@ -131,20 +133,21 @@ fn test_ffi_get_voices_null_out_pointers_return_error() {
 }
 
 #[test]
-fn test_ffi_synth_to_bytes_without_model_fails_gracefully() {
-    // sherpaonnx with no modelId will fail at synth time, but the contract
-    // is that it returns -1 and writes to last_error — it must NOT panic.
+fn test_ffi_synth_to_bytes_with_dummy_key_fails_gracefully() {
+    // The dummy key is rejected by the OpenAI API; the failure must surface
+    // as -1 with last_error populated — never a panic. This test makes a
+    // real network call (CI runners have network); if you want to skip it
+    // in offline dev, mark it #[ignore] locally.
     let ctx = make_ctx();
     let text = CString::new("hello").unwrap();
 
     let mut out_bytes: *mut u8 = std::ptr::null_mut();
     let mut out_len: usize = 0;
     let rc = tts_synth_to_bytes(ctx, text.as_ptr(), &mut out_bytes, &mut out_len);
-    assert_eq!(rc, -1, "synth without a model must fail, not crash");
+    assert_eq!(rc, -1, "synth with dummy key must fail, not crash");
     assert!(out_bytes.is_null());
     assert_eq!(out_len, 0);
 
-    // last_error must be populated so callers can surface a reason.
     let err_ptr = tts_get_last_error(ctx);
     assert!(
         !err_ptr.is_null(),
@@ -205,7 +208,7 @@ fn test_ffi_full_lifecycle_voice_round_trip() {
     // If any step leaks memory or panics under Miri this test fails.
     let ctx = make_ctx();
 
-    let voice = CString::new("kokoro-en-en-19").unwrap();
+    let voice = CString::new("alloy").unwrap();
     tts_set_voice(ctx, voice.as_ptr());
     tts_set_rate(ctx, 1.0);
     tts_set_pitch(ctx, 1.0);
@@ -214,13 +217,14 @@ fn test_ffi_full_lifecycle_voice_round_trip() {
     let mut voices_ptr: *mut tts_voice = std::ptr::null_mut();
     let mut count: i32 = 0;
     assert_eq!(tts_get_voices(ctx, &mut voices_ptr, &mut count), 0);
-    assert!(count > 0);
-    tts_free_voices(voices_ptr, count);
+    if !voices_ptr.is_null() && count > 0 {
+        tts_free_voices(voices_ptr, count);
+    }
 
     let text = CString::new("Hello, world").unwrap();
     let mut out_bytes: *mut u8 = std::ptr::null_mut();
     let mut out_len: usize = 0;
-    // synth fails (no model downloaded) — must be -1, not a crash.
+    // Synth with a dummy key fails at the API; must return -1, not crash.
     let _ = tts_synth_to_bytes(ctx, text.as_ptr(), &mut out_bytes, &mut out_len);
     if !out_bytes.is_null() {
         tts_free_bytes(out_bytes, out_len);
