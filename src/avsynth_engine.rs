@@ -252,3 +252,39 @@ impl Drop for AvSynthEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ssml_tags_removes_tags() {
+        assert_eq!(
+            strip_ssml_tags("<speak><prosody rate=\"+10%\">Hello world</prosody></speak>"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_collapses_whitespace_runs() {
+        // split_whitespace + join(" ") collapses interior whitespace.
+        assert_eq!(strip_ssml_tags("<p>Hello   world</p>"), "Hello world");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_no_tags_passthrough() {
+        assert_eq!(strip_ssml_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_unclosed_does_not_hang() {
+        // A stray '<' with no closing '>' just stops collection.
+        assert_eq!(strip_ssml_tags("hello <world"), "hello");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_empty_input_returns_empty() {
+        assert_eq!(strip_ssml_tags(""), "");
+        assert_eq!(strip_ssml_tags("<p></p>"), "");
+    }
+}

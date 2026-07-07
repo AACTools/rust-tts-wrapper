@@ -163,8 +163,9 @@ All functions are `extern "C"`, `#[no_mangle]`:
 |----------|-------------|
 | `tts_create(engine_id, credentials_json)` | Create engine, returns opaque `tts_ctx*` |
 | `tts_destroy(ctx)` | Free engine context |
-| `tts_speak(ctx, text)` | Speak async, returns 0/-1 |
-| `tts_speak_sync(ctx, text)` | Speak sync (blocking) |
+| `tts_speak(ctx, text)` | Speak (returns 0/-1) |
+| `tts_speak_ssml(ctx, ssml)` | Speak pre-built SSML, bypassing SpeechMarkdown + rate/pitch/volume wrapping |
+| `tts_speak_sync(ctx, text)` | Speak (blocking) |
 | `tts_stop(ctx)` | Stop speech |
 | `tts_pause(ctx)` | Pause in-progress speech |
 | `tts_resume(ctx)` | Resume paused speech |
@@ -177,11 +178,16 @@ All functions are `extern "C"`, `#[no_mangle]`:
 | `tts_set_pitch(ctx, pitch)` | Set pitch (1.0 = normal) |
 | `tts_set_volume(ctx, volume)` | Set volume (1.0 = normal) |
 | `tts_set_on_audio(ctx, cb, userdata)` | Set streaming audio callback |
-| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback |
+| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback (word, start_s, end_s) |
+| `tts_set_on_boundary2(ctx, cb, userdata)` | Set boundary callback with char offset + length |
+| `tts_set_on_viseme(ctx, cb, userdata)` | Set viseme callback for lip-sync |
+| `tts_set_on_start(ctx, cb, userdata)` | Set speech-started callback |
+| `tts_set_on_end(ctx, cb, userdata)` | Set speech-completed callback |
+| `tts_set_on_error(ctx, cb, userdata)` | Set error callback |
 | `tts_get_engine_count()` | Count registered engines |
-| `tts_get_engines(out_engines)` | Get engine descriptors |
-| `tts_free_engine_info(engines, count)` | Free engine info |
-| `tts_get_last_error()` | Get last error message |
+| `tts_get_engines(out_engines, out_count)` | Get engine descriptors |
+| `tts_free_engines(engines, count)` | Free engine info array |
+| `tts_get_last_error(ctx)` | Get last error message |
 
 ### C Example
 
