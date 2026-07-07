@@ -150,3 +150,54 @@ impl TtsEngine for SystemEngine {
         "system"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rate_to_spd_normal_is_zero() {
+        assert_eq!(rate_to_spd(1.0), 0);
+    }
+
+    #[test]
+    fn test_rate_to_spd_positive_when_faster() {
+        // rate 1.5 -> +50
+        assert_eq!(rate_to_spd(1.5), 50);
+        assert!(rate_to_spd(1.1) > 0);
+    }
+
+    #[test]
+    fn test_rate_to_spd_negative_when_slower() {
+        // rate 0.5 -> -50
+        assert_eq!(rate_to_spd(0.5), -50);
+        assert!(rate_to_spd(0.9) < 0);
+    }
+
+    #[test]
+    fn test_rate_to_spd_clamps_extremes() {
+        // Above 10.0 / below 0.1 must clamp, not panic.
+        assert_eq!(rate_to_spd(100.0), rate_to_spd(10.0));
+        assert_eq!(rate_to_spd(0.0), rate_to_spd(0.1));
+    }
+
+    #[test]
+    fn test_pitch_to_spd_matches_rate_shape() {
+        assert_eq!(pitch_to_spd(1.0), 0);
+        assert_eq!(pitch_to_spd(1.5), 50);
+        assert_eq!(pitch_to_spd(0.5), -50);
+    }
+
+    #[test]
+    fn test_volume_to_spd_normal_is_zero() {
+        assert_eq!(volume_to_spd(1.0), 0);
+    }
+
+    #[test]
+    fn test_volume_to_spd_clamped_at_zero_and_two() {
+        // Volume range is [0.0, 2.0]; outside that must clamp.
+        assert_eq!(volume_to_spd(2.0), 100);
+        assert_eq!(volume_to_spd(0.0), -100);
+        assert_eq!(volume_to_spd(5.0), volume_to_spd(2.0));
+    }
+}

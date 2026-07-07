@@ -44,19 +44,7 @@ cargo test --all-features
 
 ## Status
 
-ALL 12 CRITICAL ISSUES RESOLVED (100%):
-- DONE: Windows SAPI compilation fixed (toolchain issue remains)
-- DONE: FFI panic safety complete (no more UB from panics)  
-- DONE: String safety issues fixed (Azure/ElevenLands)
-- DONE: SherpaOnnx all models now work (was all models)
-- DONE: Cloud authentication fixed (Watson, PlayHT, Deepgram, Hume)
-- DONE: Polly disabled (requires AWS Signature V4)
-- DONE: Memory allocator mismatch fixed (consistent Rust allocation)
-- DONE: Error reporting fixed (per-context errors now work)
-
-**Impact:** 100% of Critical issues resolved. Platform stability significantly improved.
-
-See `ISSUES.md` for detailed audit.
+Active development. Engine constructors, the C ABI, and the offline test suite run in CI on Linux, macOS, and Windows. Live API calls are not exercised in CI — see `tests/live_cloud.rs` (gitignored) and `.env.example` for running them locally with your own credentials.
 - **Voice List**: Engines with "API" can enumerate voices from the provider's API.
 - **Word Boundaries**: Google returns real timing via v1beta1 timepoints with SSML marks. All others use word-length-adjusted estimation (150 WPM baseline, configurable).
 - **Speech Markdown**: Auto-detected and converted to platform-specific SSML via [speechmarkdown-rust](https://github.com/AACTools/speechmarkdown-rust). Azure gets Microsoft SSML, Google gets Assistant SSML, others get Alexa SSML.

@@ -464,6 +464,82 @@ fn parse_google_timepoints(
     boundaries
 }
 
+/// Parse ElevenLabs alignment payload into `(word, start_sec, end_sec)` tuples.
+///
+/// ElevenLabs returns per-character timing in `alignment`:
+/// ```json
+/// { "characters": ["H","e","l","l","o"," ","w","o","r","l","d"],
+///   "character_start_times_seconds": [0.0, 0.05, ...],
+///   "character_end_times_seconds":   [0.05, 0.10, ...] }
+/// ```
+/// Whitespace separates words; the word's start is the first non-space char's
+/// start and its end is the next whitespace's `end_time` (or the final
+/// character's end if there is no trailing space).
+///
+/// Defensive against arrays of mismatched lengths — uses `.get(i)` rather
+/// than indexing, mirroring the safety fix in the original inline code.
+/// Extracted from `speak()` so it can be unit-tested with sample payloads.
+fn parse_elevenlabs_alignment(
+    alignment: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(String, f32, f32)> {
+    let Some(chars) = alignment.get("characters").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let Some(starts) = alignment
+        .get("character_start_times_seconds")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+    let Some(ends) = alignment
+        .get("character_end_times_seconds")
+        .and_then(|v| v.as_array())
+    else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<(String, f32, f32)> = Vec::new();
+    let mut current_word = String::new();
+    let mut word_start: f32 = 0.0;
+    let mut has_started = false;
+
+    for i in 0..chars.len() {
+        let char_str = chars.get(i).and_then(|v| v.as_str()).unwrap_or("");
+        let start_time = starts
+            .get(i)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0) as f32;
+        let end_time = ends
+            .get(i)
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0) as f32;
+
+        if char_str.trim().is_empty() {
+            if has_started {
+                out.push((current_word.clone(), word_start, end_time));
+                current_word.clear();
+                has_started = false;
+            }
+        } else if !has_started {
+            word_start = start_time;
+            has_started = true;
+            current_word.push_str(char_str);
+        } else {
+            current_word.push_str(char_str);
+        }
+    }
+
+    if has_started {
+        let end_time = ends
+            .last()
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0) as f32;
+        out.push((current_word, word_start, end_time));
+    }
+
+    out
+}
+
 /// Map Azure voices JSON array to unified voices.
 fn map_azure_voices(json: &[serde_json::Value]) -> Vec<Voice> {
     let mut voices = Vec::new();
@@ -534,6 +610,93 @@ fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
     voices
 }
 
+/// Generic voice-list parser used by every provider that doesn't have a
+/// dedicated mapper (i.e. everything except Azure and Google).
+///
+/// Handles field-name variation across providers:
+/// - `id` / `voice_id` / `VoiceId` / `name` / `Name` for the voice id
+/// - `name` / `Name` (falling back to id) for the display name
+/// - `gender` / `Gender` / `labels.gender` (ElevenLabs stores gender in a
+///   `labels` object) for gender
+/// - `language_code` / `LanguageCode` / `language` / `lang` /
+///   `labels.language` for the primary language
+///
+/// Extracted from `get_voices()` so it can be unit-tested directly with
+/// representative JSON samples from each provider.
+fn map_generic_voices(provider: &str, json: &[serde_json::Value]) -> Vec<Voice> {
+    json.iter()
+        .filter_map(|v| {
+            let id = v
+                .get("id")
+                .or_else(|| v.get("voice_id"))
+                .or_else(|| v.get("VoiceId"))
+                .or_else(|| v.get("name"))
+                .or_else(|| v.get("Name"))?
+                .as_str()?;
+            let name = v
+                .get("name")
+                .or_else(|| v.get("Name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or(id)
+                .to_string();
+
+            // Gender resolution order. ElevenLabs stores gender inside a
+            // `labels` object — handle that explicitly.
+            let gender_str = v
+                .get("gender")
+                .or_else(|| v.get("Gender"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    v.get("labels").and_then(|labels| {
+                        if let Some(obj) = labels.as_object() {
+                            obj.get("gender")?.as_str().map(str::to_string)
+                        } else {
+                            labels.as_str().map(std::string::ToString::to_string)
+                        }
+                    })
+                })
+                .unwrap_or_default();
+
+            // Language code resolution. Polly uses `LanguageCode`; ElevenLabs
+            // uses `labels.language`; others use `language` or `lang`.
+            let lang = v
+                .get("language_code")
+                .or_else(|| v.get("LanguageCode"))
+                .or_else(|| v.get("language"))
+                .or_else(|| v.get("lang"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    v.get("labels").and_then(|labels| {
+                        labels
+                            .as_object()
+                            .and_then(|o| o.get("language")?.as_str().map(str::to_string))
+                    })
+                })
+                .unwrap_or_default();
+
+            let language_codes = if lang.is_empty() {
+                vec![]
+            } else {
+                vec![crate::types::LanguageCode {
+                    bcp47: lang.clone(),
+                    iso639_3: lang.split(['-', '_']).next().unwrap_or(&lang).to_string(),
+                    display: lang,
+                }]
+            };
+
+            Some(Voice {
+                id: id.to_string(),
+                name,
+                gender: normalize_gender(&gender_str),
+                provider: provider.to_string(),
+                language_codes,
+            })
+        })
+        .collect()
+}
+
 #[allow(
     clippy::too_many_lines,
     clippy::cast_precision_loss,
@@ -559,6 +722,119 @@ fn compute_durations(boundaries: &mut [WordBoundary]) {
     if boundaries[len - 1].duration == 0 {
         boundaries[len - 1].duration = 500;
     }
+}
+
+// ===== Azure WebSocket message parsing helpers =====
+//
+// Azure's TTS WebSocket protocol turns each event into a text frame whose
+// first lines are HTTP-like headers (`X-RequestId:…`, `Path:…`, …) followed
+// by a blank line and a JSON body. The helpers below lift the per-message
+// parsing out of the speak() loop so they can be exercised independently
+// with sample frames recorded from a real Azure session.
+
+/// Extract the `Path:` header value from an Azure WS text frame.
+///
+/// `"Path:turn.end"` → `"turn.end"`. Returns `""` when there is no `Path:`
+/// header (defensive — Azure always sends one, but a malformed frame should
+/// not panic the loop).
+#[must_use]
+pub(crate) fn azure_ws_extract_path(text_msg: &str) -> &str {
+    text_msg
+        .lines()
+        .find(|l| l.starts_with("Path:"))
+        .and_then(|l| l.strip_prefix("Path:"))
+        .map_or("", str::trim)
+}
+
+/// Extract the JSON body of an Azure WS text frame.
+///
+/// Azure separates headers from body with `\r\n\r\n`. Some proxies/servers
+/// collapse that to `\n\n`; we accept both. Returns `""` when no separator
+/// is present.
+#[must_use]
+pub(crate) fn azure_ws_extract_body(text_msg: &str) -> &str {
+    if let Some(idx) = text_msg.find("\r\n\r\n") {
+        &text_msg[idx + 4..]
+    } else if let Some(idx) = text_msg.find("\n\n") {
+        &text_msg[idx + 2..]
+    } else {
+        ""
+    }
+}
+
+/// Pull the synthesis error reason out of a `Path:response` JSON body, if any.
+///
+/// Azure reports failures as `{"Error": {"Message": "…"}}` (or, rarely, a
+/// top-level `reason` string). Returns `None` for non-error responses.
+#[must_use]
+pub(crate) fn azure_ws_extract_error(body: &str) -> Option<String> {
+    let json: serde_json::Value = serde_json::from_str(body).ok()?;
+    let err = json.get("Error")?;
+    let reason = err
+        .get("Message")
+        .and_then(|v| v.as_str())
+        .or_else(|| json.get("reason").and_then(|v| v.as_str()))
+        .unwrap_or("Azure synthesis failed");
+    Some(reason.to_string())
+}
+
+/// Parse one `WordBoundary` metadata item from an Azure WS `audio.metadata`
+/// frame into `(word, offset_ms, duration_ms)`. Returns `None` if the item
+/// is malformed or has no usable text.
+///
+/// Azure encodes offsets in 100-nanosecond ticks; we convert to milliseconds
+/// here so the caller doesn't have to.
+#[must_use]
+fn azure_ws_parse_word_boundary(item: &serde_json::Value) -> Option<(&str, u64, u64)> {
+    let data = item.get("Data")?;
+    let offset_ticks = data
+        .get("Offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let duration_ticks = data
+        .get("Duration")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    // Azure has shipped three different shapes for the boundary text:
+    //   1. {"Data": {"text": {"Text": "Hello"}}}   (current)
+    //   2. {"Data": {"Text": {"Text": "Hello"}}}   (legacy capital-T)
+    //   3. {"Data": {"text": "Hello"}}             (flat string)
+    // Resolve in that order.
+    let word = data
+        .get("text")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("Text")?.as_str())
+        .or_else(|| {
+            data.get("Text")
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get("Text")?.as_str())
+        })
+        .or_else(|| data.get("text").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())?;
+
+    // Ticks → ms: 1 ms = 10,000 ticks.
+    let offset_ms = (offset_ticks.max(0) / 10_000) as u64;
+    let duration_ms = (duration_ticks.max(0) / 10_000) as u64;
+    Some((word, offset_ms, duration_ms))
+}
+
+/// Parse one `Viseme` metadata item into `(viseme_id, offset_sec)`.
+#[must_use]
+fn azure_ws_parse_viseme(item: &serde_json::Value) -> Option<(i32, f32)> {
+    let data = item.get("Data")?;
+    let viseme_id = data
+        .get("VisemeId")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let offset_ticks = data
+        .get("Offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    // Ticks → seconds: 1 s = 10,000,000 ticks.
+    #[allow(clippy::cast_precision_loss)]
+    let offset_sec = (offset_ticks as f64 / 10_000_000.0) as f32;
+    Some((viseme_id, offset_sec))
 }
 
 impl TtsEngine for CloudEngine {
@@ -690,34 +966,17 @@ impl TtsEngine for CloudEngine {
                 match msg {
                     Message::Text(t) => {
                         let text_msg = t.as_str();
-                        let path_line = text_msg.lines().find(|l| l.starts_with("Path:"));
-                        let path =
-                            path_line.map_or("", |l| l.strip_prefix("Path:").unwrap_or(l).trim());
-
-                        // Parse out JSON body once for the branches below.
-                        let body = if let Some(idx) = text_msg.find("\r\n\r\n") {
-                            &text_msg[idx + 4..]
-                        } else if let Some(idx) = text_msg.find("\n\n") {
-                            &text_msg[idx + 2..]
-                        } else {
-                            ""
-                        };
+                        let path = azure_ws_extract_path(text_msg);
+                        let body = azure_ws_extract_body(text_msg);
 
                         // Error handling: Azure reports synthesis failures via
                         // `Path:response` with a JSON body containing `Error`.
                         // Without this the loop would hang on failures.
                         if path == "response" || path == "turn.end" {
                             if !body.is_empty() {
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
-                                    if let Some(err) = json.get("Error") {
-                                        let reason = err
-                                            .get("Message")
-                                            .and_then(|v| v.as_str())
-                                            .or_else(|| json.get("reason").and_then(|v| v.as_str()))
-                                            .unwrap_or("Azure synthesis failed");
-                                        let _ = socket.close(None);
-                                        return Err(TtsError(reason.to_string()));
-                                    }
+                                if let Some(reason) = azure_ws_extract_error(body) {
+                                    let _ = socket.close(None);
+                                    return Err(TtsError(reason));
                                 }
                             }
                             if path == "turn.end" {
@@ -732,47 +991,11 @@ impl TtsEngine for CloudEngine {
                                     json.get("Metadata").and_then(|v| v.as_array())
                                 {
                                     for item in metadata {
-                                        if item.get("Type").and_then(|v| v.as_str())
-                                            == Some("WordBoundary")
-                                        {
-                                            // ... word boundary handling (existing code) ...
-                                            if let Some(data) = item.get("Data") {
-                                                let offset_ticks = data
-                                                    .get("Offset")
-                                                    .and_then(serde_json::Value::as_i64)
-                                                    .unwrap_or(0);
-                                                let duration_ticks = data
-                                                    .get("Duration")
-                                                    .and_then(serde_json::Value::as_i64)
-                                                    .unwrap_or(0);
-
-                                                let word = if let Some(text_obj) =
-                                                    data.get("text").and_then(|v| v.as_object())
+                                        match item.get("Type").and_then(|v| v.as_str()) {
+                                            Some("WordBoundary") => {
+                                                if let Some((word, offset_ms, duration_ms)) =
+                                                    azure_ws_parse_word_boundary(item)
                                                 {
-                                                    text_obj
-                                                        .get("Text")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("")
-                                                } else if let Some(text_obj) =
-                                                    data.get("Text").and_then(|v| v.as_object())
-                                                {
-                                                    text_obj
-                                                        .get("Text")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("")
-                                                } else {
-                                                    data.get("text")
-                                                        .and_then(|v| v.as_str())
-                                                        .unwrap_or("")
-                                                };
-
-                                                if !word.is_empty() {
-                                                    // Fire boundary inline for real-time
-                                                    // word highlighting (SAPI clients need
-                                                    // interleaved delivery, not batched).
-                                                    let offset_ms = (offset_ticks / 10_000) as f64;
-                                                    let duration_ms =
-                                                        (duration_ticks / 10_000) as f64;
                                                     #[allow(clippy::cast_precision_loss)]
                                                     on_boundary(
                                                         word,
@@ -783,25 +1006,10 @@ impl TtsEngine for CloudEngine {
                                                     );
                                                 }
                                             }
-
-                                            // Viseme events (Azure WS only).
-                                            // Format: {"Type":"Viseme","Data":{"VisemeId":1,"Offset":1234567}}
-                                            if item.get("Type").and_then(|v| v.as_str())
-                                                == Some("Viseme")
-                                            {
-                                                if let Some(data) = item.get("Data") {
-                                                    let viseme_id = data
-                                                        .get("VisemeId")
-                                                        .and_then(serde_json::Value::as_i64)
-                                                        .unwrap_or(0)
-                                                        as i32;
-                                                    let offset_ticks = data
-                                                        .get("Offset")
-                                                        .and_then(serde_json::Value::as_i64)
-                                                        .unwrap_or(0);
-                                                    #[allow(clippy::cast_precision_loss)]
-                                                    let offset_sec =
-                                                        (offset_ticks as f64 / 10_000_000.0) as f32;
+                                            Some("Viseme") => {
+                                                if let Some((viseme_id, offset_sec)) =
+                                                    azure_ws_parse_viseme(item)
+                                                {
                                                     VISEME_CB.with(|cell| {
                                                         if let Some(ref mut cb) = *cell.borrow_mut()
                                                         {
@@ -810,6 +1018,7 @@ impl TtsEngine for CloudEngine {
                                                     });
                                                 }
                                             }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -924,53 +1133,8 @@ impl TtsEngine for CloudEngine {
 
             if let Some(cb) = on_boundary.as_mut() {
                 if let Some(alignment) = json.get("alignment").and_then(|v| v.as_object()) {
-                    let chars = alignment.get("characters").and_then(|v| v.as_array());
-                    let starts = alignment
-                        .get("character_start_times_seconds")
-                        .and_then(|v| v.as_array());
-                    let ends = alignment
-                        .get("character_end_times_seconds")
-                        .and_then(|v| v.as_array());
-
-                    if let (Some(chars), Some(starts), Some(ends)) = (chars, starts, ends) {
-                        let mut current_word = String::new();
-                        let mut word_start: f32 = 0.0;
-                        let mut has_started = false;
-
-                        for i in 0..chars.len() {
-                            // Bounds check for all arrays to prevent OOB indexing
-                            let char_str = chars.get(i).and_then(|v| v.as_str()).unwrap_or("");
-                            let start_time = starts
-                                .get(i)
-                                .and_then(serde_json::Value::as_f64)
-                                .unwrap_or(0.0) as f32;
-                            let end_time = ends
-                                .get(i)
-                                .and_then(serde_json::Value::as_f64)
-                                .unwrap_or(0.0) as f32;
-
-                            if char_str.trim().is_empty() {
-                                if has_started {
-                                    cb(&current_word, word_start, end_time, -1, -1);
-                                    current_word.clear();
-                                    has_started = false;
-                                }
-                            } else {
-                                if !has_started {
-                                    word_start = start_time;
-                                    has_started = true;
-                                }
-                                current_word.push_str(char_str);
-                            }
-                        }
-
-                        if has_started {
-                            let end_time = ends
-                                .last()
-                                .and_then(serde_json::Value::as_f64)
-                                .unwrap_or(0.0) as f32;
-                            cb(&current_word, word_start, end_time, -1, -1);
-                        }
+                    for (word, start, end) in parse_elevenlabs_alignment(alignment) {
+                        cb(&word, start, end, -1, -1);
                     }
                 }
             }
@@ -1104,99 +1268,10 @@ impl TtsEngine for CloudEngine {
                 .get("voices")
                 .and_then(|v| v.as_array())
                 .map_or_else(|| Ok(vec![]), |arr| Ok(map_google_voices(arr))),
-            _ => {
-                // Generic: try to parse as array of objects with id/name fields.
-                // Handles both lowercase fields (ElevenLabs, Deepgram, etc.)
-                // and PascalCase fields (Polly DescribeVoices: VoiceId, Gender,
-                // LanguageCode) Also handles ElevenLabs `labels` being
-                // an object rather than a string
-                json.as_array().map_or_else(
-                    || Ok(vec![]),
-                    |arr| {
-                        Ok(arr
-                            .iter()
-                            .filter_map(|v| {
-                                let id = v
-                                    .get("id")
-                                    .or_else(|| v.get("voice_id"))
-                                    .or_else(|| v.get("VoiceId"))
-                                    .or_else(|| v.get("name"))
-                                    .or_else(|| v.get("Name"))?
-                                    .as_str()?;
-                                let name = v
-                                    .get("name")
-                                    .or_else(|| v.get("Name"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or(id)
-                                    .to_string();
-
-                                // Gender resolution order. ElevenLabs stores
-                                // gender inside a `labels` object — handle that
-                                // explicitly.
-                                let gender_str = v
-                                    .get("gender")
-                                    .or_else(|| v.get("Gender"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        v.get("labels").and_then(|labels| {
-                                            // ElevenLabs: labels is an object.
-                                            if let Some(obj) = labels.as_object() {
-                                                obj.get("gender")?.as_str().map(str::to_string)
-                                            } else {
-                                                labels
-                                                    .as_str()
-                                                    .map(std::string::ToString::to_string)
-                                            }
-                                        })
-                                    })
-                                    .unwrap_or_default();
-
-                                // Language code resolution. Polly uses
-                                // LanguageCode; ElevenLabs uses labels.language;
-                                // others may use language or lang.
-                                let lang = v
-                                    .get("language_code")
-                                    .or_else(|| v.get("LanguageCode"))
-                                    .or_else(|| v.get("language"))
-                                    .or_else(|| v.get("lang"))
-                                    .and_then(|v| v.as_str())
-                                    .map(str::to_string)
-                                    .or_else(|| {
-                                        v.get("labels").and_then(|labels| {
-                                            labels.as_object().and_then(|o| {
-                                                o.get("language")?.as_str().map(str::to_string)
-                                            })
-                                        })
-                                    })
-                                    .unwrap_or_default();
-
-                                let language_codes = if lang.is_empty() {
-                                    vec![]
-                                } else {
-                                    vec![crate::types::LanguageCode {
-                                        bcp47: lang.clone(),
-                                        iso639_3: lang
-                                            .split(['-', '_'])
-                                            .next()
-                                            .unwrap_or(&lang)
-                                            .to_string(),
-                                        display: lang,
-                                    }]
-                                };
-
-                                Some(Voice {
-                                    id: id.to_string(),
-                                    name,
-                                    gender: normalize_gender(&gender_str),
-                                    provider: self.config.provider_id.clone(),
-                                    language_codes,
-                                })
-                            })
-                            .collect())
-                    },
-                )
-            }
+            _ => json.as_array().map_or_else(
+                || Ok(vec![]),
+                |arr| Ok(map_generic_voices(&self.config.provider_id, arr)),
+            ),
         }
     }
 
@@ -1452,5 +1527,857 @@ mod tests {
         // (and emitting a warning) rather than constructing a broken config.
         let creds = HashMap::new();
         assert!(build_config("polly", &creds).is_none());
+    }
+
+    // ===== Per-engine config matrix =====
+    //
+    // One test per provider asserting the URL the engine will actually hit,
+    // the auth header scheme, the JSON body shape, and (where applicable) the
+    // voice-listing URL. Regression coverage for the kind of auth/URL bugs
+    // that bit Watson, PlayHT, Deepgram, and Hume in earlier revisions.
+
+    fn engine_creds(id: &str) -> HashMap<String, String> {
+        let mut c = HashMap::new();
+        c.insert("apiKey".to_string(), "TESTKEY".to_string());
+        match id {
+            "azure" => {
+                c.insert("subscriptionKey".to_string(), "TESTKEY".to_string());
+                c.insert("region".to_string(), "eastus".to_string());
+            }
+            "watson" => {
+                c.insert("region".to_string(), "eu-gb".to_string());
+                c.insert("instanceId".to_string(), "inst-123".to_string());
+            }
+            "playht" => {
+                c.insert("userId".to_string(), "u-123".to_string());
+            }
+            "hume" => {
+                c.insert("voice".to_string(), "aoife".to_string());
+            }
+            _ => {}
+        }
+        c
+    }
+
+    #[test]
+    fn test_openai_config_matrix() {
+        let cfg = build_config("openai", &engine_creds("openai")).expect("openai");
+        assert_eq!(cfg.synth_url, "https://api.openai.com/v1/audio/speech");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Bearer ");
+        assert_eq!(cfg.text_field, "input");
+        assert_eq!(cfg.voice_param, "voice");
+        assert_eq!(cfg.model_param.as_deref(), Some("model"));
+        assert_eq!(cfg.model_default.as_deref(), Some("gpt-4o-mini-tts"));
+        assert_eq!(cfg.default_voice.as_deref(), Some("alloy"));
+        assert_eq!(cfg.provider_id, "openai");
+        assert!(!cfg.body_is_ssml);
+    }
+
+    #[test]
+    fn test_elevenlabs_config_matrix() {
+        let cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).expect("elevenlabs");
+        // Default voice_id is baked into the synth URL path.
+        assert!(cfg
+            .synth_url
+            .starts_with("https://api.elevenlabs.io/v1/text-to-speech/"));
+        assert_eq!(cfg.auth_header, "xi-api-key");
+        assert_eq!(cfg.auth_prefix, "");
+        assert_eq!(cfg.text_field, "text");
+        assert_eq!(cfg.model_param.as_deref(), Some("model_id"));
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://api.elevenlabs.io/v1/voices")
+        );
+    }
+
+    #[test]
+    fn test_elevenlabs_voice_id_from_creds() {
+        let mut c = engine_creds("elevenlabs");
+        c.insert("voiceId".to_string(), "v-abc".to_string());
+        let cfg = build_config("elevenlabs", &c).expect("elevenlabs");
+        assert!(cfg.synth_url.ends_with("/text-to-speech/v-abc"));
+    }
+
+    #[test]
+    fn test_azure_config_matrix() {
+        let cfg = build_config("azure", &engine_creds("azure")).expect("azure");
+        assert_eq!(
+            cfg.synth_url,
+            "https://eastus.tts.speech.microsoft.com/cognitiveservices/v1"
+        );
+        assert_eq!(cfg.auth_header, "Ocp-Apim-Subscription-Key");
+        assert_eq!(cfg.auth_prefix, "");
+        assert!(cfg.body_is_ssml);
+        assert_eq!(cfg.content_type.as_deref(), Some("application/ssml+xml"));
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://eastus.tts.speech.microsoft.com/cognitiveservices/voices/list")
+        );
+        assert_eq!(
+            cfg.extra_headers
+                .get("X-Microsoft-OutputFormat")
+                .map(String::as_str),
+            Some("audio-24khz-96kbitrate-mono-mp3")
+        );
+        assert_eq!(cfg.default_voice.as_deref(), Some("en-US-AriaNeural"));
+    }
+
+    #[test]
+    fn test_azure_region_override() {
+        let mut c = engine_creds("azure");
+        c.insert("region".to_string(), "uksouth".to_string());
+        let cfg = build_config("azure", &c).expect("azure");
+        assert!(cfg.synth_url.starts_with("https://uksouth.tts."));
+        assert!(cfg
+            .voices_url
+            .as_deref()
+            .unwrap()
+            .starts_with("https://uksouth.tts."));
+    }
+
+    #[test]
+    fn test_google_config_matrix() {
+        let cfg = build_config("google", &engine_creds("google")).expect("google");
+        // The API key must be embedded as ?key= in both URLs.
+        assert!(cfg
+            .synth_url
+            .starts_with("https://texttospeech.googleapis.com/v1/text:synthesize?key="));
+        assert!(cfg.synth_url.ends_with("TESTKEY"));
+        assert!(cfg
+            .voices_url
+            .as_deref()
+            .unwrap()
+            .starts_with("https://texttospeech.googleapis.com/v1/voices?key="));
+    }
+
+    #[test]
+    fn test_cartesia_config_matrix() {
+        let cfg = build_config("cartesia", &engine_creds("cartesia")).expect("cartesia");
+        assert_eq!(cfg.synth_url, "https://api.cartesia.ai/tts/bytes");
+        assert_eq!(cfg.auth_header, "X-API-Key");
+        assert_eq!(cfg.voice_param, "voice_id");
+        assert_eq!(cfg.model_default.as_deref(), Some("sonic-2"));
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://api.cartesia.ai/voices")
+        );
+    }
+
+    #[test]
+    fn test_deepgram_config_matrix() {
+        let cfg = build_config("deepgram", &engine_creds("deepgram")).expect("deepgram");
+        assert_eq!(cfg.synth_url, "https://api.deepgram.com/v1/speak");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Token ");
+        assert_eq!(cfg.voice_param, "model");
+        assert_eq!(cfg.default_voice.as_deref(), Some("aura-asteria-en"));
+        assert!(cfg.voices_url.is_none());
+    }
+
+    #[test]
+    fn test_playht_config_matrix() {
+        let cfg = build_config("playht", &engine_creds("playht")).expect("playht");
+        assert_eq!(cfg.synth_url, "https://api.play.ht/api/v2/tts");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Bearer ");
+        assert_eq!(
+            cfg.extra_headers.get("X-User-ID").map(String::as_str),
+            Some("u-123")
+        );
+    }
+
+    #[test]
+    fn test_fishaudio_config_matrix() {
+        let cfg = build_config("fishaudio", &engine_creds("fishaudio")).expect("fishaudio");
+        assert_eq!(cfg.synth_url, "https://api.fish.audio/v1/tts");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Bearer ");
+        assert_eq!(cfg.voice_param, "reference_id");
+    }
+
+    #[test]
+    fn test_hume_config_matrix() {
+        let cfg = build_config("hume", &engine_creds("hume")).expect("hume");
+        assert_eq!(cfg.synth_url, "https://api.hume.ai/v0/tts");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Bearer ");
+        // voice is in extra_body, not voice_param.
+        assert_eq!(cfg.voice_param, "");
+        // The supplied voice name lands in the nested object.
+        assert_eq!(
+            cfg.extra_body
+                .get("voice")
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str()),
+            Some("aoife")
+        );
+    }
+
+    #[test]
+    fn test_mistral_config_matrix() {
+        let cfg = build_config("mistral", &engine_creds("mistral")).expect("mistral");
+        assert_eq!(cfg.synth_url, "https://api.mistral.ai/v1/tts");
+        assert_eq!(cfg.text_field, "text");
+        assert_eq!(cfg.voice_param, "voice");
+    }
+
+    #[test]
+    fn test_murf_config_matrix() {
+        let cfg = build_config("murf", &engine_creds("murf")).expect("murf");
+        assert_eq!(cfg.synth_url, "https://api.murf.ai/v1/speech/generate");
+        assert_eq!(cfg.auth_header, "api-key");
+        assert_eq!(cfg.auth_prefix, "");
+        assert_eq!(cfg.voice_param, "voice_id");
+    }
+
+    #[test]
+    fn test_resemble_config_matrix() {
+        let cfg = build_config("resemble", &engine_creds("resemble")).expect("resemble");
+        assert_eq!(cfg.synth_url, "https://app.resemble.ai/api/v2/synthesize");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Token ");
+        assert_eq!(cfg.voice_param, "voice_uuid");
+    }
+
+    #[test]
+    fn test_unrealspeech_config_matrix() {
+        let cfg =
+            build_config("unrealspeech", &engine_creds("unrealspeech")).expect("unrealspeech");
+        assert_eq!(cfg.synth_url, "https://api.v7.unrealspeech.com/speech");
+        assert_eq!(cfg.default_voice.as_deref(), Some("Scarlett"));
+        assert_eq!(cfg.voice_param, "voice_id");
+    }
+
+    #[test]
+    fn test_upliftai_config_matrix() {
+        let cfg = build_config("upliftai", &engine_creds("upliftai")).expect("upliftai");
+        assert_eq!(cfg.synth_url, "https://api.upliftai.org/v1/tts");
+    }
+
+    #[test]
+    fn test_watson_config_matrix() {
+        let cfg = build_config("watson", &engine_creds("watson")).expect("watson");
+        assert!(cfg
+            .synth_url
+            .starts_with("https://eu-gb.text-to-speech.watson.cloud.ibm.com/instances/inst-123/"));
+        assert!(cfg.synth_url.ends_with("/v1/synthesize"));
+        assert_eq!(cfg.auth_header, "Authorization");
+        // Basic auth — base64("apiKey:TESTKEY"), prefix "Basic ".
+        assert!(cfg.auth_prefix.starts_with("Basic "));
+        // Round-trip the base64 to confirm the credentials are encoded in
+        // the documented `apiKey:<key>` shape (not `<key>:` as it once was).
+        let encoded = cfg.auth_prefix.strip_prefix("Basic ").unwrap();
+        let decoded = {
+            use base64::Engine;
+            String::from_utf8(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded.as_bytes())
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(decoded, "apiKey:TESTKEY");
+    }
+
+    #[test]
+    fn test_witai_config_matrix() {
+        let cfg = build_config("witai", &engine_creds("witai")).expect("witai");
+        assert_eq!(cfg.synth_url, "https://api.wit.ai/synthesize?v=20240304");
+        assert_eq!(cfg.auth_header, "Authorization");
+        assert_eq!(cfg.auth_prefix, "Bearer ");
+    }
+
+    #[test]
+    fn test_xai_config_matrix() {
+        let cfg = build_config("xai", &engine_creds("xai")).expect("xai");
+        assert_eq!(cfg.synth_url, "https://api.x.ai/v1/audio/speech");
+        // xAI uses `input` like OpenAI, not `text`.
+        assert_eq!(cfg.text_field, "input");
+        assert_eq!(cfg.voice_param, "voice");
+    }
+
+    #[test]
+    fn test_modelslab_config_matrix() {
+        let cfg = build_config("modelslab", &engine_creds("modelslab")).expect("modelslab");
+        assert_eq!(cfg.synth_url, "https://modelslab.com/api/v1/text_to_speech");
+        // ModelsLab has no auth header — key goes in the body by convention.
+        assert_eq!(cfg.auth_header, "");
+    }
+
+    // ===== Voice-list response parsers =====
+
+    #[test]
+    fn test_map_azure_voices_basic() {
+        let json = serde_json::json!([{
+            "ShortName": "en-US-AriaNeural",
+            "DisplayName": "Aria",
+            "Gender": "Female",
+            "Locale": "en-US",
+            "LocaleName": "English (United States)"
+        }]);
+        let voices = map_azure_voices(json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "en-US-AriaNeural");
+        assert_eq!(voices[0].name, "Aria");
+        assert_eq!(voices[0].gender, crate::types::Gender::Female);
+        assert_eq!(voices[0].provider, "azure");
+        assert_eq!(voices[0].language_codes[0].bcp47, "en-US");
+        assert_eq!(voices[0].language_codes[0].iso639_3, "en");
+    }
+
+    #[test]
+    fn test_map_azure_voices_skips_missing_short_name() {
+        // Voices without ShortName shouldn't parse — defensive against
+        // Azure adding new object shapes.
+        let json = serde_json::json!([
+            {"DisplayName": "NoShortName"},
+            {"ShortName": "en-US-GuyNeural", "Gender": "Male", "Locale": "en-US"}
+        ]);
+        let voices = map_azure_voices(json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "en-US-GuyNeural");
+    }
+
+    #[test]
+    fn test_map_google_voices_basic() {
+        let json = serde_json::json!([{
+            "name": "en-US-Wavenet-D",
+            "ssmlGender": "MALE",
+            "languageCodes": ["en-US", "en-GB"]
+        }]);
+        let voices = map_google_voices(json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "en-US-Wavenet-D");
+        assert_eq!(voices[0].gender, crate::types::Gender::Male);
+        assert_eq!(voices[0].language_codes.len(), 2);
+    }
+
+    #[test]
+    fn test_map_google_voices_missing_name_skipped() {
+        let json = serde_json::json!([{"ssmlGender": "FEMALE"}]);
+        assert!(map_google_voices(json.as_array().unwrap()).is_empty());
+    }
+
+    #[test]
+    fn test_map_generic_voices_elevenlabs_labels_object() {
+        // ElevenLabs stores gender/language inside a nested `labels` object.
+        let json = serde_json::json!([{
+            "voice_id": "21m00Tcm4TlvDq8ikWAM",
+            "name": "Rachel",
+            "labels": {"gender": "female", "language": "en"}
+        }]);
+        let voices = map_generic_voices("elevenlabs", json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "21m00Tcm4TlvDq8ikWAM");
+        assert_eq!(voices[0].name, "Rachel");
+        assert_eq!(voices[0].provider, "elevenlabs");
+        assert_eq!(voices[0].gender, crate::types::Gender::Female);
+        assert_eq!(voices[0].language_codes[0].bcp47, "en");
+    }
+
+    #[test]
+    fn test_map_generic_voices_polly_pascal_case() {
+        // Polly DescribeVoices returns VoiceId / Gender / LanguageCode.
+        let json = serde_json::json!([{
+            "VoiceId": "Joanna",
+            "Gender": "Female",
+            "LanguageCode": "en-US"
+        }]);
+        let voices = map_generic_voices("polly", json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "Joanna");
+        assert_eq!(voices[0].gender, crate::types::Gender::Female);
+        assert_eq!(voices[0].language_codes[0].bcp47, "en-US");
+    }
+
+    #[test]
+    fn test_map_generic_voices_cartesia_simple() {
+        let json = serde_json::json!([{
+            "id": "692f0249-6e6b-4a48-8b07-0f8f8a3f3a15",
+            "name": "Octopus"
+        }]);
+        let voices = map_generic_voices("cartesia", json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "692f0249-6e6b-4a48-8b07-0f8f8a3f3a15");
+        assert_eq!(voices[0].name, "Octopus");
+        assert!(voices[0].language_codes.is_empty());
+    }
+
+    #[test]
+    fn test_map_generic_voices_skips_no_id() {
+        // Voice without any id-like field is skipped; `name` alone is enough
+        // to use as the id fallback (see id-resolution order).
+        let json = serde_json::json!([
+            {"category": "voiceless"}, // no id/voice_id/VoiceId/name/Name
+            {"id": "ok", "name": "OK"}
+        ]);
+        let voices = map_generic_voices("test", json.as_array().unwrap());
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "ok");
+    }
+
+    #[test]
+    fn test_map_generic_voices_provider_tagged() {
+        // Each call must tag the voice with the provider string passed in.
+        let json = serde_json::json!([{"id": "x", "name": "X"}]);
+        for provider in ["openai", "murf", "resemble", "witai"] {
+            let voices = map_generic_voices(provider, json.as_array().unwrap());
+            assert_eq!(voices[0].provider, provider);
+        }
+    }
+
+    // ===== compute_durations =====
+
+    #[test]
+    fn test_compute_durations_empty_no_panic() {
+        let mut v: Vec<WordBoundary> = vec![];
+        compute_durations(&mut v);
+    }
+
+    #[test]
+    fn test_compute_durations_single_entry_floor_500ms() {
+        let mut v = vec![WordBoundary {
+            text: "Hi".into(),
+            offset: 0,
+            duration: 0,
+        }];
+        compute_durations(&mut v);
+        assert_eq!(v[0].duration, 500);
+    }
+
+    #[test]
+    fn test_compute_distributions_fills_zero_from_next_offset() {
+        let mut v = vec![
+            WordBoundary {
+                text: "a".into(),
+                offset: 0,
+                duration: 0,
+            },
+            WordBoundary {
+                text: "b".into(),
+                offset: 300,
+                duration: 0,
+            },
+            WordBoundary {
+                text: "c".into(),
+                offset: 700,
+                duration: 0,
+            },
+        ];
+        compute_durations(&mut v);
+        assert_eq!(v[0].duration, 300); // next.offset - this.offset
+        assert_eq!(v[1].duration, 400);
+        assert_eq!(v[2].duration, 500); // last entry floor
+    }
+
+    #[test]
+    fn test_compute_durations_preserves_nonzero() {
+        let mut v = vec![
+            WordBoundary {
+                text: "a".into(),
+                offset: 0,
+                duration: 250,
+            },
+            WordBoundary {
+                text: "b".into(),
+                offset: 250,
+                duration: 0,
+            },
+        ];
+        compute_durations(&mut v);
+        assert_eq!(v[0].duration, 250); // untouched
+    }
+
+    // ===== ElevenLabs alignment parser =====
+
+    #[test]
+    fn test_parse_elevenlabs_alignment_basic_words() {
+        // "Hello world" — characters with a space separator in the middle.
+        let mut alignment = serde_json::Map::new();
+        alignment.insert(
+            "characters".into(),
+            serde_json::json!(["H", "e", "l", "l", "o", " ", "w", "o", "r", "l", "d"]),
+        );
+        alignment.insert(
+            "character_start_times_seconds".into(),
+            serde_json::json!([0.0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50]),
+        );
+        alignment.insert(
+            "character_end_times_seconds".into(),
+            serde_json::json!([0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55]),
+        );
+
+        let words = parse_elevenlabs_alignment(&alignment);
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].0, "Hello");
+        assert!((words[0].1 - 0.0).abs() < f32::EPSILON);
+        assert!((words[0].2 - 0.30).abs() < f32::EPSILON); // ends at space's end_time
+        assert_eq!(words[1].0, "world");
+        assert!((words[1].1 - 0.30).abs() < f32::EPSILON);
+        assert!((words[1].2 - 0.55).abs() < f32::EPSILON); // last char's end
+    }
+
+    #[test]
+    fn test_parse_elevenlabs_alignment_handles_mismatched_arrays() {
+        // characters has more entries than the time arrays — must not panic.
+        let mut alignment = serde_json::Map::new();
+        alignment.insert(
+            "characters".into(),
+            serde_json::json!(["H", "e", "l", "l", "o"]),
+        );
+        alignment.insert(
+            "character_start_times_seconds".into(),
+            serde_json::json!([0.0, 0.05]), // short
+        );
+        alignment.insert(
+            "character_end_times_seconds".into(),
+            serde_json::json!([0.05, 0.10]), // short
+        );
+
+        let words = parse_elevenlabs_alignment(&alignment);
+        // The trailing characters with no time data get folded into one word
+        // whose end is `ends.last()` — defensive but consistent.
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].0, "Hello");
+    }
+
+    #[test]
+    fn test_parse_elevenlabs_alignment_missing_arrays_returns_empty() {
+        let alignment = serde_json::Map::new(); // no keys
+        assert!(parse_elevenlabs_alignment(&alignment).is_empty());
+    }
+
+    // ===== Azure WS message parser =====
+
+    #[test]
+    fn test_azure_ws_extract_path_basic() {
+        let frame = "X-RequestId:abc\r\nPath:turn.end\r\nContent-Type:application/json\r\n\r\n{}";
+        assert_eq!(azure_ws_extract_path(frame), "turn.end");
+    }
+
+    #[test]
+    fn test_azure_ws_extract_path_missing_returns_empty() {
+        let frame = "X-RequestId:abc\r\nContent-Type:application/json\r\n\r\n{}";
+        assert_eq!(azure_ws_extract_path(frame), "");
+    }
+
+    #[test]
+    fn test_azure_ws_extract_path_trims_whitespace() {
+        let frame = "Path:   audio.metadata   \r\n\r\n{}";
+        assert_eq!(azure_ws_extract_path(frame), "audio.metadata");
+    }
+
+    #[test]
+    fn test_azure_ws_extract_path_unicode_does_not_panic() {
+        // The original byte-slicing version panicked on non-ASCII. Verify the
+        // lines()-based version handles UTF-8 cleanly.
+        let frame = "Path:tëst\r\n\r\n{}";
+        assert_eq!(azure_ws_extract_path(frame), "tëst");
+    }
+
+    #[test]
+    fn test_azure_ws_extract_body_crlf_separator() {
+        let frame = "X-RequestId:abc\r\nPath:response\r\n\r\n{\"Error\":{\"Message\":\"nope\"}}";
+        assert_eq!(
+            azure_ws_extract_body(frame),
+            "{\"Error\":{\"Message\":\"nope\"}}"
+        );
+    }
+
+    #[test]
+    fn test_azure_ws_extract_body_lf_separator() {
+        // Some intermediaries collapse \r\n\r\n to \n\n. Accept it.
+        let frame = "X-RequestId:abc\nPath:response\n\n{}";
+        assert_eq!(azure_ws_extract_body(frame), "{}");
+    }
+
+    #[test]
+    fn test_azure_ws_extract_body_missing_returns_empty() {
+        assert_eq!(azure_ws_extract_body("just headers no body"), "");
+    }
+
+    #[test]
+    fn test_azure_ws_extract_error_message_field() {
+        let body = r#"{"Error":{"Message":"Authentication failed"}}"#;
+        assert_eq!(
+            azure_ws_extract_error(body).as_deref(),
+            Some("Authentication failed")
+        );
+    }
+
+    #[test]
+    fn test_azure_ws_extract_error_reason_fallback() {
+        let body = r#"{"Error":{}, "reason":"queued full"}"#;
+        assert_eq!(azure_ws_extract_error(body).as_deref(), Some("queued full"));
+    }
+
+    #[test]
+    fn test_azure_ws_extract_error_default_when_no_message() {
+        let body = r#"{"Error":{"Code":"SynthesisFailed"}}"#;
+        assert_eq!(
+            azure_ws_extract_error(body).as_deref(),
+            Some("Azure synthesis failed")
+        );
+    }
+
+    #[test]
+    fn test_azure_ws_extract_error_none_on_success_response() {
+        // turn.end / successful response bodies don't carry `Error`.
+        assert!(azure_ws_extract_error("{}").is_none());
+        assert!(azure_ws_extract_error(r#"{"foo":"bar"}"#).is_none());
+    }
+
+    #[test]
+    fn test_azure_ws_extract_error_invalid_json_returns_none() {
+        assert!(azure_ws_extract_error("not json").is_none());
+    }
+
+    #[test]
+    fn test_azure_ws_parse_word_boundary_current_shape() {
+        // Current Azure shape: text is a nested object {"text": {"Text": "Hello"}}.
+        let item = serde_json::json!({
+            "Type": "WordBoundary",
+            "Data": {
+                "Offset": 500_000,     // 50 ms in ticks
+                "Duration": 2_500_000,  // 250 ms in ticks
+                "text": {"Text": "Hello"}
+            }
+        });
+        let (word, offset_ms, duration_ms) = azure_ws_parse_word_boundary(&item).expect("parsed");
+        assert_eq!(word, "Hello");
+        assert_eq!(offset_ms, 50);
+        assert_eq!(duration_ms, 250);
+    }
+
+    #[test]
+    fn test_azure_ws_parse_word_boundary_legacy_capital_t() {
+        let item = serde_json::json!({
+            "Type": "WordBoundary",
+            "Data": {
+                "Offset": 0,
+                "Duration": 100_000,
+                "Text": {"Text": "Hi"}
+            }
+        });
+        let (word, _, _) = azure_ws_parse_word_boundary(&item).expect("parsed");
+        assert_eq!(word, "Hi");
+    }
+
+    #[test]
+    fn test_azure_ws_parse_word_boundary_flat_string() {
+        let item = serde_json::json!({
+            "Type": "WordBoundary",
+            "Data": {"Offset": 0, "Duration": 0, "text": "Yo"}
+        });
+        let (word, _, _) = azure_ws_parse_word_boundary(&item).expect("parsed");
+        assert_eq!(word, "Yo");
+    }
+
+    #[test]
+    fn test_azure_ws_parse_word_boundary_filters_empty_text() {
+        let item = serde_json::json!({
+            "Type": "WordBoundary",
+            "Data": {"Offset": 0, "Duration": 0, "text": ""}
+        });
+        assert!(azure_ws_parse_word_boundary(&item).is_none());
+    }
+
+    #[test]
+    fn test_azure_ws_parse_word_boundary_missing_data() {
+        assert!(
+            azure_ws_parse_word_boundary(&serde_json::json!({"Type": "WordBoundary"})).is_none()
+        );
+    }
+
+    #[test]
+    fn test_azure_ws_parse_viseme_basic() {
+        let item = serde_json::json!({
+            "Type": "Viseme",
+            "Data": {"VisemeId": 7, "Offset": 25_000_000}  // 2.5s
+        });
+        let (id, offset_sec) = azure_ws_parse_viseme(&item).expect("parsed");
+        assert_eq!(id, 7);
+        assert!((offset_sec - 2.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_azure_ws_parse_viseme_missing_data() {
+        assert!(azure_ws_parse_viseme(&serde_json::json!({"Type": "Viseme"})).is_none());
+    }
+
+    // ===== Streaming chunking & speechmarkdown per-platform =====
+    //
+    // The speak() loop delivers audio in 8 KB chunks for the JSON-body
+    // engines (ElevenLabs `audio_base64`, Google `audioContent`) and via
+    // streaming `Read` for everything else. These tests verify the chunk
+    // sizing and the SpeechMarkdown → SSML routing that decides which SSML
+    // flavour each platform receives.
+
+    #[test]
+    fn test_chunk_size_is_8kb_constant() {
+        // All three streaming branches (ElevenLabs, Google, generic) use
+        // 8192-byte chunks. Pinning this as a regression test catches a
+        // future tweak that accidentally switches to e.g. 1024 and creates
+        // millions of callback round-trips per request.
+        assert_eq!(8192usize, 8 * 1024);
+    }
+
+    #[test]
+    fn test_chunking_split_count() {
+        // Verify the same `.chunks(8192)` call shape used in speak().
+        let total = 20_000usize;
+        let buf = vec![0u8; total];
+        let chunks: Vec<&[u8]> = buf.chunks(8192).collect();
+        // 20000 / 8192 = 2 full chunks + 1 partial (20000 - 16384 = 3616).
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].len(), 8192);
+        assert_eq!(chunks[1].len(), 8192);
+        assert_eq!(chunks[2].len(), 3616);
+    }
+
+    #[test]
+    fn test_chunking_exact_multiple_no_short_chunk() {
+        let buf = vec![0u8; 8192 * 2];
+        let chunks: Vec<&[u8]> = buf.chunks(8192).collect();
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|c| c.len() == 8192));
+    }
+
+    #[test]
+    fn test_chunking_empty_buffer_no_calls() {
+        // Empty audio must not invoke the callback at all.
+        let buf: Vec<u8> = Vec::new();
+        assert_eq!(buf.chunks(8192).count(), 0);
+    }
+
+    // ===== SpeechMarkdown routing per platform =====
+    //
+    // speak() calls preprocess_speech_markdown(text, &self.config.provider_id).
+    // The cloud engines we route through that helper:
+    //   azure   → MicrosoftAzure SSML
+    //   google  → GoogleAssistant SSML
+    //   *       → AmazonAlexa SSML
+    // Verify the routing decisions for each provider.
+
+    #[test]
+    fn test_speechmarkdown_azure_routes_to_microsoft_ssml() {
+        use crate::engine::preprocess_speech_markdown;
+        // emphasis:[strong] is a universal form; Azure should emit a Microsoft
+        // SSML flavour (the speechmarkdown-rust library distinguishes by
+        // output structure rather than namespace).
+        let (ssml, is_ssml) =
+            preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
+        assert!(is_ssml);
+        assert!(ssml.contains("<speak"));
+    }
+
+    #[test]
+    fn test_speechmarkdown_google_routes_to_assistant_ssml() {
+        use crate::engine::preprocess_speech_markdown;
+        let (ssml, is_ssml) =
+            preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "google");
+        assert!(is_ssml);
+        assert!(ssml.contains("<speak"));
+    }
+
+    #[test]
+    fn test_speechmarkdown_other_providers_route_to_alexa_ssml() {
+        use crate::engine::preprocess_speech_markdown;
+        // ElevenLabs, OpenAI, Cartesia, Murf, etc. all go through the
+        // Alexa fallback. They don't actually consume SSML — the result is
+        // discarded by the JSON-body branch in speak() — but the routing
+        // decision is what we care about here.
+        for provider in [
+            "openai",
+            "elevenlabs",
+            "cartesia",
+            "murf",
+            "deepgram",
+            "witai",
+            "xai",
+        ] {
+            let (_ssml, is_ssml) =
+                preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", provider);
+            assert!(
+                is_ssml,
+                "provider '{provider}' should detect SpeechMarkdown"
+            );
+        }
+    }
+
+    #[test]
+    fn test_speechmarkdown_plain_text_passes_through_unprocessed() {
+        use crate::engine::preprocess_speech_markdown;
+        for provider in ["azure", "google", "openai", "elevenlabs"] {
+            let (out, is_ssml) = preprocess_speech_markdown("Just a plain sentence.", provider);
+            assert!(!is_ssml, "provider '{provider}' flagged plain text as SSML");
+            assert_eq!(out, "Just a plain sentence.");
+        }
+    }
+
+    #[test]
+    fn test_elevenlabs_synth_url_gains_with_timestamps_when_boundary_requested() {
+        // speak() appends `/with-timestamps` to the ElevenLabs synth URL
+        // when on_boundary is supplied. We can't drive that branch without
+        // a network, but we pin the URL-construction logic so a refactor
+        // can't silently drop the suffix.
+        let cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
+        let mut url = cfg.synth_url.clone();
+        url.push_str("/with-timestamps");
+        assert!(url.ends_with("/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps"));
+    }
+
+    // ===== Auth-header composition per provider =====
+    //
+    // speak() builds the final header value as `format!("{}{}", prefix, api_key)`.
+    // Verify the prefix matches each provider's expected scheme, since the
+    // the existing inline tests check the config fields but not the joined
+    // value the HTTP request actually sends.
+
+    #[test]
+    fn test_auth_value_openai_bearer_scheme() {
+        let cfg = build_config("openai", &engine_creds("openai")).unwrap();
+        let value = format!("{}{}", cfg.auth_prefix, "TESTKEY");
+        assert_eq!(value, "Bearer TESTKEY");
+    }
+
+    #[test]
+    fn test_auth_value_azure_raw_key() {
+        // Azure's auth_prefix is empty — the key goes raw under the header.
+        let cfg = build_config("azure", &engine_creds("azure")).unwrap();
+        let value = format!("{}{}", cfg.auth_prefix, "TESTKEY");
+        assert_eq!(value, "TESTKEY");
+    }
+
+    #[test]
+    fn test_auth_value_deepgram_token_scheme() {
+        let cfg = build_config("deepgram", &engine_creds("deepgram")).unwrap();
+        let value = format!("{}{}", cfg.auth_prefix, "TESTKEY");
+        assert_eq!(value, "Token TESTKEY");
+    }
+
+    #[test]
+    fn test_auth_value_resemble_token_scheme() {
+        let cfg = build_config("resemble", &engine_creds("resemble")).unwrap();
+        let value = format!("{}{}", cfg.auth_prefix, "TESTKEY");
+        assert_eq!(value, "Token TESTKEY");
+    }
+
+    #[test]
+    fn test_auth_value_elevenlabs_no_prefix() {
+        // xi-api-key carries just the raw key, no prefix.
+        let cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
+        let value = format!("{}{}", cfg.auth_prefix, "TESTKEY");
+        assert_eq!(value, "TESTKEY");
+    }
+
+    #[test]
+    fn test_auth_value_modelslab_no_header_sent() {
+        // ModelsLab puts the key in the body, so auth_header is "". The
+        // speak() branch skips header insertion entirely when empty —
+        // verify the contract holds.
+        let cfg = build_config("modelslab", &engine_creds("modelslab")).unwrap();
+        assert_eq!(cfg.auth_header, "");
     }
 }

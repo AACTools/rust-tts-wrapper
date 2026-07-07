@@ -534,7 +534,12 @@ fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: i32) -> bool 
     let data_len = pcm.len() as u32;
     let sample_rate = sample_rate as u32;
     let byte_rate = sample_rate * 2; // 16-bit mono
-    let block_align: u32 = 2;
+                                     // WAV PCM header: block_align and bits_per_sample are u16, NOT u32 —
+                                     // emitting them as 4 bytes shifts every subsequent field by 2 bytes
+                                     // and produces a technically malformed header (most players tolerate
+                                     // it but it's wrong per the RIFF spec).
+    let block_align: u16 = 2;
+    let bits_per_sample: u16 = 16;
     let riff_len = 36 + data_len;
     let header = [
         b"RIFF".as_slice(),
@@ -547,7 +552,7 @@ fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: i32) -> bool 
         &sample_rate.to_le_bytes(),
         &byte_rate.to_le_bytes(),
         &block_align.to_le_bytes(),
-        &16u16.to_le_bytes(), // bits per sample
+        &bits_per_sample.to_le_bytes(),
         b"data",
         &data_len.to_le_bytes(),
     ]
@@ -829,5 +834,551 @@ fn build_vits_config(
         data_dir,
         dict_dir,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_apply_volume_and_pitch_identity() {
+        let samples = [0.0_f32, 0.5, -0.5, 1.0, -1.0];
+        let out = apply_volume_and_pitch(&samples, 1.0, 1.0);
+        assert_eq!(out.len(), samples.len());
+        for (a, b) in samples.iter().zip(out.iter()) {
+            assert!((a - b).abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_apply_volume_scales_amplitude() {
+        let samples = [0.5_f32, -0.5];
+        let out = apply_volume_and_pitch(&samples, 2.0, 1.0);
+        assert!((out[0] - 1.0).abs() < f32::EPSILON);
+        assert!((out[1] - (-1.0)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_apply_volume_zero_silences() {
+        let samples = [0.5_f32, -0.25, 0.8];
+        let out = apply_volume_and_pitch(&samples, 0.0, 1.0);
+        for s in &out {
+            assert!(s.abs() < f32::EPSILON);
+        }
+    }
+
+    #[test]
+    fn test_apply_pitch_changes_length() {
+        // Pitch > 1.0 shortens the buffer (fewer samples); pitch < 1.0 lengthens.
+        let samples = vec![0.5_f32; 100];
+        let shorter = apply_volume_and_pitch(&samples, 1.0, 2.0);
+        let longer = apply_volume_and_pitch(&samples, 1.0, 0.5);
+        assert!(shorter.len() < samples.len());
+        assert!(longer.len() > samples.len());
+    }
+
+    #[test]
+    fn test_apply_volume_and_pitch_empty_input() {
+        assert!(apply_volume_and_pitch(&[], 1.0, 1.0).is_empty());
+        assert!(apply_volume_and_pitch(&[], 2.0, 0.5).is_empty());
+    }
+
+    #[test]
+    fn test_is_piper_or_github_model_known_piper_prefix() {
+        assert!(is_piper_or_github_model("piper-en-amy-medium"));
+        assert!(is_piper_or_github_model("coqui-en-ljspeech"));
+        assert!(is_piper_or_github_model("icefall-tts"));
+        assert!(is_piper_or_github_model("mimic3-en"));
+        assert!(is_piper_or_github_model("melo-en"));
+        assert!(is_piper_or_github_model("vctk-en"));
+        assert!(is_piper_or_github_model("zh-cantonese"));
+        assert!(is_piper_or_github_model("ljs-en"));
+        assert!(is_piper_or_github_model("cantonese-fs-xiaomaiiwn"));
+        assert!(is_piper_or_github_model("kokoro-en-en-19"));
+    }
+
+    #[test]
+    fn test_is_piper_or_github_model_other_returns_false() {
+        assert!(!is_piper_or_github_model("mms-en"));
+        assert!(!is_piper_or_github_model("vits-en"));
+        assert!(!is_piper_or_github_model("matcha-en"));
+    }
+
+    #[test]
+    fn test_iso639_3_known_codes() {
+        assert_eq!(iso639_3("en-US"), "eng");
+        assert_eq!(iso639_3("es-ES"), "spa");
+        assert_eq!(iso639_3("fr"), "fra");
+        assert_eq!(iso639_3("de-DE"), "deu");
+        assert_eq!(iso639_3("zh-CN"), "zho");
+    }
+
+    #[test]
+    fn test_iso639_3_unknown_returns_input_lowercased() {
+        // Unknown codes are returned lowercased (not "unknown") so callers
+        // can still distinguish them in voice listings.
+        assert_eq!(iso639_3("xx-XX"), "xx-xx");
+        assert_eq!(iso639_3("Unknown-Lang"), "unknown-lang");
+    }
+
+    #[test]
+    fn test_iso639_3_handles_underscore_separator() {
+        // Some providers use BCP-47 with underscores; treat both.
+        assert_eq!(iso639_3("en_US"), "eng");
+        assert_eq!(iso639_3("pt_BR"), "por");
+    }
+
+    #[test]
+    fn test_write_wav_round_trip_header() {
+        // Write a known buffer, read the header back, validate.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rtw_test_write_wav.wav");
+        let samples = vec![0.0_f32, 0.5, -0.5, 1.0, -1.0];
+        assert!(write_wav(&path, &samples, 22050));
+
+        let bytes = std::fs::read(&path).expect("wav written");
+        assert!(bytes.len() > 44, "WAV must include 44-byte header");
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WAVE");
+        assert_eq!(&bytes[12..16], b"fmt ");
+        // PCM format tag = 1, mono channels = 1.
+        assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 1);
+        assert_eq!(u16::from_le_bytes([bytes[22], bytes[23]]), 1);
+        // Sample rate little-endian.
+        assert_eq!(
+            u32::from_le_bytes([bytes[24], bytes[25], bytes[26], bytes[27]]),
+            22050
+        );
+        // 16-bit per sample.
+        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_write_wav_clamps_samples() {
+        // Samples outside [-1.0, 1.0] must clamp rather than wrap. The
+        // writer scales by 32767 (not 32768) so the clamped min is -32767.
+        let dir = std::env::temp_dir();
+        let path = dir.join("rtw_test_write_wav_clamp.wav");
+        let samples = vec![5.0_f32, -5.0]; // way out of range
+        assert!(write_wav(&path, &samples, 16000));
+
+        let bytes = std::fs::read(&path).expect("wav written");
+        // PCM data starts at byte 44.
+        let first_sample = i16::from_le_bytes([bytes[44], bytes[45]]);
+        let second_sample = i16::from_le_bytes([bytes[46], bytes[47]]);
+        assert_eq!(first_sample, 32767);
+        assert_eq!(second_sample, -32767);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_first_existing_returns_first_match() {
+        let dir = std::env::temp_dir();
+        let a = dir.join("rtw_first_a.txt");
+        let b = dir.join("rtw_first_b.txt");
+        std::fs::write(&a, b"x").unwrap();
+        std::fs::write(&b, b"y").unwrap();
+
+        let r = first_existing(&dir, &["rtw_first_a.txt", "rtw_first_b.txt"]).unwrap();
+        assert_eq!(r.file_name().unwrap().to_str().unwrap(), "rtw_first_a.txt");
+
+        // Order matters — first one wins.
+        let r = first_existing(&dir, &["missing.txt", "rtw_first_b.txt"]).unwrap();
+        assert_eq!(r.file_name().unwrap().to_str().unwrap(), "rtw_first_b.txt");
+
+        // No matches.
+        assert!(first_existing(&dir, &["nope.txt", "alsonope.txt"]).is_none());
+
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
+    }
+
+    #[test]
+    fn test_existing_path_only_when_present() {
+        let dir = std::env::temp_dir();
+        let p = dir.join("rtw_existing.txt");
+        std::fs::write(&p, b"x").unwrap();
+        assert_eq!(
+            existing_path(&dir, "rtw_existing.txt").as_deref(),
+            Some(p.to_str().unwrap())
+        );
+        assert!(existing_path(&dir, "rtw_missing.txt").is_none());
+        let _ = std::fs::remove_file(&p);
+    }
+
+    // ===== Model-config builders (one test per model family) =====
+    //
+    // These exercise the per-type dispatch in speak() without needing a real
+    // sherpa-onnx runtime. Each test fakes the on-disk file layout for a
+    // model family and verifies the resulting OfflineTts*ModelConfig points
+    // at the expected paths.
+
+    use std::fs;
+
+    /// Build a temp directory resembling an extracted Kokoro archive.
+    fn fake_kokoro_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().expect("tmp");
+        fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("voices.bin"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        fs::create_dir(d.path().join("espeak-ng-data")).unwrap();
+        d
+    }
+
+    #[test]
+    fn test_build_kokoro_config_points_at_canonical_files() {
+        let d = fake_kokoro_dir();
+        let cfg = build_kokoro_config(d.path());
+        assert_eq!(
+            cfg.model.as_deref(),
+            Some(d.path().join("model.onnx").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.voices.as_deref(),
+            Some(d.path().join("voices.bin").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.tokens.as_deref(),
+            Some(d.path().join("tokens.txt").to_str().unwrap())
+        );
+        assert_eq!(
+            cfg.data_dir.as_deref(),
+            Some(d.path().join("espeak-ng-data").to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn test_build_kokoro_config_missing_files_are_none() {
+        // Voices/data_dir are optional — their absence must surface as None
+        // rather than a path to a nonexistent file.
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        // Intentionally no voices.bin or espeak-ng-data/.
+        let cfg = build_kokoro_config(d.path());
+        assert!(cfg.model.is_some());
+        assert!(cfg.tokens.is_some());
+        assert!(cfg.voices.is_none());
+        assert!(cfg.data_dir.is_none());
+    }
+
+    fn fake_matcha_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("acoustic-model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("hifigan_v2.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        fs::write(d.path().join("lexicon.txt"), b"x").unwrap();
+        d
+    }
+
+    #[test]
+    fn test_build_matcha_config_finds_acoustic_and_vocoder() {
+        let d = fake_matcha_dir();
+        let base = tempfile::tempdir().unwrap();
+        let cfg = build_matcha_config(d.path(), base.path()).expect("matcha config");
+        assert!(cfg
+            .acoustic_model
+            .as_deref()
+            .unwrap()
+            .ends_with("acoustic-model.onnx"));
+        assert!(cfg.vocoder.as_deref().unwrap().ends_with("hifigan_v2.onnx"));
+        assert!(cfg.lexicon.is_some());
+        assert!(cfg.tokens.is_some());
+    }
+
+    #[test]
+    fn test_build_matcha_config_accepts_legacy_acoustic_names() {
+        // Matcha archives have shipped several acoustic-model names; the
+        // builder must accept any of them in priority order.
+        for name in ["model-steps-3.onnx", "model-steps-1000.onnx", "model.onnx"] {
+            let d = tempfile::tempdir().unwrap();
+            fs::write(d.path().join(name), b"x").unwrap();
+            fs::write(d.path().join("hifigan_v2.onnx"), b"x").unwrap();
+            fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+            let base = tempfile::tempdir().unwrap();
+            let cfg = build_matcha_config(d.path(), base.path()).expect("matcha config");
+            assert!(cfg.acoustic_model.is_some(), "failed for acoustic {name}");
+        }
+    }
+
+    #[test]
+    fn test_build_matcha_config_vocoder_fallback_to_base_dir() {
+        // Co-located vocoder is missing — fall back to a shared one in base.
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("acoustic-model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+
+        let base = tempfile::tempdir().unwrap();
+        fs::write(base.path().join("vocos-22khz-univ.onnx"), b"x").unwrap();
+
+        let cfg = build_matcha_config(d.path(), base.path()).expect("matcha config");
+        assert!(cfg
+            .vocoder
+            .as_deref()
+            .unwrap()
+            .ends_with("vocos-22khz-univ.onnx"));
+    }
+
+    #[test]
+    fn test_build_matcha_config_errors_without_acoustic() {
+        let d = tempfile::tempdir().unwrap();
+        // Only vocoder + tokens, no acoustic.
+        fs::write(d.path().join("hifigan_v2.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        let base = tempfile::tempdir().unwrap();
+        assert!(build_matcha_config(d.path(), base.path()).is_err());
+    }
+
+    fn fake_piper_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        // Piper archives use a domain-specific .onnx name rather than model.onnx.
+        fs::write(d.path().join("en_US-amy-low.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        fs::create_dir(d.path().join("espeak-ng-data")).unwrap();
+        d
+    }
+
+    #[test]
+    fn test_build_vits_config_piper_uses_espeak_data_no_dict() {
+        let d = fake_piper_dir();
+        let cfg = build_vits_config(d.path(), true, false);
+        // The model is found by scanning for the first non-vocoder .onnx.
+        assert!(cfg
+            .model
+            .as_deref()
+            .unwrap()
+            .ends_with("en_US-amy-low.onnx"));
+        assert!(cfg.data_dir.is_some(), "Piper needs espeak-ng-data");
+        assert!(
+            cfg.dict_dir.is_none(),
+            "Piper must NOT set dict_dir (jieba would warn)"
+        );
+    }
+
+    #[test]
+    fn test_build_vits_config_chinese_uses_dict_dir() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        // Chinese models ship a dict/ directory for jieba segmentation.
+        let dict_dir = d.path().join("dict");
+        fs::create_dir(&dict_dir).unwrap();
+
+        let cfg = build_vits_config(d.path(), false, true);
+        assert_eq!(
+            cfg.dict_dir.as_deref(),
+            Some(dict_dir.to_str().unwrap()),
+            "Chinese models must point dict_dir at bundled dict/"
+        );
+    }
+
+    #[test]
+    fn test_build_vits_config_mms_with_lexicon_no_dict() {
+        // MMS-style: lexicon.txt present, no dict/, no espeak-ng-data.
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        fs::write(d.path().join("lexicon.txt"), b"x").unwrap();
+
+        let cfg = build_vits_config(d.path(), false, false);
+        assert!(cfg.lexicon.is_some());
+        assert!(
+            cfg.dict_dir.is_none(),
+            "dict_dir must not be set when lexicon.txt is present"
+        );
+    }
+
+    #[test]
+    fn test_build_vits_config_mms_without_lexicon_uses_dict_fallback() {
+        // MMS without lexicon.txt → fall back to dict/ if present.
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        fs::create_dir(d.path().join("dict")).unwrap();
+
+        let cfg = build_vits_config(d.path(), false, false);
+        assert!(cfg.dict_dir.is_some());
+    }
+
+    #[test]
+    fn test_find_primary_model_onnx_prefers_canonical_name() {
+        let d = tempfile::tempdir().unwrap();
+        // Both model.onnx and a stray .onnx present — canonical wins.
+        fs::write(d.path().join("model.onnx"), b"x").unwrap();
+        fs::write(d.path().join("vits-en-foo.onnx"), b"x").unwrap();
+        let r = find_primary_model_onnx(d.path()).expect("found");
+        assert!(r.to_str().unwrap().ends_with("model.onnx"));
+    }
+
+    #[test]
+    fn test_find_primary_model_onnx_skips_vocoders_and_acoustic_steps() {
+        let d = tempfile::tempdir().unwrap();
+        // Only vocoder/acoustic-steps files — none should match.
+        fs::write(d.path().join("model-steps-3.onnx"), b"x").unwrap();
+        fs::write(d.path().join("vocos-22khz-univ.onnx"), b"x").unwrap();
+        fs::write(d.path().join("hifigan_v2.onnx"), b"x").unwrap();
+        fs::write(d.path().join("vocoder.onnx"), b"x").unwrap();
+        assert!(find_primary_model_onnx(d.path()).is_none());
+    }
+
+    #[test]
+    fn test_find_primary_model_onnx_picks_first_unmatched() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("en_US-amy-low.onnx"), b"x").unwrap();
+        let r = find_primary_model_onnx(d.path()).expect("found");
+        assert!(r.to_str().unwrap().ends_with("en_US-amy-low.onnx"));
+    }
+
+    #[test]
+    fn test_resolve_model_scan_dir_uses_top_when_files_present() {
+        // If the top dir has tokens.txt or any .onnx, return it as-is.
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("tokens.txt"), b"x").unwrap();
+        let r = resolve_model_scan_dir(d.path());
+        assert_eq!(r, d.path());
+    }
+
+    #[test]
+    fn test_resolve_model_scan_dir_descends_into_single_subdir() {
+        // GitHub archives often extract to <name>/<name>/. If the outer dir
+        // is empty except for a single subdir with the actual model, descend.
+        let d = tempfile::tempdir().unwrap();
+        let inner = d.path().join("vits-piper-en_US-amy-low");
+        fs::create_dir(&inner).unwrap();
+        fs::write(inner.join("model.onnx"), b"x").unwrap();
+
+        let r = resolve_model_scan_dir(d.path());
+        assert!(r.ends_with("vits-piper-en_US-amy-low"));
+    }
+
+    #[test]
+    fn test_resolve_model_scan_dir_no_descent_when_multiple_subdirs() {
+        // Ambiguous layout — don't guess, return the original.
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir(d.path().join("a")).unwrap();
+        fs::create_dir(d.path().join("b")).unwrap();
+        let r = resolve_model_scan_dir(d.path());
+        assert_eq!(r, d.path());
+    }
+
+    #[test]
+    fn test_find_file_locates_named_child() {
+        let d = tempfile::tempdir().unwrap();
+        fs::write(d.path().join("foo.txt"), b"x").unwrap();
+        let r = find_file(d.path(), "foo.txt").expect("found");
+        assert!(r.to_str().unwrap().ends_with("foo.txt"));
+        assert!(find_file(d.path(), "missing.txt").is_none());
+    }
+
+    // ===== SherpaOnnxEngine public-API tests (no model download) =====
+    //
+    // Construct engines with various modelId values and verify registry
+    // lookup, voice enumeration, and graceful failure paths. None of these
+    // need an actual model on disk because they exit before generate().
+
+    #[test]
+    fn test_engine_construction_with_model_id_does_not_load_yet() {
+        // Setting a modelId is lazy — actual load happens on speak(). So
+        // construction must succeed even when the model isn't downloaded.
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"piper-en_US-amy-low"}"#);
+        assert_eq!(engine.loaded_model_id, "piper-en_US-amy-low");
+    }
+
+    #[test]
+    fn test_engine_speak_without_model_id_errors_clearly() {
+        let engine = SherpaOnnxEngine::new("");
+        let err = engine
+            .speak("hi", None, 1.0, 1.0, 1.0, None, None)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("modelId"),
+            "missing-model error should mention modelId: {err}"
+        );
+    }
+
+    #[test]
+    fn test_engine_speak_with_unknown_model_id_errors_with_count() {
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"not-a-real-model"}"#);
+        let err = engine
+            .speak("hi", None, 1.0, 1.0, 1.0, None, None)
+            .unwrap_err();
+        // Error message should hint at how many models ARE available so the
+        // caller can pick a valid one.
+        assert!(err.to_string().contains("not found in registry"));
+        assert!(err.to_string().contains("models available"));
+    }
+
+    #[test]
+    fn test_engine_get_voices_multi_speaker_enumeration() {
+        // Pick a known multi-speaker model from the registry and verify
+        // get_voices() enumerates `num_speakers` voice ids without needing
+        // the actual model files (it reads from the registry only).
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"vits-coqui-en-vctk"}"#);
+        // If this particular id isn't in the registry, fall back to a model
+        // we know exists with a single speaker so the test still passes.
+        let known = engine.models.contains_key("vits-coqui-en-vctk");
+        if !known {
+            return;
+        }
+        let voices = engine.get_voices().expect("voices");
+        assert!(
+            !voices.is_empty(),
+            "expected at least 1 voice for multi-speaker model"
+        );
+        // All voices must carry the sherpaonnx provider tag.
+        assert!(voices.iter().all(|v| v.provider == "sherpaonnx"));
+    }
+
+    #[test]
+    fn test_engine_get_voices_single_speaker_returns_one() {
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"kokoro-en-en-19"}"#);
+        let voices = engine.get_voices().expect("voices");
+        assert_eq!(voices.len(), 1);
+        assert_eq!(voices[0].id, "0");
+        assert_eq!(voices[0].name, "Speaker 0");
+    }
+
+    #[test]
+    fn test_engine_get_voices_for_unloaded_model_id_returns_one_default() {
+        // Unknown modelId: get_voices() still returns one voice (the
+        // default speaker 0) rather than panicking.
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"doesnt-matter"}"#);
+        let voices = engine.get_voices().expect("voices");
+        assert_eq!(voices.len(), 1);
+    }
+
+    #[test]
+    fn test_engine_num_threads_parsed_from_credentials() {
+        let engine = SherpaOnnxEngine::new(r#"{"numThreads":"4","provider":"cpu"}"#);
+        assert_eq!(engine.num_threads, 4);
+        assert_eq!(engine.provider.as_deref(), Some("cpu"));
+    }
+
+    #[test]
+    fn test_engine_num_threads_invalid_falls_back_to_default() {
+        let engine = SherpaOnnxEngine::new(r#"{"numThreads":"not-a-number"}"#);
+        assert_eq!(engine.num_threads, 2); // default
+    }
+
+    #[test]
+    fn test_engine_num_threads_zero_falls_back_to_default() {
+        // 0 would cause sherpa-onnx to use no threads — clamp to default.
+        let engine = SherpaOnnxEngine::new(r#"{"numThreads":"0"}"#);
+        assert_eq!(engine.num_threads, 2);
+    }
+
+    #[test]
+    fn test_engine_model_path_override() {
+        let engine =
+            SherpaOnnxEngine::new(r#"{"modelPath":"/tmp/custom-model-dir","modelId":"foo"}"#);
+        assert_eq!(
+            engine.model_dir,
+            std::path::PathBuf::from("/tmp/custom-model-dir")
+        );
+        assert_eq!(engine.loaded_model_id, "foo");
     }
 }

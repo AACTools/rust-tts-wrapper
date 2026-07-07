@@ -1,0 +1,419 @@
+//! Live cloud TTS tests that need real credentials.
+//!
+//! THIS FILE IS GITIGNORED — copy this template to tests/live_cloud.rs and
+//! adapt. The .env.example file lists every env var referenced here.
+//!
+//! All tests are #[ignore]-d so they never run by accident in CI. Run with:
+//!
+//!     cargo test --test live_cloud --features cloud -- --ignored --nocapture
+//!
+//! Or via the helper script (also gitignored):
+//!
+//!     ./run-live-tests.sh
+//!
+//! What these tests verify that the offline suite can't:
+//!   - Google v1beta1 real timepoints (boundary offset == audio frame offset)
+//!   - Azure WebSocket word-boundary turn protocol
+//!   - ElevenLabs /with-timestamps character alignment
+//!   - Streaming chunk size & count across providers
+//!   - SpeechMarkdown end-to-end per platform (Azure Microsoft SSML,
+//!     Google Assistant SSML, others Alexa SSML)
+//!   - check_credentials() returns true with valid keys
+
+#![allow(clippy::all, clippy::pedantic, clippy::float_cmp)]
+
+use rust_tts_wrapper::engine::TtsEngine;
+use rust_tts_wrapper::factory::create_engine;
+use std::sync::{Arc, Mutex};
+
+/// Build an engine or skip the test cleanly when the env var isn't set.
+macro_rules! require_engine {
+    ($id:expr, $creds_json:expr, $env_var:expr) => {{
+        if std::env::var($env_var).is_err() {
+            eprintln!("skipping: set {} to run this test", $env_var);
+            return;
+        }
+        create_engine($id, $creds_json).expect("engine")
+    }};
+}
+
+struct AudioSink {
+    chunks: Vec<usize>,
+    total: usize,
+}
+impl AudioSink {
+    fn new() -> Self {
+        Self {
+            chunks: Vec::new(),
+            total: 0,
+        }
+    }
+}
+
+struct BoundarySink {
+    words: Vec<(String, f32, f32)>,
+}
+impl BoundarySink {
+    fn new() -> Self {
+        Self { words: Vec::new() }
+    }
+}
+
+// ===== Google — real timepoints =====
+
+#[test]
+#[ignore]
+fn google_real_timepoints_match_words() {
+    let key = std::env::var("GOOGLE_TTS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping: GOOGLE_TTS_API_KEY not set");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("google", &creds).expect("google engine");
+    let sink = Arc::new(Mutex::new(BoundarySink::new()));
+    let s = sink.clone();
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+        s.lock().unwrap().words.push((w.into(), st, e));
+    };
+    let text = "Hello world testing";
+    engine
+        .speak(text, Some("en-US-Wavenet-D"), 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .expect("google speak");
+
+    let words = sink.lock().unwrap().words.clone();
+    let expected: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(words.len(), expected.len(), "one real timepoint per word");
+    // Real (not estimated) timing: offsets must be non-zero after the first
+    // word and strictly increasing.
+    for w in words.windows(2) {
+        assert!(w[1].1 > w[0].1, "real timepoints must be strictly increasing");
+    }
+}
+
+#[test]
+#[ignore]
+fn google_check_credentials_returns_true_with_valid_key() {
+    let key = std::env::var("GOOGLE_TTS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("google", &creds).expect("google");
+    assert!(engine.check_credentials().unwrap_or(false));
+}
+
+#[test]
+#[ignore]
+fn google_voice_list_nonempty() {
+    let key = std::env::var("GOOGLE_TTS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("google", &creds).expect("google");
+    let voices = engine.get_voices().expect("voices");
+    assert!(!voices.is_empty());
+    assert!(voices.iter().any(|v| v.id.contains("Wavenet")));
+}
+
+#[test]
+#[ignore]
+fn google_streaming_chunks_are_at_most_8kb() {
+    let key = std::env::var("GOOGLE_TTS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("google", &creds).expect("google");
+    let sink = Arc::new(Mutex::new(AudioSink::new()));
+    let s = sink.clone();
+    let mut cb = move |c: &[u8]| {
+        let mut sink = s.lock().unwrap();
+        sink.chunks.push(c.len());
+        sink.total += c.len();
+    };
+    engine
+        .speak(
+            "This is a longer sentence to produce multiple streaming chunks.",
+            Some("en-US-Wavenet-D"),
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+        )
+        .expect("speak");
+    let sink = sink.lock().unwrap();
+    assert!(sink.total > 0);
+    assert!(sink.chunks.iter().all(|&n| n <= 8192), "chunk > 8KB leaked");
+}
+
+// ===== Azure — real WebSocket word boundaries =====
+
+#[test]
+#[ignore]
+fn azure_ws_real_word_boundaries_fire() {
+    let key = std::env::var("AZURE_SUBSCRIPTION_KEY").unwrap_or_default();
+    let region = std::env::var("AZURE_REGION").unwrap_or_else(|_| "eastus".into());
+    if key.is_empty() {
+        eprintln!("skipping: AZURE_SUBSCRIPTION_KEY not set");
+        return;
+    }
+    let creds = format!(r#"{{"subscriptionKey":"{key}","region":"{region}"}}"#);
+    let engine = create_engine("azure", &creds).expect("azure");
+    let sink = Arc::new(Mutex::new(BoundarySink::new()));
+    let s = sink.clone();
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+        s.lock().unwrap().words.push((w.into(), st, e));
+    };
+    let text = "Azure WebSocket real word boundary test.";
+    engine
+        .speak(text, Some("en-US-AriaNeural"), 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .expect("azure speak");
+
+    let words = sink.lock().unwrap().words.clone();
+    assert!(!words.is_empty(), "Azure WS should emit real boundaries");
+    // Real boundaries fire roughly at audio-frame time — they're non-zero
+    // for words after the first and strictly increasing.
+    assert!(words.windows(2).all(|w| w[0].1 < w[1].1));
+}
+
+#[test]
+#[ignore]
+fn azure_speechmarkdown_to_microsoft_ssml() {
+    let key = std::env::var("AZURE_SUBSCRIPTION_KEY").unwrap_or_default();
+    let region = std::env::var("AZURE_REGION").unwrap_or_else(|_| "eastus".into());
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"subscriptionKey":"{key}","region":"{region}"}}"#);
+    let engine = create_engine("azure", &creds).expect("azure");
+    engine
+        .speak(
+            "Hello (world)[emphasis:\"strong\"]",
+            Some("en-US-AriaNeural"),
+            1.0,
+            1.0,
+            1.0,
+            None,
+            None,
+        )
+        .expect("speechmarkdown should not break Azure synthesis");
+}
+
+#[test]
+#[ignore]
+fn azure_voice_list_nonempty() {
+    let key = std::env::var("AZURE_SUBSCRIPTION_KEY").unwrap_or_default();
+    let region = std::env::var("AZURE_REGION").unwrap_or_else(|_| "eastus".into());
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"subscriptionKey":"{key}","region":"{region}"}}"#);
+    let engine = create_engine("azure", &creds).expect("azure");
+    let voices = engine.get_voices().expect("voices");
+    assert!(!voices.is_empty());
+    assert!(voices.iter().any(|v| v.id.starts_with("en-US-")));
+}
+
+// ===== ElevenLabs — real character alignment =====
+
+#[test]
+#[ignore]
+fn elevenlabs_real_alignment_groups_into_words() {
+    let key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping: ELEVENLABS_API_KEY not set");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("elevenlabs", &creds).expect("elevenlabs");
+    let sink = Arc::new(Mutex::new(BoundarySink::new()));
+    let s = sink.clone();
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+        s.lock().unwrap().words.push((w.into(), st, e));
+    };
+    let text = "Hello world testing";
+    engine
+        .speak(text, None, 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .expect("elevenlabs speak");
+
+    let words = sink.lock().unwrap().words.clone();
+    let expected: Vec<&str> = text.split_whitespace().collect();
+    assert_eq!(words.len(), expected.len());
+    for w in words.windows(2) {
+        assert!(w[1].1 >= w[0].1, "alignment must be monotonic");
+    }
+}
+
+#[test]
+#[ignore]
+fn elevenlabs_streaming_audio_chunked() {
+    let key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("elevenlabs", &creds).expect("elevenlabs");
+    let sink = Arc::new(Mutex::new(AudioSink::new()));
+    let s = sink.clone();
+    let mut cb = move |c: &[u8]| {
+        let mut sink = s.lock().unwrap();
+        sink.chunks.push(c.len());
+        sink.total += c.len();
+    };
+    engine
+        .speak(
+            "Longer text to produce several 8KB chunks of MP3 audio.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+        )
+        .expect("elevenlabs speak");
+    let sink = sink.lock().unwrap();
+    assert!(sink.total > 0);
+    assert!(sink.chunks.iter().all(|&n| n <= 8192));
+}
+
+// ===== OpenAI — basic streaming + check_credentials =====
+
+#[test]
+#[ignore]
+fn openai_check_credentials() {
+    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("openai", &creds).expect("openai");
+    // OpenAI has no voice list endpoint — check_credentials() should still
+    // return Ok(false) without panicking.
+    let _ = engine.check_credentials();
+}
+
+#[test]
+#[ignore]
+fn openai_synthesises_with_default_voice() {
+    let key = std::env::var("OPENAI_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("openai", &creds).expect("openai");
+    let total = Arc::new(Mutex::new(0usize));
+    let t = total.clone();
+    let mut cb = move |c: &[u8]| {
+        *t.lock().unwrap() += c.len();
+    };
+    engine
+        .speak("Hello world", None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .expect("openai speak");
+    assert!(*total.lock().unwrap() > 0);
+}
+
+// ===== Watson — Basic auth round-trip =====
+
+#[test]
+#[ignore]
+fn watson_voice_list_with_basic_auth() {
+    let key = std::env::var("WATSON_API_KEY").unwrap_or_default();
+    let region = std::env::var("WATSON_REGION").unwrap_or_else(|_| "eu-gb".into());
+    let instance = std::env::var("WATSON_INSTANCE_ID").unwrap_or_default();
+    if key.is_empty() || instance.is_empty() {
+        eprintln!("skipping: WATSON_API_KEY/WATSON_INSTANCE_ID not set");
+        return;
+    }
+    let creds = format!(
+        r#"{{"apiKey":"{key}","region":"{region}","instanceId":"{instance}"}}"#
+    );
+    let engine = create_engine("watson", &creds).expect("watson");
+    let voices = engine.get_voices().expect("watson voices");
+    assert!(!voices.is_empty());
+    assert!(voices.iter().all(|v| v.provider == "watson"));
+}
+
+// ===== Cartesia — voice list endpoint + streaming =====
+
+#[test]
+#[ignore]
+fn cartesia_voice_list_and_synth() {
+    let key = std::env::var("CARTESIA_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping: CARTESIA_API_KEY not set");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    let engine = create_engine("cartesia", &creds).expect("cartesia");
+    let voices = engine.get_voices().expect("cartesia voices");
+    assert!(!voices.is_empty());
+
+    let total = Arc::new(Mutex::new(0usize));
+    let t = total.clone();
+    let mut cb = move |c: &[u8]| {
+        *t.lock().unwrap() += c.len();
+    };
+    engine
+        .speak("Hello world", None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .expect("cartesia speak");
+    assert!(*total.lock().unwrap() > 0);
+}
+
+// ===== Generic per-provider smoke test =====
+//
+// Drives every provider that has its key in env through the same shape:
+// construct, synth_to_bytes, assert non-empty. Catches regressions in
+// auth/URL/body shapes that single-provider tests might miss.
+
+#[test]
+#[ignore]
+fn per_provider_smoke_matrix() {
+    let cases: Vec<(&str, &str, &str)> = vec![
+        ("openai", "OPENAI_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("elevenlabs", "ELEVENLABS_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("cartesia", "CARTESIA_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("deepgram", "DEEPGRAM_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("fishaudio", "FISHAUDIO_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("hume", "HUME_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("mistral", "MISTRAL_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("murf", "MURF_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("resemble", "RESEMBLE_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("unrealspeech", "UNREALSPEECH_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("upliftai", "UPLIFTAI_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("xai", "XAI_API_KEY", r#"{"apiKey":"$K"}"#),
+        ("witai", "WITAI_TOKEN", r#"{"token":"$K"}"#),
+    ];
+
+    for (id, env_var, template) in cases {
+        let key = match std::env::var(env_var) {
+            Ok(k) if !k.is_empty() => k,
+            _ => {
+                eprintln!("skipping {id}: {env_var} not set");
+                continue;
+            }
+        };
+        let creds = template.replace("$K", &key);
+        let engine = match create_engine(id, &creds) {
+            Some(e) => e,
+            None => {
+                panic!("create_engine({id}) returned None");
+            }
+        };
+        match engine.synth_to_bytes("Hello world.", None, 1.0, 1.0, 1.0) {
+            Ok(audio) => assert!(!audio.is_empty(), "{id} produced empty audio"),
+            Err(e) => panic!("{id} synth error: {e}"),
+        }
+        eprintln!("{id}: OK");
+    }
+}

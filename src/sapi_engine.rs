@@ -506,3 +506,137 @@ impl Drop for SapiEngine {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rate_to_sapi_normal_is_zero() {
+        assert_eq!(rate_to_sapi(1.0), 0);
+    }
+
+    #[test]
+    fn test_rate_to_sapi_maps_to_tens() {
+        // SPI_RATE uses 10x multiplier: rate 1.5 -> +5, rate 2.0 -> +10.
+        assert_eq!(rate_to_sapi(1.5), 5);
+        assert_eq!(rate_to_sapi(2.0), 10);
+        assert_eq!(rate_to_sapi(0.5), -5);
+    }
+
+    #[test]
+    fn test_rate_to_sapi_clamps_extremes() {
+        assert_eq!(rate_to_sapi(100.0), rate_to_sapi(10.0));
+        assert_eq!(rate_to_sapi(0.0), rate_to_sapi(0.1));
+    }
+
+    #[test]
+    fn test_pitch_to_percent_zero_at_normal() {
+        assert_eq!(pitch_to_percent(1.0), "+0%");
+    }
+
+    #[test]
+    fn test_pitch_to_percent_positive_has_plus() {
+        assert_eq!(pitch_to_percent(1.5), "+50%");
+        assert_eq!(pitch_to_percent(2.0), "+100%");
+    }
+
+    #[test]
+    fn test_pitch_to_percent_negative_no_leading_plus() {
+        // Negative percentages must not be written as "+-50%".
+        let p = pitch_to_percent(0.5);
+        assert!(!p.starts_with("+-"));
+        assert_eq!(p, "-50%");
+    }
+
+    #[test]
+    fn test_pitch_to_percent_clamps() {
+        // Outside [0.25, 4.0] must clamp, not overflow.
+        assert_eq!(pitch_to_percent(10.0), pitch_to_percent(4.0));
+        assert_eq!(pitch_to_percent(0.0), pitch_to_percent(0.25));
+    }
+
+    #[test]
+    fn test_volume_to_sapi_normal() {
+        // SAPI volume is 0..100; multiplier 1.0 maps to 50 (middle).
+        assert_eq!(volume_to_sapi(1.0), 50);
+    }
+
+    #[test]
+    fn test_volume_to_sapi_max_and_min() {
+        assert_eq!(volume_to_sapi(2.0), 100);
+        assert_eq!(volume_to_sapi(0.0), 0);
+    }
+
+    #[test]
+    fn test_volume_to_sapi_clamps_above_two() {
+        assert_eq!(volume_to_sapi(5.0), 100);
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_removes_tags() {
+        assert_eq!(
+            strip_ssml_tags("<speak><prosody rate=\"+10%\">Hello world</prosody></speak>"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_preserves_inner_whitespace() {
+        assert_eq!(strip_ssml_tags("<p>Hello   world</p>"), "Hello   world");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_collapses_outer_whitespace() {
+        // Leading/trailing whitespace between tags is collapsed via split_whitespace.
+        assert_eq!(strip_ssml_tags("<speak>\n  Hello\n</speak>"), "Hello");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_no_tags_passthrough() {
+        assert_eq!(strip_ssml_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_strip_ssml_tags_unclosed_tag_does_not_hang() {
+        // Defensive: a malformed '<' with no closing '>' just stops collection.
+        assert_eq!(strip_ssml_tags("hello <world"), "hello");
+    }
+
+    #[test]
+    fn test_word_at_basic_slice() {
+        // UTF-16 buffer for "hello".
+        let text: Vec<u16> = "hello".encode_utf16().collect();
+        assert_eq!(word_at(&text, 0, 5), "hello");
+        assert_eq!(word_at(&text, 1, 3), "ell");
+    }
+
+    #[test]
+    fn test_word_at_out_of_bounds_returns_empty() {
+        let text: Vec<u16> = "hi".encode_utf16().collect();
+        assert_eq!(word_at(&text, 5, 3), "");
+        assert_eq!(word_at(&text, 0, 100), "hi"); // clamped to end
+    }
+
+    #[test]
+    fn test_word_at_zero_len_returns_empty() {
+        let text: Vec<u16> = "hi".encode_utf16().collect();
+        assert_eq!(word_at(&text, 0, 0), "");
+    }
+
+    #[test]
+    fn test_word_at_surrogate_pair() {
+        // U+1F600 (😀) is a surrogate pair in UTF-16; from_utf16_lossy must
+        // reconstruct it instead of returning two replacement chars.
+        let text: Vec<u16> = "😀".encode_utf16().collect();
+        assert_eq!(text.len(), 2);
+        assert_eq!(word_at(&text, 0, 2), "😀");
+    }
+
+    #[test]
+    fn test_sapi_bytes_per_millisecond_known_value() {
+        // 22 kHz * 16-bit mono = 44,100 bytes/sec = 44.1 bytes/ms.
+        let bpm = sapi_bytes_per_millisecond();
+        assert!((bpm - 44.1).abs() < 0.001);
+    }
+}

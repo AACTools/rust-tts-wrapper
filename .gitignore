@@ -6,3 +6,6 @@ Cargo.lock
 /tests/live_cloud.rs
 *.live.env
 /run-live-tests.sh
+.env
+.env.*
+!.env.example

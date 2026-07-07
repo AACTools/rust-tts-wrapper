@@ -1,0 +1,117 @@
+name: SherpaOnnx Live Tests
+
+on:
+  # Run twice a week so we catch upstream model-URL rot early.
+  schedule:
+    - cron: "0 5 * * 1,4"
+  # Allow manual triggering from the Actions tab.
+  workflow_dispatch:
+  # Run on PRs that touch SherpaOnnx code or this workflow itself.
+  pull_request:
+    paths:
+      - "src/sherpaonnx_engine.rs"
+      - "tests/sherpaonnx_live.rs"
+      - ".github/workflows/sherpaonnx-live.yml"
+
+jobs:
+  sherpa-live:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Run on all three platforms to catch platform-specific ONNX runtime
+        # issues. Linux is the fastest; macOS/Windows catch ARM differences
+        # and COM/threading edge cases.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev wget bzip2 tar
+
+      - name: Set model directory
+        shell: bash
+        run: |
+          # SherpaOnnx loads from $HOME/.rust-tts-wrapper/sherpaonnx/<model_id>/
+          echo "MODEL_DIR=$HOME/.rust-tts-wrapper/sherpaonnx" >> $GITHUB_ENV
+
+      - name: Download VITS test model (piper-uk-lada-low)
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$MODEL_DIR"
+          cd "$MODEL_DIR"
+          if [ -d "piper-uk-lada-low" ]; then
+            echo "piper-uk-lada-low already present, skipping download"
+            exit 0
+          fi
+          # Pull the URL from the bundled registry to avoid hardcoding rot.
+          URL=$(python3 -c "
+          import json
+          with open('$GITHUB_WORKSPACE/src/merged_models.json') as f:
+              m = json.load(f)
+          print(m['piper-uk-lada-low']['url'])
+          ")
+          echo "Downloading $URL"
+          wget -q -O piper.tar.bz2 "$URL"
+          mkdir -p piper-uk-lada-low
+          tar -xjf piper.tar.bz2 -C piper-uk-lada-low --strip-components=1
+          rm piper.tar.bz2
+          ls -la piper-uk-lada-low/
+
+      - name: Download Matcha test model (icefall-fs-baker)
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -d "icefall-fs-baker" ]; then
+            echo "icefall-fs-baker already present"
+            exit 0
+          fi
+          URL=$(python3 -c "
+          import json
+          with open('$GITHUB_WORKSPACE/src/merged_models.json') as f:
+              m = json.load(f)
+          print(m['icefall-fs-baker']['url'])
+          ")
+          echo "Downloading $URL"
+          wget -q -O matcha.tar.bz2 "$URL"
+          mkdir -p icefall-fs-baker
+          tar -xjf matcha.tar.bz2 -C icefall-fs-baker --strip-components=1
+          rm matcha.tar.bz2
+
+      - name: Download Kokoro test model (kokoro-zh_en-int8-multi)
+        # Kokoro is large (~140 MB); only fetch on Linux to keep matrix minutes
+        # in check. macOS/Windows still cover VITS + Matcha.
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -d "kokoro-zh_en-int8-multi" ]; then
+            echo "kokoro already present"
+            exit 0
+          fi
+          URL=$(python3 -c "
+          import json
+          with open('$GITHUB_WORKSPACE/src/merged_models.json') as f:
+              m = json.load(f)
+          print(m['kokoro-zh_en-int8-multi']['url'])
+          ")
+          echo "Downloading $URL"
+          wget -q -O kokoro.tar.bz2 "$URL"
+          mkdir -p kokoro-zh_en-int8-multi
+          tar -xjf kokoro.tar.bz2 -C kokoro-zh_en-int8-multi --strip-components=1
+          rm kokoro.tar.bz2
+
+      - name: Run live SherpaOnnx tests
+        shell: bash
+        run: |
+          cargo test --test sherpaonnx_live --no-default-features --features sherpaonnx -- --ignored --nocapture --test-threads=1
