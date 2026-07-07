@@ -1318,10 +1318,16 @@ mod tests {
         // get_voices() enumerates `num_speakers` voice ids without needing
         // the actual model files (it reads from the registry only).
         let engine = SherpaOnnxEngine::new(r#"{"modelId":"vits-coqui-en-vctk"}"#);
-        // If this particular id isn't in the registry, fall back to a model
-        // we know exists with a single speaker so the test still passes.
+        // If this particular id isn't in the registry, skip loudly so the
+        // test output shows the skip rather than passing vacuously. A
+        // silent `return` here previously masked the test becoming a no-op
+        // when the model id was renamed.
         let known = engine.models.contains_key("vits-coqui-en-vctk");
         if !known {
+            eprintln!(
+                "skipping: 'vits-coqui-en-vctk' is no longer in the registry; \
+                 update the model id in this test"
+            );
             return;
         }
         let voices = engine.get_voices().expect("voices");

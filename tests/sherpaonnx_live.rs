@@ -93,8 +93,9 @@ fn vits_piper_synthesises_nonempty_audio() {
     let sink = Arc::new(Mutex::new(AudioSink::new()));
     let sink_for_cb = sink.clone();
     let mut cb = move |chunk: &[u8]| {
-        sink_for_cb.lock().unwrap().chunks.push(chunk.len());
-        sink_for_cb.lock().unwrap().total_bytes += chunk.len();
+        let mut sink = sink_for_cb.lock().unwrap();
+        sink.chunks.push(chunk.len());
+        sink.total_bytes += chunk.len();
     };
     engine
         .speak(
@@ -164,7 +165,12 @@ fn vits_piper_volume_changes_amplitude() {
         let mut cb = move |chunk: &[u8]| {
             for pair in chunk.chunks_exact(2) {
                 let s = i16::from_le_bytes([pair[0], pair[1]]);
-                let abs = (s as f32 / 32767.0).abs();
+                // PCM i16 normalisation uses 32768 (i16::MAX + 1) so the
+                // full negative range [-32768, 0] maps cleanly to [-1.0, 0].
+                // Using 32767 leaves -32768 at -1.00003, slightly out of
+                // range, which would skew the peak comparison below.
+                #[allow(clippy::cast_precision_loss)]
+                let abs = (s as f32 / 32768.0).abs();
                 let mut p = peak_clone.lock().unwrap();
                 if abs > *p {
                     *p = abs;

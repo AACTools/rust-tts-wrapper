@@ -137,20 +137,24 @@ fn test_ffi_get_voices_null_out_pointers_return_error() {
 }
 
 #[test]
-#[ignore = "makes a real network call to OpenAI; run locally with --ignored"]
-fn test_ffi_synth_to_bytes_with_dummy_key_fails_gracefully() {
-    // The dummy key is rejected by the OpenAI API; the failure must surface
-    // as -1 with last_error populated — never a panic. Marked #[ignore]
-    // because it makes a real network call (CI runners may not have
-    // deterministic network access to api.openai.com, and we don't want
-    // test failures from transient DNS/TLS issues).
-    let ctx = make_ctx();
-    let text = CString::new("hello").unwrap();
+fn test_ffi_synth_to_bytes_fails_deterministically_offline() {
+    // Point the engine at a closed localhost port. The connect attempt
+    // fails immediately without depending on DNS, proxies, or captive
+    // portals — historically the macOS GitHub Actions runner returned 200
+    // for opaque reasons when hitting api.openai.com with a dummy key,
+    // which made the previous version of this test flaky. 127.0.0.1:1
+    // (or any port with no listener) gives a deterministic connection
+    // refused on every platform.
+    let id = CString::new("openai").unwrap();
+    let creds = CString::new(r#"{"apiKey":"dummy","synthUrl":"http://127.0.0.1:1/test"}"#).unwrap();
+    let ctx = tts_create(id.as_ptr(), creds.as_ptr());
+    assert!(!ctx.is_null());
 
+    let text = CString::new("hello").unwrap();
     let mut out_bytes: *mut u8 = std::ptr::null_mut();
     let mut out_len: usize = 0;
     let rc = tts_synth_to_bytes(ctx, text.as_ptr(), &mut out_bytes, &mut out_len);
-    assert_eq!(rc, -1, "synth with dummy key must fail, not crash");
+    assert_eq!(rc, -1, "synth against a closed port must fail with -1");
     assert!(out_bytes.is_null());
     assert_eq!(out_len, 0);
 
@@ -162,7 +166,10 @@ fn test_ffi_synth_to_bytes_with_dummy_key_fails_gracefully() {
     let err = unsafe { std::ffi::CStr::from_ptr(err_ptr) }
         .to_string_lossy()
         .into_owned();
-    assert!(!err.is_empty(), "last_error message must be non-empty");
+    assert!(
+        !err.is_empty(),
+        "last_error message must be non-empty so callers can surface a reason"
+    );
 
     tts_destroy(ctx);
 }
@@ -230,7 +237,10 @@ fn test_ffi_full_lifecycle_voice_round_trip() {
     let text = CString::new("Hello, world").unwrap();
     let mut out_bytes: *mut u8 = std::ptr::null_mut();
     let mut out_len: usize = 0;
-    // Synth with a dummy key fails at the API; must return -1, not crash.
+    // Synth with the dummy key fails (network or auth); must return -1,
+    // not crash. The contract is fully asserted by
+    // test_ffi_synth_to_bytes_fails_deterministically_offline above; here
+    // we just verify the lifecycle doesn't leak when synth fails.
     let _ = tts_synth_to_bytes(ctx, text.as_ptr(), &mut out_bytes, &mut out_len);
     if !out_bytes.is_null() {
         tts_free_bytes(out_bytes, out_len);
@@ -240,11 +250,14 @@ fn test_ffi_full_lifecycle_voice_round_trip() {
 }
 
 #[test]
-fn test_ffi_audio_callback_userdata_round_trip() {
-    // The C callback signature carries a void* userdata. We must be able to
-    // round-trip a pointer-sized sentinel through it. We can't drive the
-    // callback via synth (sherpaonnx needs a real model), but we can invoke
-    // the function pointer directly to verify the FFI trampoline wiring.
+fn test_ffi_audio_callback_signature_compiles() {
+    // This is a *signature* test, not a trampoline test. We invoke the
+    // Rust `extern "C" fn` directly to verify its parameter types and
+    // calling convention match what the C ABI expects. We are NOT
+    // exercising the actual trampoline in src/lib.rs (the BoxedAudioCb
+    // closure that gets built inside tts_speak_impl) — that path requires
+    // a real synth to drive it. Trampoline coverage is provided by the
+    // live cloud and sherpaonnx_live test suites.
     AUDIO_CALLS.store(0, Ordering::SeqCst);
     AUDIO_BYTES.store(0, Ordering::SeqCst);
 
@@ -515,7 +528,9 @@ extern "C" fn boundary2_cb(
 }
 
 #[test]
-fn test_ffi_boundary2_callback_args_round_trip() {
+fn test_ffi_boundary2_callback_signature_compiles() {
+    // Signature test, not trampoline test — see
+    // test_ffi_audio_callback_signature_compiles for the rationale.
     B2_CALLS.store(0, Ordering::SeqCst);
     B2_OFFSET.store(0, Ordering::SeqCst);
     B2_LEN.store(0, Ordering::SeqCst);
@@ -529,7 +544,7 @@ fn test_ffi_boundary2_callback_args_round_trip() {
     assert_eq!(*B2_USERDATA.lock().unwrap(), USERDATA_SENTINEL);
 }
 
-// ===== Callback userdata round-trip (viseme) =====
+// ===== Callback signature (viseme) =====
 
 static VISEME_CALLS: AtomicUsize = AtomicUsize::new(0);
 static VISEME_ID: AtomicUsize = AtomicUsize::new(0);
@@ -540,14 +555,14 @@ extern "C" fn viseme_cb(id: i32, _offset_sec: f32, _u: *mut std::ffi::c_void) {
 }
 
 #[test]
-fn test_ffi_viseme_callback_args_round_trip() {
+fn test_ffi_viseme_callback_signature_compiles() {
     VISEME_CALLS.store(0, Ordering::SeqCst);
     viseme_cb(5, 1.25, std::ptr::null_mut());
     assert_eq!(VISEME_CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(VISEME_ID.load(Ordering::SeqCst), 5);
 }
 
-// ===== Callback userdata round-trip (error) =====
+// ===== Callback signature (error) =====
 
 static ERR_CALLS: AtomicUsize = AtomicUsize::new(0);
 static ERR_MSG: Mutex<String> = Mutex::new(String::new());
@@ -563,7 +578,7 @@ extern "C" fn error_cb(msg: *const c_char, _u: *mut std::ffi::c_void) {
 }
 
 #[test]
-fn test_ffi_error_callback_message_round_trip() {
+fn test_ffi_error_callback_signature_compiles() {
     ERR_CALLS.store(0, Ordering::SeqCst);
     let msg = CString::new("synthesis failed: 401").unwrap();
     error_cb(msg.as_ptr(), std::ptr::null_mut());

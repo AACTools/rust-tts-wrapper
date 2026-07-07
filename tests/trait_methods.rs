@@ -53,24 +53,28 @@ fn cloud_pause_resume_cycle_is_safe() {
     e.resume().unwrap();
 }
 
-// ===== check_credentials offline contract =====
+// ===== check_credentials contract =====
 //
-// The default impl returns Ok(true) when get_voices succeeds. OpenAI has
-// no voices_url, so get_voices returns Ok(vec![]) without touching the
-// network — check_credentials therefore reports Ok(true) offline. That's
-// surprising-ish but it's the documented behaviour: the default impl can
-// only validate that the engine constructs, not that the key is real.
+// CloudEngine.check_credentials is overridden so that engines with a
+// voices_url (Azure, Google, ElevenLabs, Cartesia) make a real
+// authenticated GET, and engines without one (OpenAI, Mistral, etc.)
+// return Ok(false) rather than the previous false positive. The trait
+// default returned Ok(true) for any well-formed config because
+// get_voices() succeeded vacuously when voices_url was None.
 
 #[test]
-fn cloud_check_credentials_offline_returns_true_for_no_voices_url() {
+fn cloud_check_credentials_returns_false_when_no_voices_url() {
+    // OpenAI has no voice-list endpoint. CloudEngine.check_credentials
+    // returns Ok(false) here without touching the network — we can't
+    // verify the key cheaply, so we report "not verifiable" rather than
+    // claiming success.
     let e = dummy_openai();
     let result = e
         .check_credentials()
-        .expect("check_credentials did not error");
+        .expect("check_credentials should not error");
     assert!(
-        result,
-        "OpenAI has no voices_url, so the default check_credentials path \
-         returns true without network — that's the contract we're pinning"
+        !result,
+        "engines without a voices_url must report Ok(false), not Ok(true)"
     );
 }
 
@@ -410,14 +414,19 @@ fn speak_options_format_field_round_trips() {
     }
 }
 
-// ===== Concurrent calls don't race the Mutex-guarded state =====
+// ===== Concurrent pause/resume/stop burst =====
 //
-// Cloud engines guard their internal state with Mutex; pause/resume/stop
-// can be called concurrently with synth. Verify a burst of stop/pause/
-// resume from multiple threads doesn't deadlock or panic.
+// This is a smoke test, NOT a deadlock test. CloudEngine's pause/resume/
+// stop are no-op Ok(()) returns holding no locks; speak() — the path
+// that DOES hold locks during streaming — is not called here. A genuine
+// reentrant-deadlock regression on the synth path would not be caught.
+//
+// What this DOES catch: data races on the inner Mutex<Option<...>> state
+// if a future engine override starts mutating shared state from pause/
+// resume/stop. Run under ThreadSanitizer it would surface such a bug.
 
 #[test]
-fn concurrent_pause_resume_stop_does_not_deadlock() {
+fn concurrent_pause_resume_stop_does_not_panic_under_contention() {
     let e = dummy_openai();
     let mut handles = Vec::new();
     for _ in 0..4 {

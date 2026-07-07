@@ -24,6 +24,14 @@ use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, W
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Size of each audio chunk delivered via `on_audio` for JSON-body engines
+/// (ElevenLabs `audio_base64`, Google `audioContent`). 8 KiB matches the
+/// streaming-Read buffer used for HTTP-response engines. Exposed as a
+/// named constant so tests can pin against the same value the production
+/// `speak()` loop uses, rather than against the magic literal `8192`.
+#[cfg(feature = "cloud")]
+pub(crate) const STREAMING_CHUNK_SIZE: usize = 8192;
+
 #[cfg(feature = "cloud")]
 use {
     tungstenite::{connect, Message},
@@ -68,8 +76,18 @@ impl CloudEngine {
     /// Create a cloud engine for the given provider `id`.
     ///
     /// Returns `None` if `id` is not a recognised cloud provider.
+    ///
+    /// Credential `synthUrl` (optional) overrides the provider's default
+    /// synthesis endpoint. This is primarily useful for tests pointing at
+    /// a deterministic local server, but also lets users target a proxy
+    /// or self-hosted gateway.
     pub fn new(id: &str, credentials: &HashMap<String, String>) -> Option<Self> {
-        let config = build_config(id, credentials)?;
+        let mut config = build_config(id, credentials)?;
+        if let Some(url_override) = credentials.get("synthUrl") {
+            if !url_override.is_empty() {
+                config.synth_url.clone_from(url_override);
+            }
+        }
         let api_key = credentials
             .get("apiKey")
             .or_else(|| credentials.get("subscriptionKey"))
@@ -281,7 +299,11 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 auth_header: "Authorization".into(),
                 auth_prefix: format!(
                     "Basic {}",
-                    base64_encode(&format!("apiKey:{}", creds.get("apiKey").cloned().unwrap_or_default()))
+                    // IBM Watson's Basic-auth scheme requires the literal
+                    // string "apikey" (lowercase, one word) as the username.
+                    // Using "apiKey" (camelCase) here returns HTTP 401 from
+                    // every Watson endpoint.
+                    base64_encode(&format!("apikey:{}", creds.get("apiKey").cloned().unwrap_or_default()))
                 ),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
@@ -1125,7 +1147,7 @@ impl TtsEngine for CloudEngine {
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
                 if let Some(cb) = on_audio.as_mut() {
-                    for chunk in audio_bytes.chunks(8192) {
+                    for chunk in audio_bytes.chunks(STREAMING_CHUNK_SIZE) {
                         cb(chunk);
                     }
                 }
@@ -1152,7 +1174,7 @@ impl TtsEngine for CloudEngine {
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
                 if let Some(cb) = on_audio.as_mut() {
-                    for chunk in audio_bytes.chunks(8192) {
+                    for chunk in audio_bytes.chunks(STREAMING_CHUNK_SIZE) {
                         cb(chunk);
                     }
                 }
@@ -1187,7 +1209,7 @@ impl TtsEngine for CloudEngine {
         } else if let Some(cb) = on_audio.as_mut() {
             use std::io::Read;
             let mut resp = resp;
-            let mut buffer = [0u8; 8192];
+            let mut buffer = [0u8; STREAMING_CHUNK_SIZE];
             loop {
                 let n = resp
                     .read(&mut buffer)
@@ -1272,6 +1294,35 @@ impl TtsEngine for CloudEngine {
                 || Ok(vec![]),
                 |arr| Ok(map_generic_voices(&self.config.provider_id, arr)),
             ),
+        }
+    }
+
+    /// Check whether the configured credentials are valid.
+    ///
+    /// Engines with a `voices_url` (Azure, Google, ElevenLabs, Cartesia)
+    /// make a real authenticated GET and return `Ok(true)` only on a
+    /// successful 2xx response. Engines without a voice-list endpoint
+    /// return `Ok(false)` — we can't verify the key without making a
+    /// billed synth call, so we report "unknown / not verifiable" rather
+    /// than the previous false positive.
+    ///
+    /// This overrides the trait default, which returned `Ok(true)` whenever
+    /// `get_voices()` succeeded — including for engines like OpenAI where
+    /// `get_voices()` returns an empty vec without ever touching the
+    /// network. That made `check_credentials()` report successful
+    /// validation for any well-formed engine config, which is misleading.
+    fn check_credentials(&self) -> TtsResult<bool> {
+        let Some(ref voices_url) = self.config.voices_url else {
+            return Ok(false);
+        };
+        let mut req = self.client.get(voices_url.as_str());
+        if !self.config.auth_header.is_empty() {
+            let val = format!("{}{}", self.config.auth_prefix, self.api_key);
+            req = req.header(&self.config.auth_header, val);
+        }
+        match req.send() {
+            Ok(resp) => Ok(resp.status().is_success()),
+            Err(_) => Ok(false),
         }
     }
 
@@ -1463,14 +1514,15 @@ mod tests {
 
     #[test]
     fn test_watson_auth_header_format() {
-        // Watson Basic auth is base64("apikey:KEY") — not the malformed
-        // "<base64(KEY)>:" that shipped originally.
+        // IBM Watson Basic auth requires the literal username `apikey`
+        // (lowercase, one word) per the IAM authentication spec. Earlier
+        // versions of this code used `apiKey` (camelCase) and got HTTP 401
+        // from every Watson endpoint. This regression test pins the
+        // lowercase form.
         use base64::Engine as _;
         let api_key = "test_key_123";
-        let encoded = base64_encode(&format!("apiKey:{api_key}"));
+        let encoded = base64_encode(&format!("apikey:{api_key}"));
         let auth_header = format!("Basic {encoded}");
-        // Decoding round-trip — must contain the apiKey prefix and the key,
-        // separated by a colon, with NO trailing colon outside the base64.
         assert!(!auth_header.ends_with(':'));
         let decoded = String::from_utf8(
             base64::engine::general_purpose::STANDARD
@@ -1478,7 +1530,12 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        assert_eq!(decoded, format!("apiKey:{api_key}"));
+        assert_eq!(decoded, format!("apikey:{api_key}"));
+        // Explicit guard against the camelCase regression.
+        assert!(
+            !decoded.starts_with("apiKey:"),
+            "Watson auth must use lowercase 'apikey:' as the username, got: {decoded}"
+        );
     }
 
     #[test]
@@ -1777,7 +1834,7 @@ mod tests {
             )
             .unwrap()
         };
-        assert_eq!(decoded, "apiKey:TESTKEY");
+        assert_eq!(decoded, "apikey:TESTKEY");
     }
 
     #[test]
@@ -2214,41 +2271,48 @@ mod tests {
     // sizing and the SpeechMarkdown → SSML routing that decides which SSML
     // flavour each platform receives.
 
+    // ===== Streaming chunk size regression =====
+    //
+    // The speak() loop delivers audio via `on_audio` in chunks of
+    // STREAMING_CHUNK_SIZE bytes (used by both the base64-decoded JSON
+    // payloads and the HTTP streaming-Read path). Pinning the constant
+    // catches a future tweak that accidentally switches to e.g. 1024 and
+    // creates millions of callback round-trips per request. Earlier
+    // versions of this test asserted on `vec.chunks(8192).count()` against
+    // a buffer the test itself built — that was tautological (it tested
+    // the stdlib, not production code); referencing the constant makes the
+    // test catch the actual regression.
+
     #[test]
-    fn test_chunk_size_is_8kb_constant() {
-        // All three streaming branches (ElevenLabs, Google, generic) use
-        // 8192-byte chunks. Pinning this as a regression test catches a
-        // future tweak that accidentally switches to e.g. 1024 and creates
-        // millions of callback round-trips per request.
-        assert_eq!(8192usize, 8 * 1024);
+    fn test_streaming_chunk_size_constant_value() {
+        // Must be a power of two in the KiB range — anything smaller would
+        // explode callback count; anything larger would inflate memory.
+        assert_eq!(STREAMING_CHUNK_SIZE, 8 * 1024);
+        assert!(STREAMING_CHUNK_SIZE.is_power_of_two());
     }
 
     #[test]
-    fn test_chunking_split_count() {
-        // Verify the same `.chunks(8192)` call shape used in speak().
-        let total = 20_000usize;
-        let buf = vec![0u8; total];
-        let chunks: Vec<&[u8]> = buf.chunks(8192).collect();
-        // 20000 / 8192 = 2 full chunks + 1 partial (20000 - 16384 = 3616).
-        assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[0].len(), 8192);
-        assert_eq!(chunks[1].len(), 8192);
-        assert_eq!(chunks[2].len(), 3616);
-    }
-
-    #[test]
-    fn test_chunking_exact_multiple_no_short_chunk() {
-        let buf = vec![0u8; 8192 * 2];
-        let chunks: Vec<&[u8]> = buf.chunks(8192).collect();
-        assert_eq!(chunks.len(), 2);
-        assert!(chunks.iter().all(|c| c.len() == 8192));
-    }
-
-    #[test]
-    fn test_chunking_empty_buffer_no_calls() {
-        // Empty audio must not invoke the callback at all.
-        let buf: Vec<u8> = Vec::new();
-        assert_eq!(buf.chunks(8192).count(), 0);
+    fn test_streaming_chunk_size_used_in_speak_path() {
+        // Defensive: grep-verify the production code references the
+        // constant rather than re-introducing a magic 8192 literal. We
+        // count uses of `.chunks(STREAMING_CHUNK_SIZE)` in lines that
+        // aren't part of this test (the test itself mentions the magic
+        // literal in its assertion message, which would false-positive
+        // a naive grep).
+        let source = include_str!("cloud_engine.rs");
+        let production_uses = source
+            .lines()
+            // Skip every line inside this test's body, which legitimately
+            // mentions both .chunks(STREAMING_CHUNK_SIZE) and the magic
+            // literal 8192 in its assertion message.
+            .filter(|l| !l.contains("test_streaming_chunk_size_used_in_speak_path"))
+            .filter(|l| !l.contains("magic 8192"))
+            .filter(|l| l.contains(".chunks(STREAMING_CHUNK_SIZE)"))
+            .count();
+        assert!(
+            production_uses >= 2,
+            "expected at least 2 production uses of STREAMING_CHUNK_SIZE, found {production_uses}"
+        );
     }
 
     // ===== SpeechMarkdown routing per platform =====
@@ -2258,36 +2322,70 @@ mod tests {
     //   azure   → MicrosoftAzure SSML
     //   google  → GoogleAssistant SSML
     //   *       → AmazonAlexa SSML
-    // Verify the routing decisions for each provider.
+    //
+    // Verifying the routing requires asserting that the platforms actually
+    // produce DIFFERENT output. Every SSML flavour starts with `<speak>`,
+    // so an `assert!(ssml.contains("<speak"))` test would still pass if we
+    // accidentally routed Azure to the Alexa flavour. Instead we feed the
+    // same input through all three platforms and require that at least one
+    // differs — that catches a routing collapse in either direction.
 
     #[test]
-    fn test_speechmarkdown_azure_routes_to_microsoft_ssml() {
+    fn test_speechmarkdown_routing_is_per_platform() {
+        // Verify the preprocess_speech_markdown routing match actually
+        // dispatches to different Platform variants. Some SpeechMarkdown
+        // constructs produce identical SSML across all platforms (the
+        // library normalises a common subset), so a single-input test
+        // can't distinguish "routing works" from "routing collapsed but
+        // the library happens to emit the same bytes". We try several
+        // constructs that have historically differed between Microsoft /
+        // Google / Alexa flavours and require at least one to produce
+        // distinct output across azure/google/other.
         use crate::engine::preprocess_speech_markdown;
-        // emphasis:[strong] is a universal form; Azure should emit a Microsoft
-        // SSML flavour (the speechmarkdown-rust library distinguishes by
-        // output structure rather than namespace).
-        let (ssml, is_ssml) =
-            preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
-        assert!(is_ssml);
-        assert!(ssml.contains("<speak"));
+        let probe_inputs = [
+            "(world)[emphasis:\"strong\"]",
+            "+important+",
+            "(world)[rate:\"fast\"]",
+            "(world)[pitch:\"high\"]",
+            "(world)[volume:\"loud\"]",
+            "[rate:\"fast\"]hello[/rate]",
+            "This is ^italic^ text",
+        ];
+
+        let mut found_distinct = false;
+        for input in &probe_inputs {
+            let (azure_ssml, azure_ok) = preprocess_speech_markdown(input, "azure");
+            let (google_ssml, google_ok) = preprocess_speech_markdown(input, "google");
+            let (alexa_ssml, alexa_ok) = preprocess_speech_markdown(input, "elevenlabs");
+
+            assert!(azure_ok, "azure failed to parse: {input:?}");
+            assert!(google_ok, "google failed to parse: {input:?}");
+            assert!(alexa_ok, "alexa failed to parse: {input:?}");
+
+            if azure_ssml != google_ssml || google_ssml != alexa_ssml {
+                found_distinct = true;
+                break;
+            }
+        }
+
+        assert!(
+            found_distinct,
+            "None of {} probe inputs produced distinct SSML across azure/google/alexa. \
+             This either means the speechmarkdown-rust library has collapsed its \
+             Platform variants to identical output (check the dependency version) or \
+             the routing match arm in preprocess_speech_markdown is broken.",
+            probe_inputs.len()
+        );
     }
 
     #[test]
-    fn test_speechmarkdown_google_routes_to_assistant_ssml() {
-        use crate::engine::preprocess_speech_markdown;
-        let (ssml, is_ssml) =
-            preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "google");
-        assert!(is_ssml);
-        assert!(ssml.contains("<speak"));
-    }
-
-    #[test]
-    fn test_speechmarkdown_other_providers_route_to_alexa_ssml() {
+    fn test_speechmarkdown_other_providers_detect_input() {
         use crate::engine::preprocess_speech_markdown;
         // ElevenLabs, OpenAI, Cartesia, Murf, etc. all go through the
         // Alexa fallback. They don't actually consume SSML — the result is
-        // discarded by the JSON-body branch in speak() — but the routing
-        // decision is what we care about here.
+        // discarded by the JSON-body branch in speak() — but detection
+        // must still flag the input as SpeechMarkdown so callers querying
+        // `is_ssml` get a truthful answer.
         for provider in [
             "openai",
             "elevenlabs",

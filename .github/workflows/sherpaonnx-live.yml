@@ -11,6 +11,7 @@ on:
       - "src/sherpaonnx_engine.rs"
       - "tests/sherpaonnx_live.rs"
       - ".github/workflows/sherpaonnx-live.yml"
+      - "scripts/get-model-url.py"
 
 jobs:
   sherpa-live:
@@ -35,11 +36,32 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev wget bzip2 tar
 
-      - name: Set model directory
+      - name: Cache SherpaOnnx models
+        # Key on the hash of merged_models.json so any registry update
+        # (which could rename or remove a model id) busts the cache and
+        # re-downloads. Without this the workflow re-pulled ~250 MB per
+        # platform on every PR that touched sherpaonnx_engine.rs.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rust-tts-wrapper/sherpaonnx/piper-uk-lada-low
+            ~/.rust-tts-wrapper/sherpaonnx/icefall-fs-baker
+            ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8-multi
+          key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/merged_models.json') }}
+          restore-keys: |
+            sherpa-models-${{ matrix.os }}-
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Set model directory and Python helper
         shell: bash
         run: |
           # SherpaOnnx loads from $HOME/.rust-tts-wrapper/sherpaonnx/<model_id>/
           echo "MODEL_DIR=$HOME/.rust-tts-wrapper/sherpaonnx" >> $GITHUB_ENV
+          echo "$GITHUB_WORKSPACE/scripts" >> $GITHUB_PATH
 
       - name: Download VITS test model (piper-uk-lada-low)
         shell: bash
@@ -47,17 +69,11 @@ jobs:
           set -e
           mkdir -p "$MODEL_DIR"
           cd "$MODEL_DIR"
-          if [ -d "piper-uk-lada-low" ]; then
+          if [ -d "piper-uk-lada-low" ] && [ -n "$(ls -A piper-uk-lada-low 2>/dev/null)" ]; then
             echo "piper-uk-lada-low already present, skipping download"
             exit 0
           fi
-          # Pull the URL from the bundled registry to avoid hardcoding rot.
-          URL=$(python3 -c "
-          import json
-          with open('$GITHUB_WORKSPACE/src/merged_models.json') as f:
-              m = json.load(f)
-          print(m['piper-uk-lada-low']['url'])
-          ")
+          URL=$(get-model-url.py piper-uk-lada-low)
           echo "Downloading $URL"
           wget -q -O piper.tar.bz2 "$URL"
           mkdir -p piper-uk-lada-low
@@ -70,16 +86,11 @@ jobs:
         run: |
           set -e
           cd "$MODEL_DIR"
-          if [ -d "icefall-fs-baker" ]; then
+          if [ -d "icefall-fs-baker" ] && [ -n "$(ls -A icefall-fs-baker 2>/dev/null)" ]; then
             echo "icefall-fs-baker already present"
             exit 0
           fi
-          URL=$(python3 -c "
-          import json
-          with open('$GITHUB_WORKSPACE/src/merged_models.json') as f:
-              m = json.load(f)
-          print(m['icefall-fs-baker']['url'])
-          ")
+          URL=$(get-model-url.py icefall-fs-baker)
           echo "Downloading $URL"
           wget -q -O matcha.tar.bz2 "$URL"
           mkdir -p icefall-fs-baker
@@ -94,16 +105,11 @@ jobs:
         run: |
           set -e
           cd "$MODEL_DIR"
-          if [ -d "kokoro-zh_en-int8-multi" ]; then
+          if [ -d "kokoro-zh_en-int8-multi" ] && [ -n "$(ls -A kokoro-zh_en-int8-multi 2>/dev/null)" ]; then
             echo "kokoro already present"
             exit 0
           fi
-          URL=$(python3 -c "
-          import json
-          with open('$GITHUB_WORKSPACE/src/merged_models.json') as f:
-              m = json.load(f)
-          print(m['kokoro-zh_en-int8-multi']['url'])
-          ")
+          URL=$(get-model-url.py kokoro-zh_en-int8-multi)
           echo "Downloading $URL"
           wget -q -O kokoro.tar.bz2 "$URL"
           mkdir -p kokoro-zh_en-int8-multi
