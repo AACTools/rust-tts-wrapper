@@ -126,6 +126,63 @@ fn edge_sec_ms_gec() -> String {
     token
 }
 
+/// The concrete WebSocket stream type returned by tungstenite's `connect` for a
+/// `wss://` URL. Stored in the connection pool between synthesis calls.
+#[cfg(feature = "cloud")]
+type WsStream = tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
+
+#[cfg(feature = "cloud")]
+struct PooledConn {
+    socket: WsStream,
+    born_at: std::time::Instant,
+}
+
+/// Warm WebSocket connection pool, keyed by synthesis URL. A fresh
+/// `tungstenite::connect` is a full TLS+WS handshake (~300 ms); reusing a live
+/// connection between utterances removes that latency. Azure keys are stable
+/// (region+key); Edge keys include the Sec-MS-GEC token so they rotate every
+/// 5-minute window (old conns age out instead of being reused stale).
+#[cfg(feature = "cloud")]
+static WS_POOL: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<PooledConn>>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Max age before a pooled connection is considered stale (Azure/Edge close
+/// idle sessions after ~3-5 min). Capping at 3 min keeps us from handing out a
+/// server-closed connection.
+#[cfg(feature = "cloud")]
+const WS_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(3);
+/// Max connections cached per URL — bounds memory for busy callers.
+#[cfg(feature = "cloud")]
+const WS_POOL_MAX_PER_URL: usize = 4;
+
+/// Take a live connection for `url`, dropping any that have aged out.
+#[cfg(feature = "cloud")]
+fn ws_checkout(url: &str) -> Option<WsStream> {
+    let mut pool = WS_POOL.lock().ok()?;
+    let conns = pool.get_mut(url)?;
+    while let Some(conn) = conns.pop() {
+        if conn.born_at.elapsed() < WS_MAX_AGE {
+            return Some(conn.socket);
+        }
+    }
+    None
+}
+
+/// Return a connection for reuse, respecting the per-URL cap.
+#[cfg(feature = "cloud")]
+fn ws_checkin(url: String, socket: WsStream) {
+    let Ok(mut pool) = WS_POOL.lock() else {
+        return;
+    };
+    let bucket = pool.entry(url).or_default();
+    if bucket.len() < WS_POOL_MAX_PER_URL {
+        bucket.push(PooledConn {
+            socket,
+            born_at: std::time::Instant::now(),
+        });
+    }
+}
+
 /// Configuration for a single cloud TTS provider.
 #[derive(Debug, Clone, Default)]
 struct CloudConfig {
@@ -1040,8 +1097,19 @@ impl TtsEngine for CloudEngine {
                 h.insert("Origin", origin);
                 h.insert("User-Agent", ua);
             }
-            let (mut socket, _) =
-                connect(req).map_err(|e| TtsError(format!("WS connect error: {e}")))?;
+            // Prefer a pooled (warm) connection; only do the full TLS+WS
+            // handshake when the pool has nothing for this URL. `clean_finish`
+            // tracks whether the session ended on `turn.end` (socket reusable →
+            // check back in) so a broken connection is never pooled.
+            let mut clean_finish = false;
+            let mut socket = match ws_checkout(&ws_url_str) {
+                Some(pooled) => pooled,
+                None => {
+                    connect(req)
+                        .map_err(|e| TtsError(format!("WS connect error: {e}")))?
+                        .0
+                }
+            };
 
             // Azure requires a 32-char lowercase hex UUID with NO dashes.
             let request_id = Uuid::new_v4().simple().to_string();
@@ -1161,7 +1229,9 @@ impl TtsEngine for CloudEngine {
                                 }
                             }
                             if path == "turn.end" {
-                                let _ = socket.close(None);
+                                // Clean finish — leave the socket open so it can
+                                // go back in the pool for the next utterance.
+                                clean_finish = true;
                                 break;
                             }
                         }
@@ -1243,6 +1313,12 @@ impl TtsEngine for CloudEngine {
                 }
             }
 
+            // Clean turn.end → return the still-open socket to the pool for the
+            // next utterance. Otherwise (timeout / server-closed / error) the
+            // socket is dropped and discarded, never pooled.
+            if clean_finish {
+                ws_checkin(ws_url_str, socket);
+            }
             return Ok(());
         }
 
