@@ -47,26 +47,89 @@ use {
 /// MP3 bytes that a SAPI site would have to decode itself.
 #[cfg(feature = "cloud")]
 fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
-    use std::io::Cursor;
-    let mut decoder = minimp3::Decoder::new(Cursor::new(mp3));
-    let mut pcm = Vec::new();
-    while let Ok(frame) = decoder.next_frame() {
-        let channels = frame.channels.max(1);
-        if channels == 1 {
-            for &s in &frame.data {
-                pcm.extend_from_slice(&s.to_le_bytes());
+    use symphonia::core::audio::AudioBufferRef;
+    use symphonia::core::codecs::DecoderOptions;
+    use symphonia::core::formats::FormatOptions;
+    use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
+    use symphonia::core::meta::MetadataOptions;
+    use symphonia::core::probe::Hint;
+
+    // Cursor needs an owned buffer: MediaSourceStream boxes the source as
+    // `dyn MediaSource + 'static`, so a borrowed `&[u8]` cursor won't compile.
+    let mss = MediaSourceStream::new(
+        Box::new(std::io::Cursor::new(mp3.to_vec())),
+        MediaSourceStreamOptions::default(),
+    );
+    let mut hint = Hint::new();
+    hint.with_extension("mp3");
+    let mut format = match symphonia::default::get_probe().format(
+        &hint,
+        mss,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) {
+        Ok(p) => p.format,
+        Err(_) => return Vec::new(),
+    };
+    let track = format.default_track().cloned();
+    let Some(track) = track else {
+        return Vec::new();
+    };
+    let Ok(mut decoder) =
+        symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())
+    else {
+        return Vec::new();
+    };
+
+    let mut pcm: Vec<u8> = Vec::new();
+    while let Ok(packet) = format.next_packet() {
+        let Ok(decoded_buf) = decoder.decode(&packet) else {
+            continue;
+        };
+        let frames = decoded_buf.frames();
+        #[allow(clippy::cast_precision_loss)]
+        let nch = decoded_buf.spec().channels.count().max(1) as f32;
+        // symphonia's MP3 decoder emits F32; handle S16 too as a defensive
+        // fallback. Other sample formats are skipped (MP3 won't produce them).
+        match decoded_buf {
+            AudioBufferRef::F32(buf) => {
+                let channel_planes = buf.planes();
+                let slices = channel_planes.planes();
+                for f in 0..frames {
+                    let sum: f32 = slices
+                        .iter()
+                        .map(|s| s.get(f).copied().unwrap_or(0.0))
+                        .sum();
+                    push_mono_f32(&mut pcm, sum / nch);
+                }
             }
-        } else {
-            // Downmix interleaved channels to mono by averaging.
-            for group in frame.data.chunks_exact(channels) {
-                #[allow(clippy::cast_possible_truncation)]
-                let avg =
-                    (group.iter().map(|&s| i32::from(s)).sum::<i32>() / channels as i32) as i16;
-                pcm.extend_from_slice(&avg.to_le_bytes());
+            AudioBufferRef::S16(buf) => {
+                let channel_planes = buf.planes();
+                let slices = channel_planes.planes();
+                for f in 0..frames {
+                    let sum: i32 = slices
+                        .iter()
+                        .map(|s| s.get(f).copied().unwrap_or(0))
+                        .map(i32::from)
+                        .sum();
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                    let avg = (sum as f32 / nch) as i16;
+                    pcm.extend_from_slice(&avg.to_le_bytes());
+                }
             }
+            _ => {}
         }
     }
     pcm
+}
+
+/// Scale a normalised f32 sample (`[-1.0, 1.0]`) to little-endian PCM16 and
+/// append it. Pulled out so the F32 branch above stays readable.
+#[cfg(feature = "cloud")]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn push_mono_f32(out: &mut Vec<u8>, s: f32) {
+    let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+    out.extend_from_slice(&s16.to_le_bytes());
 }
 /// Sniff the first few bytes for an MP3 sync word or ID3 tag. Kept as a
 /// diagnostic helper but not used for delivery routing — raw PCM16 audio
