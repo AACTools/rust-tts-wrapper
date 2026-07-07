@@ -133,11 +133,13 @@ fn test_ffi_get_voices_null_out_pointers_return_error() {
 }
 
 #[test]
+#[ignore = "makes a real network call to OpenAI; run locally with --ignored"]
 fn test_ffi_synth_to_bytes_with_dummy_key_fails_gracefully() {
     // The dummy key is rejected by the OpenAI API; the failure must surface
-    // as -1 with last_error populated — never a panic. This test makes a
-    // real network call (CI runners have network); if you want to skip it
-    // in offline dev, mark it #[ignore] locally.
+    // as -1 with last_error populated — never a panic. Marked #[ignore]
+    // because it makes a real network call (CI runners may not have
+    // deterministic network access to api.openai.com, and we don't want
+    // test failures from transient DNS/TLS issues).
     let ctx = make_ctx();
     let text = CString::new("hello").unwrap();
 

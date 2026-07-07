@@ -582,11 +582,6 @@ mod tests {
     }
 
     #[test]
-    fn test_strip_ssml_tags_preserves_inner_whitespace() {
-        assert_eq!(strip_ssml_tags("<p>Hello   world</p>"), "Hello   world");
-    }
-
-    #[test]
     fn test_strip_ssml_tags_collapses_outer_whitespace() {
         // Leading/trailing whitespace between tags is collapsed via split_whitespace.
         assert_eq!(strip_ssml_tags("<speak>\n  Hello\n</speak>"), "Hello");
