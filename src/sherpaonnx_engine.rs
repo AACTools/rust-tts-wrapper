@@ -16,6 +16,12 @@ static MERGED_MODELS_JSON: &str = include_str!("merged_models.json");
 /// Shared cancellation flag — set by `stop()`, read by the progress callback.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// PCM delivery chunk size. Sherpa-ONNX synthesises the whole clip up-front,
+/// so we slice the rendered PCM into 8 KB chunks before pushing them through
+/// `on_audio` — matching the cloud engines' streamed-chunk shape so callers
+/// see the same multi-callback delivery instead of one giant buffer.
+const STREAMING_CHUNK_SIZE: usize = 8 * 1024;
+
 /// Maps a 2-letter ISO 639-1 code to its 3-letter ISO 639-3 equivalent for the
 /// languages covered by the Sherpa-ONNX model registry. Falls back to the
 /// input when no mapping is known.
@@ -372,43 +378,38 @@ impl TtsEngine for SherpaOnnxEngine {
             ..Default::default()
         };
 
+        let volume_factor = volume.clamp(0.0, 4.0);
+        let pitch_factor = pitch.clamp(0.25, 4.0);
+        let wants_callback = on_audio.is_some();
+
         // Reset cancellation flag before synthesis.
         CANCEL_REQUESTED.store(false, Ordering::SeqCst);
 
+        // Sherpa-ONNX synthesises the whole clip before its `generate` call
+        // returns (the progress callback reports cumulative samples, not a
+        // streamable pipe), so we generate once, apply volume/pitch, then
+        // deliver the PCM through `on_audio` in 8 KB chunks. This matches the
+        // delivery shape the cloud engines and the js-tts-wrapper / swift-
+        // tts-wrapper siblings use: callers receive multiple `on_audio`
+        // callbacks rather than one monolithic buffer.
         let audio = tts
             .generate_with_config(
                 text,
                 &gen_config,
-                Some(|_samples: &[f32], _progress: f32| -> bool {
-                    // Return false to stop in-progress synthesis when stop() was called.
-                    !CANCEL_REQUESTED.load(Ordering::SeqCst)
-                }),
+                Some(|_s: &[f32], _p: f32| -> bool { !CANCEL_REQUESTED.load(Ordering::SeqCst) }),
             )
             .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
+        let sample_rate = audio.sample_rate();
+        let processed = apply_volume_and_pitch(audio.samples(), volume_factor, pitch_factor);
 
-        // Post-process samples for volume and pitch since the underlying
-        // models don't natively expose these controls.
-        let samples = audio.samples();
-        let volume_factor = volume.clamp(0.0, 4.0);
-        let pitch_factor = pitch.clamp(0.25, 4.0);
-        let processed: Vec<f32> = if (volume_factor - 1.0).abs() > f32::EPSILON
-            || (pitch_factor - 1.0).abs() > f32::EPSILON
-        {
-            apply_volume_and_pitch(samples, volume_factor, pitch_factor)
-        } else {
-            samples.to_vec()
-        };
-
-        if let Some(cb) = on_audio.as_mut() {
-            let mut pcm_bytes = Vec::with_capacity(processed.len() * 2);
-            for &s in &processed {
-                let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-                pcm_bytes.extend_from_slice(&s16.to_ne_bytes());
+        if wants_callback {
+            if let Some(cb) = on_audio.as_mut() {
+                // Volume + pitch already baked into `processed` above.
+                deliver_pcm(*cb, &processed, 1.0);
             }
-            cb(&pcm_bytes);
         } else {
             let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
-            if write_wav(&filename, &processed, audio.sample_rate()) {
+            if write_wav(&filename, &processed, sample_rate) {
                 play_wav_file(&filename);
             }
         }
@@ -517,6 +518,23 @@ fn apply_volume_and_pitch(samples: &[f32], volume: f32, pitch: f32) -> Vec<f32> 
         resampled.iter().map(|&s| s * volume).collect()
     } else {
         resampled
+    }
+}
+
+/// Scale `samples` by `volume_factor`, convert to little-endian PCM16 bytes,
+/// and push them through `cb` in `STREAMING_CHUNK_SIZE`-byte chunks. Volume
+/// and pitch are applied to the full buffer by `apply_volume_and_pitch`
+/// before this runs, so callers pass `1.0` here.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn deliver_pcm(cb: &mut dyn FnMut(&[u8]), samples: &[f32], volume_factor: f32) {
+    let mut pcm = Vec::with_capacity(samples.len() * 2);
+    for &s in samples {
+        let scaled = (s * volume_factor).clamp(-1.0, 1.0);
+        let s16 = (scaled * 32767.0) as i16;
+        pcm.extend_from_slice(&s16.to_le_bytes());
+    }
+    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+        cb(chunk);
     }
 }
 
@@ -646,7 +664,10 @@ fn find_primary_model_onnx(dir: &std::path::Path) -> Option<std::path::PathBuf> 
         .filter_map(Result::ok)
         .find_map(|entry| {
             let path = entry.path();
-            if path.extension().is_some_and(|ext| ext == "onnx") {
+            if path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("onnx"))
+            {
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -715,13 +736,80 @@ fn is_piper_or_github_model(model_id: &str) -> bool {
     PREFIXES.iter().any(|p| model_id.starts_with(p))
 }
 
-/// Kokoro config: model.onnx + voices.bin + tokens.txt + espeak-ng-data/.
+/// Collect lexicon paths for a Kokoro model. Multilingual releases (e.g.
+/// `kokoro-zh_en-int8-multi`) ship several `lexicon-*.txt` files which
+/// sherpa-onnx accepts as a comma-separated list; English-only Kokoro has
+/// none and relies on `espeak-ng-data/` instead. Returns `None` when no
+/// lexicon files are present so the field is left unset.
+fn collect_lexicons(dir: &std::path::Path) -> Option<String> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n == "lexicon.txt" || n.starts_with("lexicon-"))
+        })
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    // Sort for deterministic ordering across platforms / readdir order.
+    paths.sort();
+    Some(
+        paths
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// Locate the dictionary directory for Chinese text normalisation. Kokoro zh
+/// models keep `*.fst` files (date-zh.fst, number-zh.fst, phone-zh.fst) at the
+/// model root; some VITS models nest a `dict/` folder. Returns `None` when no
+/// FST/dict layout is present.
+fn find_dict_dir(dir: &std::path::Path) -> Option<String> {
+    let dict_sub = dir.join("dict");
+    if dict_sub.is_dir() {
+        return Some(dict_sub.to_string_lossy().to_string());
+    }
+    let has_fst = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(Result::ok)
+        .any(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("fst"))
+        });
+    if has_fst {
+        Some(dir.to_string_lossy().to_string())
+    } else {
+        None
+    }
+}
+
+/// Kokoro config: model.onnx + voices.bin + tokens.txt + (espeak-ng-data/ |
+/// lexicon-*.txt + dict_dir). Quantised releases ship `model.int8.onnx`;
+/// `find_primary_model_onnx` resolves both layouts.
 fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKokoroModelConfig {
+    // Prefer the canonical model.onnx; fall back to a directory scan that
+    // skips vocoders and matcha acoustic models (handles model.int8.onnx).
+    let model = find_primary_model_onnx(model_dir).unwrap_or_else(|| model_dir.join("model.onnx"));
     sherpa_onnx::OfflineTtsKokoroModelConfig {
-        model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+        model: Some(model.to_string_lossy().to_string()),
         voices: existing_path(model_dir, "voices.bin"),
         tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
         data_dir: existing_path(model_dir, "espeak-ng-data"),
+        // Multilingual Kokoro (e.g. zh_en) ships lexicon-*.txt and Chinese FST
+        // normalisation; English-only Kokoro uses espeak-ng-data instead, in
+        // which case these resolve to None.
+        lexicon: collect_lexicons(model_dir),
+        dict_dir: find_dict_dir(model_dir),
         // length_scale left at default — rate is applied via GenerationConfig.speed.
         ..Default::default()
     }
@@ -729,10 +817,11 @@ fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKo
 
 /// Matcha config: acoustic-model.onnx + vocoder.onnx + tokens.txt.
 ///
-/// The vocoder is commonly `hifigan_v2.onnx` (en/zh bundled), but recent
-/// models ship `vocos-22khz-univ.onnx` instead. We look for the vocoder in
-/// the model directory first, then fall back to the user's base model dir
-/// so a single shared vocoder can be reused across Matcha models.
+/// Matcha tarballs ship the acoustic model only — the vocoder is a separate
+/// download (commonly `hifigan_v2.onnx`, or `vocos-22khz-univ.onnx` for newer
+/// models). We look for the vocoder in the model directory first, then fall
+/// back to the user's base model dir so a single shared vocoder can be reused
+/// across Matcha models.
 fn build_matcha_config(
     model_dir: &std::path::Path,
     base_dir: &std::path::Path,

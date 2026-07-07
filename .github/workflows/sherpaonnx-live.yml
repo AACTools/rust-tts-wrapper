@@ -45,8 +45,9 @@ jobs:
         with:
           path: |
             ~/.rust-tts-wrapper/sherpaonnx/piper-uk-lada-low
-            ~/.rust-tts-wrapper/sherpaonnx/icefall-fs-baker
+            ~/.rust-tts-wrapper/sherpaonnx/icefall-fs-ljspeech
             ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8-multi
+            ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/merged_models.json') }}
           restore-keys: |
             sherpa-models-${{ matrix.os }}-
@@ -81,21 +82,38 @@ jobs:
           rm piper.tar.bz2
           ls -la piper-uk-lada-low/
 
-      - name: Download Matcha test model (icefall-fs-baker)
+      - name: Download Matcha test model (icefall-fs-ljspeech)
         shell: bash
         run: |
           set -e
           cd "$MODEL_DIR"
-          if [ -d "icefall-fs-baker" ] && [ -n "$(ls -A icefall-fs-baker 2>/dev/null)" ]; then
-            echo "icefall-fs-baker already present"
+          if [ -d "icefall-fs-ljspeech" ] && [ -n "$(ls -A icefall-fs-ljspeech 2>/dev/null)" ]; then
+            echo "icefall-fs-ljspeech already present"
             exit 0
           fi
-          URL=$(get-model-url.py icefall-fs-baker)
+          URL=$(get-model-url.py icefall-fs-ljspeech)
           echo "Downloading $URL"
           wget -q -O matcha.tar.bz2 "$URL"
-          mkdir -p icefall-fs-baker
-          tar -xjf matcha.tar.bz2 -C icefall-fs-baker --strip-components=1
+          mkdir -p icefall-fs-ljspeech
+          tar -xjf matcha.tar.bz2 -C icefall-fs-ljspeech --strip-components=1
           rm matcha.tar.bz2
+
+      - name: Download shared Matcha vocoder (hifigan_v2.onnx)
+        # Matcha acoustic models don't bundle a vocoder — they need one in
+        # the base model dir (build_matcha_config falls back to it). The
+        # vocoder lives in the separate `vocoder-models` release.
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -f "hifigan_v2.onnx" ]; then
+            echo "hifigan_v2.onnx already present"
+            exit 0
+          fi
+          echo "Downloading hifigan_v2.onnx"
+          wget -q -O hifigan_v2.onnx \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/hifigan_v2.onnx
+          ls -la hifigan_v2.onnx
 
       - name: Download Kokoro test model (kokoro-zh_en-int8-multi)
         # Kokoro is large (~140 MB); only fetch on Linux to keep matrix minutes

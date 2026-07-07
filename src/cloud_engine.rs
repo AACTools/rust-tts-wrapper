@@ -34,10 +34,97 @@ pub(crate) const STREAMING_CHUNK_SIZE: usize = 8192;
 
 #[cfg(feature = "cloud")]
 use {
+    tungstenite::client::IntoClientRequest,
     tungstenite::{connect, Message},
     url::Url,
     uuid::Uuid,
 };
+
+/// Decode an MP3 byte buffer to little-endian mono PCM16. Multi-channel input
+/// is downmixed by averaging interleaved samples. Returns an empty vec if no
+/// frames decode. Used so cloud engines deliver uniform PCM16 through
+/// `on_audio` (matching the local SherpaOnnx / SAPI engines) instead of raw
+/// MP3 bytes that a SAPI site would have to decode itself.
+#[cfg(feature = "cloud")]
+fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
+    use std::io::Cursor;
+    let mut decoder = minimp3::Decoder::new(Cursor::new(mp3));
+    let mut pcm = Vec::new();
+    while let Ok(frame) = decoder.next_frame() {
+        let channels = frame.channels.max(1);
+        if channels == 1 {
+            for &s in &frame.data {
+                pcm.extend_from_slice(&s.to_le_bytes());
+            }
+        } else {
+            // Downmix interleaved channels to mono by averaging.
+            for group in frame.data.chunks_exact(channels) {
+                #[allow(clippy::cast_possible_truncation)]
+                let avg =
+                    (group.iter().map(|&s| i32::from(s)).sum::<i32>() / channels as i32) as i16;
+                pcm.extend_from_slice(&avg.to_le_bytes());
+            }
+        }
+    }
+    pcm
+}
+/// Sniff the first few bytes for an MP3 sync word or ID3 tag. Kept as a
+/// diagnostic helper but not used for delivery routing — raw PCM16 audio
+/// frequently contains 0xFF 0xE0+ byte pairs that false-positive, so format
+/// routing uses the explicit `CloudConfig::response_is_pcm` flag instead.
+#[cfg(test)]
+fn looks_like_mp3(b: &[u8]) -> bool {
+    if b.len() >= 3 && &b[..3] == b"ID3" {
+        return true;
+    }
+    let scan = b.len().min(4096).saturating_sub(1);
+    (0..scan).any(|i| b[i] == 0xFF && (b[i + 1] & 0xE0) == 0xE0)
+}
+
+/// Microsoft Edge "Read Aloud" constants. The trusted client token is the
+/// well-known value used by edge-tts / VoiceGarden-SAPI; `Sec-MS-GEC` is
+/// derived from it and the current time (see `edge_sec_ms_gec`).
+#[cfg(feature = "cloud")]
+const EDGE_TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+#[cfg(feature = "cloud")]
+const EDGE_VOICE_LIST_URL: &str = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+#[cfg(feature = "cloud")]
+const EDGE_DEFAULT_VOICE: &str = "en-US-AriaNeural";
+/// Edge's WS endpoint 403-rejects bare handshakes — it expects the Edge
+/// browser's Read Aloud User-Agent (and the Read Aloud extension Origin).
+#[cfg(feature = "cloud")]
+const EDGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0";
+#[cfg(feature = "cloud")]
+const EDGE_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
+
+/// Generate the `Sec-MS-GEC` token Microsoft Edge "Read Aloud" requires.
+///
+/// Algorithm (matching edge-tts / VoiceGarden `WSConnectionPool::GetGECToken`):
+/// take the Windows FILETIME tick count (100-ns units since 1601-01-01), round
+/// down to the nearest 5-minute boundary (3,000,000,000 ticks), concatenate
+/// with the trusted client token, and SHA-256 → uppercase hex. Returns a
+/// fresh token valid for up to 5 minutes.
+#[cfg(feature = "cloud")]
+fn edge_sec_ms_gec() -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let unix_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // FILETIME epoch (1601-01-01) is 116_444_736_000s before Unix (1970-01-01);
+    // 100-ns ticks = nanos/100 + that offset in ticks.
+    #[allow(clippy::cast_possible_truncation)]
+    let filetime_ticks: u128 = unix_nanos / 100 + 116_444_736_000_000_000;
+    let rounded = filetime_ticks - (filetime_ticks % 3_000_000_000);
+    let input = format!("{rounded}{EDGE_TRUSTED_CLIENT_TOKEN}");
+    let hash = Sha256::digest(input.as_bytes());
+    let mut token = String::with_capacity(hash.len() * 2);
+    for b in &hash {
+        let _ = write!(token, "{b:02X}");
+    }
+    token
+}
 
 /// Configuration for a single cloud TTS provider.
 #[derive(Debug, Clone, Default)]
@@ -61,6 +148,11 @@ struct CloudConfig {
     voices_url: Option<String>,
     /// Provider ID string for voice mapping.
     provider_id: String,
+    /// Whether this engine's synthesis response body is already raw PCM16
+    /// (delivered verbatim) rather than MP3 (decoded to PCM before delivery).
+    /// Azure returns PCM because we request `raw-24khz-16bit-mono-pcm`;
+    /// Cartesia returns raw PCM by design. Everything else returns MP3.
+    response_is_pcm: bool,
 }
 
 /// A TTS engine that synthesises speech by calling a cloud HTTP API.
@@ -142,7 +234,10 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             let mut extra = HashMap::new();
             extra.insert(
                 "X-Microsoft-OutputFormat".into(),
-                "audio-24khz-96kbitrate-mono-mp3".into(),
+                // Raw PCM16 24 kHz mono so the bytes flow straight to on_audio
+                // without an MP3 decode step (SAPI wants PCM; matches the
+                // SherpaOnnx / SAPI engines' PCM delivery contract).
+                "raw-24khz-16bit-mono-pcm".into(),
             );
             extra.insert("User-Agent".into(), "rust-tts-wrapper".into());
             Some(CloudConfig {
@@ -158,6 +253,8 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                     "https://{region}.tts.speech.microsoft.com/cognitiveservices/voices/list"
                 )),
                 provider_id: "azure".into(),
+                // X-Microsoft-OutputFormat requests raw PCM (see above).
+                response_is_pcm: true,
                 ..Default::default()
             })
         }
@@ -184,6 +281,8 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             text_field: "text".into(),
             voices_url: Some("https://api.cartesia.ai/voices".into()),
             provider_id: "cartesia".into(),
+            // Cartesia's /tts/bytes endpoint returns raw PCM s16le @24 kHz.
+            response_is_pcm: true,
             ..Default::default()
         }),
         "deepgram" => Some(CloudConfig {
@@ -340,6 +439,19 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             eprintln!("WARNING: AWS Polly requires AWS Signature V4 authentication which is not implemented. Use a different cloud provider.");
             None
         }
+        // Microsoft Edge "Read Aloud" — the free, no-subscription Windows
+        // neural voices. WS-only (no REST synth endpoint); the URL + Sec-MS-GEC
+        // auth are built at speak time in the WS branch below. Voice list shape
+        // is identical to Azure's (`ShortName`/`Gender`/`Locale`/…). Edge
+        // returns MP3 frames (raw PCM isn't supported on this endpoint), so
+        // `response_is_pcm = false` and the WS loop decodes before delivery.
+        "edge" => Some(CloudConfig {
+            default_voice: Some(EDGE_DEFAULT_VOICE.into()),
+            voices_url: Some(EDGE_VOICE_LIST_URL.into()),
+            provider_id: "edge".into(),
+            response_is_pcm: false,
+            ..Default::default()
+        }),
         _ => None,
     }
 }
@@ -878,42 +990,84 @@ impl TtsEngine for CloudEngine {
 
         let (text, _is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
 
-        // Azure WebSocket approach if word boundaries are requested
+        // WebSocket approach: Azure when word boundaries are requested, or
+        // Edge always (Edge is WS-only — it has no REST synth endpoint).
+        // Edge reuses the identical Azure "Turn" protocol; only the URL/auth
+        // differ (token-based Sec-MS-GEC vs subscription key).
         #[cfg(feature = "cloud")]
-        if self.config.provider_id == "azure" && on_boundary.is_some() {
-            let Some(on_boundary) = on_boundary.as_mut() else {
-                return Ok(());
+        let use_ws = self.config.provider_id == "edge"
+            || (self.config.provider_id == "azure" && on_boundary.is_some());
+        #[cfg(feature = "cloud")]
+        if use_ws {
+            let ws_url_str = if self.config.provider_id == "edge" {
+                format!(
+                    "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1\
+                     ?TrustedClientToken={EDGE_TRUSTED_CLIENT_TOKEN}\
+                     &Sec-MS-GEC={gec}\
+                     &Sec-MS-GEC-Version=1-142.0.3595.94",
+                    gec = edge_sec_ms_gec()
+                )
+            } else {
+                // Azure — subscription key lives in the query string.
+                let region = self
+                    .credentials
+                    .get("region")
+                    .cloned()
+                    .unwrap_or_else(|| "eastus".into());
+                format!(
+                    "wss://{}.tts.speech.microsoft.com/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={}",
+                    region, self.api_key
+                )
             };
-            let region = self
-                .credentials
-                .get("region")
-                .cloned()
-                .unwrap_or_else(|| "eastus".into());
+
+            let ws_url =
+                Url::parse(&ws_url_str).map_err(|e| TtsError(format!("Invalid WS URL: {e}")))?;
+            // Edge mimics the Edge browser's Read Aloud extension — it
+            // 403-rejects bare WS handshakes, so set the Origin + User-Agent
+            // before connecting. Azure accepts the default handshake.
+            let mut req = ws_url
+                .as_str()
+                .into_client_request()
+                .map_err(|e| TtsError(format!("WS request build: {e}")))?;
+            if self.config.provider_id == "edge" {
+                let h = req.headers_mut();
+                let origin = EDGE_ORIGIN
+                    .parse()
+                    .map_err(|e| TtsError(format!("Origin header: {e}")))?;
+                let ua = EDGE_USER_AGENT
+                    .parse()
+                    .map_err(|e| TtsError(format!("User-Agent header: {e}")))?;
+                h.insert("Origin", origin);
+                h.insert("User-Agent", ua);
+            }
+            let (mut socket, _) =
+                connect(req).map_err(|e| TtsError(format!("WS connect error: {e}")))?;
+
             // Azure requires a 32-char lowercase hex UUID with NO dashes.
             let request_id = Uuid::new_v4().simple().to_string();
-            let ws_url_str = format!(
-                "wss://{}.tts.speech.microsoft.com/cognitiveservices/websocket/v1?Ocp-Apim-Subscription-Key={}",
-                region, self.api_key
-            );
-
-            let ws_url = Url::parse(&ws_url_str)
-                .map_err(|e| TtsError(format!("Invalid Azure WS URL: {e}")))?;
-            let (mut socket, _) = connect(ws_url.as_str())
-                .map_err(|e| TtsError(format!("Azure WS Connect error: {e}")))?;
 
             // Output format: configurable via credentials["outputFormat"].
-            // Azure supports many formats; the default is a high-quality MP3.
-            // Common alternatives:
-            //   audio-16khz-32kbitrate-mono-mp3      (lower bitrate)
-            //   riff-24khz-16bit-mono-pcm            (raw WAV/PCM)
-            //   raw-24khz-16bit-mono-pcm             (no WAV header)
+            // Default is raw PCM16 24 kHz mono so WS audio frames are delivered
+            // straight through `on_audio` without an MP3 decode step (real-time
+            // streaming preserved). Common alternatives:
+            //   audio-24khz-96kbitrate-mono-mp3      (MP3 — needs decoding)
+            //   riff-24khz-16bit-mono-pcm            (WAV-wrapped PCM)
             //   webm-24khz-16bit-mono-opus           (Opus in WebM)
             //   ogg-48khz-16bit-mono-opus            (Opus in OGG)
-            //   audio-48khz-192kbitrate-mono-mp3     (higher quality)
+            //   audio-48khz-192kbitrate-mono-mp3     (higher-quality MP3)
+            // Output format: configurable via credentials["outputFormat"].
+            // Azure defaults to raw PCM16 (delivered verbatim); Edge returns
+            // MP3 on its free endpoint (raw PCM isn't supported there) and is
+            // decoded after the WS session completes.
+            let default_format = if self.config.provider_id == "edge" {
+                "audio-24khz-96kbitrate-mono-mp3"
+            } else {
+                "raw-24khz-16bit-mono-pcm"
+            };
             let output_format = self
                 .credentials
                 .get("outputFormat")
-                .map_or("audio-24khz-96kbitrate-mono-mp3", String::as_str);
+                .map_or(default_format, String::as_str);
 
             // Helper to produce an ISO 8601 timestamp for the X-Timestamp header.
             let now_timestamp = || {
@@ -969,6 +1123,11 @@ impl TtsEngine for CloudEngine {
             // tts_speak from hanging indefinitely if the service stalls.
             let ws_deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
 
+            // Edge returns MP3 frames (raw PCM isn't supported on its free
+            // endpoint). Accumulate them here and decode once the session ends;
+            // Azure (response_is_pcm) streams PCM frames straight through.
+            let mut mp3_buf: Vec<u8> = Vec::new();
+
             loop {
                 if std::time::Instant::now() > ws_deadline {
                     let _ = socket.close(None);
@@ -1018,14 +1177,20 @@ impl TtsEngine for CloudEngine {
                                                 if let Some((word, offset_ms, duration_ms)) =
                                                     azure_ws_parse_word_boundary(item)
                                                 {
-                                                    #[allow(clippy::cast_precision_loss)]
-                                                    on_boundary(
-                                                        word,
-                                                        offset_ms as f32 / 1000.0,
-                                                        (offset_ms + duration_ms) as f32 / 1000.0,
-                                                        -1,
-                                                        -1,
-                                                    );
+                                                    // Edge (no boundary callback) still
+                                                    // pumps audio — only dispatch when the
+                                                    // caller asked for boundaries.
+                                                    if let Some(cb) = on_boundary.as_mut() {
+                                                        #[allow(clippy::cast_precision_loss)]
+                                                        cb(
+                                                            word,
+                                                            offset_ms as f32 / 1000.0,
+                                                            (offset_ms + duration_ms) as f32
+                                                                / 1000.0,
+                                                            -1,
+                                                            -1,
+                                                        );
+                                                    }
                                                 }
                                             }
                                             Some("Viseme") => {
@@ -1050,13 +1215,31 @@ impl TtsEngine for CloudEngine {
                     Message::Binary(b) if b.len() > 2 => {
                         let header_length = ((b[0] as usize) << 8) | (b[1] as usize);
                         if b.len() > 2 + header_length {
-                            let audio_start = 2 + header_length;
-                            if let Some(cb) = on_audio.as_mut() {
-                                cb(&b[audio_start..]);
+                            let audio = &b[2 + header_length..];
+                            if self.config.response_is_pcm {
+                                // Azure raw-PCM frames — deliver straight through.
+                                if let Some(cb) = on_audio.as_mut() {
+                                    cb(audio);
+                                }
+                            } else {
+                                // Edge MP3 frames — accumulate, decode after the loop.
+                                mp3_buf.extend_from_slice(audio);
                             }
                         }
                     }
                     _ => {}
+                }
+            }
+
+            // Edge (and any future MP3-over-WS provider): decode the accumulated
+            // MP3 frames to PCM16 mono now and deliver them in chunks, so every
+            // WS engine hands the caller the same PCM contract as the REST ones.
+            if !self.config.response_is_pcm && !mp3_buf.is_empty() {
+                let pcm = decode_mp3_to_pcm16_mono(&mp3_buf);
+                if let Some(cb) = on_audio.as_mut() {
+                    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+                        cb(chunk);
+                    }
                 }
             }
 
@@ -1143,11 +1326,12 @@ impl TtsEngine for CloudEngine {
 
             if let Some(b64) = json.get("audio_base64").and_then(|v| v.as_str()) {
                 use base64::Engine;
-                let audio_bytes = base64::engine::general_purpose::STANDARD
+                let mp3_bytes = base64::engine::general_purpose::STANDARD
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
+                let pcm = decode_mp3_to_pcm16_mono(&mp3_bytes);
                 if let Some(cb) = on_audio.as_mut() {
-                    for chunk in audio_bytes.chunks(STREAMING_CHUNK_SIZE) {
+                    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
                         cb(chunk);
                     }
                 }
@@ -1170,11 +1354,12 @@ impl TtsEngine for CloudEngine {
 
             if let Some(b64) = json.get("audioContent").and_then(|v| v.as_str()) {
                 use base64::Engine;
-                let audio_bytes = base64::engine::general_purpose::STANDARD
+                let mp3_bytes = base64::engine::general_purpose::STANDARD
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
+                let pcm = decode_mp3_to_pcm16_mono(&mp3_bytes);
                 if let Some(cb) = on_audio.as_mut() {
-                    for chunk in audio_bytes.chunks(STREAMING_CHUNK_SIZE) {
+                    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
                         cb(chunk);
                     }
                 }
@@ -1207,17 +1392,21 @@ impl TtsEngine for CloudEngine {
                 }
             }
         } else if let Some(cb) = on_audio.as_mut() {
-            use std::io::Read;
-            let mut resp = resp;
-            let mut buffer = [0u8; STREAMING_CHUNK_SIZE];
-            loop {
-                let n = resp
-                    .read(&mut buffer)
-                    .map_err(|e| TtsError(format!("Read error: {e}")))?;
-                if n == 0 {
-                    break;
-                }
-                cb(&buffer[..n]);
+            // Most providers respond with an MP3 body (OpenAI, ElevenLabs,
+            // Deepgram, Watson, …); a few return raw PCM natively (Azure via
+            // X-Microsoft-OutputFormat, Cartesia). Read the whole body, decode
+            // MP3 → PCM16 mono when needed so every cloud engine delivers the
+            // same PCM contract as the local engines, then chunk it out.
+            let body = resp
+                .bytes()
+                .map_err(|e| TtsError(format!("Read error: {e}")))?;
+            let pcm = if self.config.response_is_pcm {
+                body.to_vec()
+            } else {
+                decode_mp3_to_pcm16_mono(&body)
+            };
+            for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+                cb(chunk);
             }
 
             if let Some(cb) = on_boundary.as_mut() {
@@ -1283,7 +1472,9 @@ impl TtsEngine for CloudEngine {
             .map_err(|e| TtsError(format!("Voice list parse error: {e}")))?;
 
         match self.config.provider_id.as_str() {
-            "azure" => json
+            // Azure and Edge share the same voice-list JSON shape
+            // (`ShortName`/`Gender`/`Locale`/…).
+            "azure" | "edge" => json
                 .as_array()
                 .map_or_else(|| Ok(vec![]), |arr| Ok(map_azure_voices(arr))),
             "google" => json
@@ -1331,6 +1522,7 @@ impl TtsEngine for CloudEngine {
             "openai" => "openai",
             "elevenlabs" => "elevenlabs",
             "azure" => "azure",
+            "edge" => "edge",
             "google" => "google",
             "cartesia" => "cartesia",
             "deepgram" => "deepgram",
@@ -1562,6 +1754,46 @@ mod tests {
     }
 
     #[test]
+    fn test_edge_config_is_credential_free_ws() {
+        // Edge is free + WS-only: no synth REST URL, no auth header, but it
+        // must expose the bing.com voice list and a default voice.
+        let cfg = build_config("edge", &HashMap::new()).expect("edge config");
+        assert_eq!(cfg.provider_id, "edge");
+        assert!(cfg.synth_url.is_empty());
+        assert!(cfg.auth_header.is_empty());
+        assert!(cfg
+            .voices_url
+            .as_deref()
+            .unwrap()
+            .contains("speech.platform.bing.com"));
+        assert_eq!(cfg.default_voice.as_deref(), Some("en-US-AriaNeural"));
+        // Edge returns MP3 on its free endpoint — the WS loop decodes it.
+        assert!(!cfg.response_is_pcm);
+    }
+
+    #[test]
+    fn test_edge_sec_ms_gec_is_uppercase_hex_sha256() {
+        // Sec-MS-GEC is SHA-256 → 32 bytes → 64 uppercase hex chars.
+        let token = edge_sec_ms_gec();
+        assert_eq!(token.len(), 64, "token must be 64 hex chars: {token}");
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
+            "token must be uppercase hex: {token}"
+        );
+    }
+
+    #[test]
+    fn test_edge_sec_ms_gec_is_stable_within_five_minutes() {
+        // The token is rounded down to a 5-minute window, so two calls within
+        // the same window must yield identical tokens (guards the rounding).
+        let a = edge_sec_ms_gec();
+        let b = edge_sec_ms_gec();
+        assert_eq!(a, b, "tokens within the same 5-minute window must match");
+    }
+
+    #[test]
     fn test_hume_voice_is_object_in_extra_body() {
         // Hume expects voice as {"voice": {"name": "..."}}.
         let creds = HashMap::new();
@@ -1675,7 +1907,9 @@ mod tests {
             cfg.extra_headers
                 .get("X-Microsoft-OutputFormat")
                 .map(String::as_str),
-            Some("audio-24khz-96kbitrate-mono-mp3")
+            // Raw PCM16 24 kHz mono — flows straight to on_audio without an
+            // MP3 decode step (uniform PCM contract across all engines).
+            Some("raw-24khz-16bit-mono-pcm")
         );
         assert_eq!(cfg.default_voice.as_deref(), Some("en-US-AriaNeural"));
     }
@@ -2106,6 +2340,32 @@ mod tests {
     }
 
     // ===== Azure WS message parser =====
+
+    #[test]
+    fn test_looks_like_mp3_id3_tag() {
+        assert!(looks_like_mp3(b"ID3\x03\x00\x00\x00\x00"));
+    }
+
+    #[test]
+    fn test_looks_like_mp3_frame_sync() {
+        // First byte 0xFF, second with top 3 bits set (MPEG sync).
+        assert!(looks_like_mp3(&[0xFF, 0xE3, 0x10, 0x00]));
+        assert!(looks_like_mp3(&[0x00, 0x00, 0xFF, 0xFB, 0x90])); // sync mid-stream
+    }
+
+    #[test]
+    fn test_looks_like_mp3_raw_pcm_is_false() {
+        // Raw PCM16 has no sync word / ID3 — must not be mistaken for MP3.
+        assert!(!looks_like_mp3(&[0x00, 0x01, 0x02, 0x03, 0x04, 0x05]));
+        assert!(!looks_like_mp3(&[]));
+    }
+
+    #[test]
+    fn test_decode_mp3_garbage_returns_empty_without_panicking() {
+        // Empty / non-MP3 input must not panic and must yield no PCM.
+        assert!(decode_mp3_to_pcm16_mono(&[]).is_empty());
+        assert!(decode_mp3_to_pcm16_mono(b"definitely not mp3").is_empty());
+    }
 
     #[test]
     fn test_azure_ws_extract_path_basic() {

@@ -13,7 +13,7 @@ use crate::cloud_engine;
 use crate::sapi_engine::SapiEngine;
 #[cfg(feature = "sherpaonnx")]
 use crate::sherpaonnx_engine::SherpaOnnxEngine;
-#[cfg(feature = "system")]
+#[cfg(all(feature = "system", target_os = "linux"))]
 use crate::system_engine::SystemEngine;
 
 /// Create an engine by its string identifier.
@@ -29,14 +29,15 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
     // caller actually asked for one of the gated engines.
     match engine_id {
         "system" => {
-            #[cfg(feature = "system")]
+            #[cfg(all(feature = "system", target_os = "linux"))]
             {
                 return Some(Arc::new(SystemEngine::new()));
             }
-            #[cfg(not(feature = "system"))]
+            #[cfg(not(all(feature = "system", target_os = "linux")))]
             {
                 eprintln!(
-                    "Engine 'system' is not enabled in this build. Rebuild with --features system."
+                    "Engine 'system' requires the 'system' feature on Linux. \
+                     Current build does not satisfy these conditions."
                 );
                 return None;
             }
@@ -131,7 +132,7 @@ pub fn engine_count() -> usize {
 pub fn engine_list() -> Vec<EngineDescriptor> {
     let mut engines = Vec::new();
 
-    #[cfg(feature = "system")]
+    #[cfg(all(feature = "system", target_os = "linux"))]
     engines.push(EngineDescriptor {
         id: "system".into(),
         name: "System (Speech Dispatcher)".into(),
@@ -169,6 +170,7 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
             ("openai", "OpenAI", true, r#"["apiKey"]"#),
             ("elevenlabs", "ElevenLabs", true, r#"["apiKey"]"#),
             ("azure", "Azure", true, r#"["subscriptionKey","region"]"#),
+            ("edge", "Microsoft Edge (Read Aloud)", false, "[]"),
             ("google", "Google Cloud", true, r#"["apiKey"]"#),
             (
                 "polly",

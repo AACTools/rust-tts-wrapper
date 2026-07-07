@@ -59,7 +59,7 @@ fn test_cloud_engine_needs_credentials() {
     assert!(openai.credential_keys_json.contains("apiKey"));
 }
 
-#[cfg(feature = "system")]
+#[cfg(all(feature = "system", target_os = "linux"))]
 #[test]
 fn test_system_engine_no_credentials() {
     let engines = factory::engine_list();
@@ -81,7 +81,7 @@ fn test_sherpaonnx_no_credentials() {
     assert!(!sherpa.needs_credentials);
 }
 
-#[cfg(feature = "system")]
+#[cfg(all(feature = "system", target_os = "linux"))]
 #[test]
 fn test_create_system_engine() {
     let engine = factory::create_engine("system", "");
@@ -104,7 +104,7 @@ fn test_create_unknown_engine() {
     assert!(engine.is_none(), "Unknown engines should return None");
 }
 
-#[cfg(feature = "system")]
+#[cfg(all(feature = "system", target_os = "linux"))]
 #[test]
 fn test_system_engine_stop_graceful() {
     let engine = factory::create_engine("system", "").expect("system engine");

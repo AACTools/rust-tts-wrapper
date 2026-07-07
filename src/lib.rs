@@ -40,17 +40,18 @@ pub mod factory;
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 mod sherpaonnx_engine;
-#[cfg(feature = "system")]
+#[cfg(all(feature = "system", target_os = "linux"))]
 mod system_engine;
 pub mod types;
+
+// Re-exports for user-friendly API
+pub use engine::TtsEngine;
+pub use factory::create_engine;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::{Arc, Mutex};
-
-use engine::TtsEngine;
-use factory::create_engine;
 
 /// Shared engine handle. Using `Arc<dyn TtsEngine>` instead of
 /// `Mutex<Box<dyn TtsEngine>>` means synthesis no longer blocks
@@ -423,9 +424,8 @@ fn tts_speak_impl(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) -> i32
             }
             Err(e) => {
                 let msg = e.to_string();
-                if let Ok(c) = CString::new(&msg[..]) {
-                    *ctx_ref.last_error.lock().unwrap() = c;
-                }
+                *ctx_ref.last_error.lock().unwrap() =
+                    CString::new(msg.clone()).unwrap_or_else(|_| CString::new("error").unwrap());
                 if let Some(cb) = error_cb.cb {
                     if let Ok(c_msg) = CString::new(msg) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
@@ -542,9 +542,8 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             }
             Err(e) => {
                 let msg = e.to_string();
-                if let Ok(c) = CString::new(&msg[..]) {
-                    *ctx_ref.last_error.lock().unwrap() = c;
-                }
+                *ctx_ref.last_error.lock().unwrap() =
+                    CString::new(msg.clone()).unwrap_or_else(|_| CString::new("error").unwrap());
                 if let Some(cb) = error_cb.cb {
                     if let Ok(c_msg) = CString::new(msg) {
                         cb(c_msg.as_ptr(), error_cb.userdata);

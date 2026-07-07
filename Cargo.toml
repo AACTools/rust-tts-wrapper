@@ -11,10 +11,30 @@ categories = ["accessibility", "api-bindings", "multimedia::audio"]
 [lib]
 crate-type = ["cdylib", "staticlib", "lib"]
 
+[[example]]
+name = "quick-start"
+path = "examples/quick-start.rs"
+
+[[example]]
+name = "word-boundary-demo"
+path = "examples/word-boundary-demo.rs"
+
+[[example]]
+name = "streaming-audio-demo"
+path = "examples/streaming-audio-demo.rs"
+
+[[example]]
+name = "advanced-features-demo"
+path = "examples/advanced-features-demo.rs"
+
+[[example]]
+name = "simple-test"
+path = "examples/simple-test.rs"
+
 [features]
-default = ["system", "cloud", "sherpaonnx"]
+default = ["system", "cloud", "sherpaonnx", "sapi"]
 system = ["speech-dispatcher"]
-cloud = ["reqwest", "serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url"]
+cloud = ["reqwest", "serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "minimp3", "sha2"]
 sherpaonnx = ["sherpa-onnx", "serde_json"]
 tungstenite = ["dep:tungstenite"]
 uuid = ["dep:uuid"]
@@ -27,7 +47,6 @@ avsynth = ["speechmarkdown"]
 sapi = ["windows", "speechmarkdown"]
 
 [dependencies]
-speech-dispatcher = { version = "0.16", optional = true }
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
@@ -38,9 +57,19 @@ anyhow = "1"
 tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"], optional = true }
 uuid = { version = "1.23.2", features = ["v4"], optional = true }
 url = { version = "2.5.8", optional = true }
+# MP3 → PCM16 decode so cloud engines deliver uniform PCM like the local ones.
+minimp3 = { version = "0.5", optional = true }
+# SHA-256 for the Edge (Read Aloud) Sec-MS-GEC auth token.
+sha2 = { version = "0.10", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_System_Com", "Win32_System_Ole"], optional = true }
+windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# speech-dispatcher is the Linux system TTS daemon; the crate's bindgen step
+# requires libclang and the daemon isn't available on Windows/macOS, so it is
+# gated to Linux.
+speech-dispatcher = { version = "0.16", optional = true }
 
 [target.'cfg(target_os = "macos")'.build-dependencies]
 cc = "1"

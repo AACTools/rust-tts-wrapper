@@ -11,9 +11,13 @@
 //!   cargo test --test sherpaonnx_live --features sherpaonnx -- --ignored
 //!
 //! Models used (smallest available per family at the time of writing):
-//!   vits   — piper-uk-lada-low     (~25 MB)  Eastern European Piper voice
-//!   matcha — icefall-fs-baker      (~72 MB)  Matcha-TTS English/ZH
+//!   vits   — piper-uk-lada-low       (~25 MB)  Eastern European Piper voice
+//!   matcha — icefall-fs-ljspeech     (~73 MB)  Matcha-TTS English (LJSpeech)
 //!   kokoro — kokoro-zh_en-int8-multi (~140 MB) Kokoro multilingual
+//!
+//! Matcha models need a separate vocoder (`hifigan_v2.onnx`) in the base
+//! model dir; the workflow downloads it. See `build_matcha_config` for the
+//! fallback search.
 //!
 //! Override with `SHERPA_VITS_MODEL`, `SHERPA_MATCHA_MODEL`, `SHERPA_KOKORO_MODEL`.
 
@@ -315,7 +319,7 @@ fn vits_piper_multi_speaker_voice_id_selectable() {
 #[test]
 #[ignore]
 fn matcha_synthesises_nonempty_audio() {
-    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-fs-baker");
+    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-fs-ljspeech");
     let engine = engine_for(&id);
     let total = Arc::new(Mutex::new(0usize));
     let t = total.clone();
@@ -339,7 +343,7 @@ fn matcha_synthesises_nonempty_audio() {
 #[test]
 #[ignore]
 fn matcha_word_boundaries_fire() {
-    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-fs-baker");
+    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-fs-ljspeech");
     let engine = engine_for(&id);
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();

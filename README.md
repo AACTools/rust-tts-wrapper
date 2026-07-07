@@ -2,13 +2,14 @@
 
 Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
 
-## Engines (21 total)
+## Engines (22 total)
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
 | System (speech-dispatcher) | Local | None | — | — | Estimated | — |
-| Sherpa-ONNX | Local (1300+ models) | None | Simulated* | Speakers | Estimated | — |
-| Azure | Cloud | Key + Region | Chunked | API | Estimated | Platform-aware |
+| Sherpa-ONNX | Local (1300+ models) | None | Chunked | Speakers | Estimated | — |
+| Azure | Cloud | Key + Region | Chunked | API | **Real** (WS) | Platform-aware |
+| Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Chunked | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | Chunked | API | **Real** (v1beta1 timepoints) | Platform-aware |
 | OpenAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 | ElevenLabs | Cloud | API Key | Chunked | API | Estimated | Platform-aware |
@@ -28,7 +29,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | xAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 | ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 
-- **Streaming**: Cloud engines stream audio in 8KB chunks via the `on_audio` callback. Sherpa-ONNX delivers all audio at once after synthesis (*simulated).
+- **Streaming**: Audio is delivered through the `on_audio` callback in 8 KB chunks. Cloud engines stream as bytes arrive over the network; Sherpa-ONNX synthesises the whole clip first, then slices the rendered PCM into 8 KB chunks (matching the cloud delivery shape and the js-tts-wrapper / swift-tts-wrapper siblings).
 
 ## Formatting & Testing
 

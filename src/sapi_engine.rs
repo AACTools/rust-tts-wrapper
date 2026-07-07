@@ -1,6 +1,6 @@
 //! Windows SAPI (Speech API) engine.
 
-use crate::engine::{preprocess_speech_markdown, TtsEngine};
+use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
@@ -10,13 +10,16 @@ use std::sync::Mutex;
 #[cfg(feature = "sapi")]
 use windows::{
     core::{Interface, Result, HSTRING, PCWSTR},
+    Win32::Media::Audio::WAVEFORMATEX,
     Win32::Media::Speech::{
-        IEnumSpObjectTokens, ISpEventSource, ISpObjectToken, ISpObjectTokenCategory, ISpVoice,
-        SpObjectTokenCategory, SpVoice, SPCAT_VOICES, SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY,
-        SPEVENT, SPF_ASYNC, SPF_IS_XML, SPF_PURGEBEFORESPEAK,
+        IEnumSpObjectTokens, ISpEventSource, ISpObjectToken, ISpObjectTokenCategory,
+        ISpStreamFormat, ISpVoice, SpMemoryStream, SpObjectTokenCategory, SpVoice, SPCAT_VOICES,
+        SPEI_END_INPUT_STREAM, SPEI_WORD_BOUNDARY, SPEVENT, SPF_ASYNC, SPF_IS_XML,
+        SPF_PURGEBEFORESPEAK,
     },
     Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, IStream, CLSCTX_ALL,
+        COINIT_MULTITHREADED, STREAM_SEEK_SET,
     },
 };
 
@@ -150,9 +153,28 @@ impl SapiEngine {
             // Ask SAPI to (a) signal us when these events arrive and (b)
             // queue them so GetEvents can return them.
             let interest = SPFEI_WORD_BOUNDARY | SPFEI_END_INPUT_STREAM;
-            event_source
-                .SetInterest(interest, interest)
-                .map_err(|e| TtsError(format!("SetInterest failed: {e}")))?;
+            if event_source.SetInterest(interest, interest).is_err() {
+                // Classic SPEI events aren't supported — notably by the modern
+                // "Microsoft Natural"/Edge voices, whose ISpEventSource rejects
+                // the interest mask with E_INVALIDARG. Fall back to a
+                // synchronous speak and deliver estimated word boundaries so
+                // callers still get highlighting rather than a hard failure.
+                let sync_flags = flags & !(SPF_ASYNC.0 as u32);
+                sp_voice
+                    .Speak(input_wide, sync_flags, None)
+                    .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+                if let Some(cb) = on_boundary.as_mut() {
+                    let visible = strip_ssml_tags(processed_text);
+                    for b in estimate_word_boundaries(&visible) {
+                        #[allow(clippy::cast_precision_loss)]
+                        let start = b.offset as f32 / 1000.0;
+                        #[allow(clippy::cast_precision_loss)]
+                        let end = (b.offset + b.duration) as f32 / 1000.0;
+                        cb(&b.text, start, end, -1, -1);
+                    }
+                }
+                return Ok(());
+            }
 
             // Speak asynchronously; the pump loop blocks until END_INPUT_STREAM.
             sp_voice
@@ -282,6 +304,86 @@ fn volume_to_sapi(volume: f32) -> u16 {
     (volume.clamp(0.0, 2.0) * 50.0).round() as u16
 }
 
+/// Build the SAPI input buffer and report whether it should be parsed as XML.
+///
+/// Runs SpeechMarkdown preprocessing and folds a non-normal pitch into an
+/// SSML `<prosody>` wrapper (mirrors the engines that emit SSML). Returns
+/// `(input_wide, is_xml, processed_text)` where `processed_text` is the
+/// post-SpeechMarkdown string used by the boundary-event position mapper.
+fn build_sapi_input(text: &str, pitch: f32) -> (HSTRING, bool, String) {
+    let (processed, is_ssml) = preprocess_speech_markdown(text, "sapi");
+    let needs_pitch = (pitch - 1.0).abs() > f32::EPSILON;
+
+    let (input, is_xml) = if is_ssml {
+        let final_ssml = if needs_pitch {
+            let pitch_attr = pitch_to_percent(pitch);
+            processed
+                .replacen(
+                    "<speak",
+                    &format!("<speak><prosody pitch=\"{pitch_attr}\""),
+                    1,
+                )
+                .replacen("</speak>", "</prosody></speak>", 1)
+        } else {
+            processed.clone()
+        };
+        (HSTRING::from(&final_ssml), true)
+    } else if needs_pitch {
+        let pitch_attr = pitch_to_percent(pitch);
+        let escaped = processed
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        let ssml = format!(
+            "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\"\
+             xml:lang=\"en-US\"><prosody pitch=\"{pitch_attr}\">{escaped}</prosody></speak>"
+        );
+        (HSTRING::from(&ssml), true)
+    } else {
+        (HSTRING::from(&processed), false)
+    };
+
+    (input, is_xml, processed)
+}
+
+/// Wrap raw audio samples in a minimal WAV header described by `fmt`.
+///
+/// SAPI renders PCM (wFormatTag == 1); for that case the `fmt ` chunk is the
+/// canonical 16 bytes. Non-PCM formats (rare for SAPI voices) emit the
+/// WAVEFORMATEX fields plus the `cbSize` count so the file is at least
+/// structurally a WAVEFORMATEX-formatted chunk.
+fn build_wav(fmt: &WAVEFORMATEX, pcm: &[u8]) -> Vec<u8> {
+    let data_len = pcm.len() as u32;
+    let is_pcm = fmt.wFormatTag == 1;
+    let fmt_chunk_size: u32 = if is_pcm {
+        16
+    } else {
+        18 + u32::from(fmt.cbSize)
+    };
+    // "WAVE" + ("fmt " chunk) + ("data" chunk).
+    let riff_size: u32 = 4 + (8 + fmt_chunk_size) + (8 + data_len);
+
+    let mut out = Vec::with_capacity(44 + pcm.len());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_size.to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&fmt_chunk_size.to_le_bytes());
+    out.extend_from_slice(&fmt.wFormatTag.to_le_bytes());
+    out.extend_from_slice(&fmt.nChannels.to_le_bytes());
+    out.extend_from_slice(&fmt.nSamplesPerSec.to_le_bytes());
+    out.extend_from_slice(&fmt.nAvgBytesPerSec.to_le_bytes());
+    out.extend_from_slice(&fmt.nBlockAlign.to_le_bytes());
+    out.extend_from_slice(&fmt.wBitsPerSample.to_le_bytes());
+    if !is_pcm {
+        out.extend_from_slice(&fmt.cbSize.to_le_bytes());
+    }
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    out.extend_from_slice(pcm);
+    out
+}
+
 impl TtsEngine for SapiEngine {
     fn speak(
         &self,
@@ -306,57 +408,21 @@ impl TtsEngine for SapiEngine {
             let _ = sp_voice.SetRate(rate_to_sapi(rate));
             let _ = sp_voice.SetVolume(volume_to_sapi(volume));
 
-            // Run the input through SpeechMarkdown first; users can write
-            // `Hello (world)[emphasis:"strong"]` and have it expanded to
-            // SSML. SAPI accepts the SSML subset that speechmarkdown-rust
-            // emits (Alexa flavour), so we pass it through with SPF_IS_XML.
-            // `is_ssml` also short-circuits when the user passed raw SSML.
-            let (processed, is_ssml) = preprocess_speech_markdown(text, "sapi");
-            let needs_pitch = (pitch - 1.0).abs() > f32::EPSILON;
-
             // Decide whether the caller wants real word boundaries. If so we
             // take the SPF_ASYNC + event-pump path so we can dispatch
             // SPEI_WORD_BOUNDARY events as each word is spoken. Otherwise we
             // can let SAPI block on Speak and skip the event plumbing.
             let want_real_boundaries = on_boundary.is_some();
 
-            // We pass the (possibly SSML) input to speak_with_events so it
-            // can map SAPI's WCHAR positions back to the spoken text. Keep a
-            // clone because HSTRING::from below moves `processed`.
-            let processed_for_events = processed.clone();
-
-            // Build the final input buffer + flags.
-            let (input_wide, flags) = if is_ssml {
-                let final_ssml = if needs_pitch {
-                    let pitch_attr = pitch_to_percent(pitch);
-                    processed
-                        .replacen(
-                            "<speak",
-                            &format!("<speak><prosody pitch=\"{pitch_attr}\""),
-                            1,
-                        )
-                        .replacen("</speak>", "</prosody></speak>", 1)
-                } else {
-                    processed
-                };
-                (
-                    HSTRING::from(&final_ssml),
-                    (SPF_ASYNC.0 | SPF_IS_XML.0) as u32,
-                )
-            } else if needs_pitch {
-                let pitch_attr = pitch_to_percent(pitch);
-                let escaped = processed
-                    .replace('&', "&amp;")
-                    .replace('<', "&lt;")
-                    .replace('>', "&gt;");
-                let ssml = format!(
-                    "<speak version=\"1.0\" xmlns=\"http://www.w3.org/2001/10/synthesis\"\
-                     xml:lang=\"en-US\"><prosody pitch=\"{pitch_attr}\">{escaped}</prosody></speak>"
-                );
-                (HSTRING::from(&ssml), (SPF_ASYNC.0 | SPF_IS_XML.0) as u32)
-            } else {
-                (HSTRING::from(&processed), SPF_ASYNC.0 as u32)
-            };
+            // Build the SSML/plain input. `processed_for_events` is the
+            // post-SpeechMarkdown text that speak_with_events needs to map
+            // SAPI's WCHAR positions back to the spoken words.
+            let (input_wide, is_xml, processed_for_events) = build_sapi_input(text, pitch);
+            let mut flags = SPF_ASYNC.0;
+            if is_xml {
+                flags |= SPF_IS_XML.0;
+            }
+            let flags = flags as u32;
 
             if want_real_boundaries {
                 Self::speak_with_events(
@@ -391,6 +457,90 @@ impl TtsEngine for SapiEngine {
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
         self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
+    }
+
+    /// Render speech to a WAV byte buffer instead of playing it.
+    ///
+    /// The default `synth_to_bytes` collects chunks from the `on_audio`
+    /// callback, but SAPI's `speak` plays to the default audio device and
+    /// never invokes that callback, so we must capture the stream ourselves.
+    /// We redirect a throwaway `ISpVoice`'s output to a `SpMemoryStream`,
+    /// speak synchronously, read the PCM back, and wrap it in a WAV header
+    /// using the stream's reported `WAVEFORMATEX`.
+    fn synth_to_bytes(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+    ) -> TtsResult<Vec<u8>> {
+        unsafe {
+            // A dedicated voice keeps the speak() voice's default-audio
+            // output untouched and avoids save/restore of the output stream.
+            let sp_voice: ISpVoice = CoCreateInstance(&SpVoice, None, CLSCTX_ALL)
+                .map_err(|e| TtsError(format!("Failed to create ISpVoice for synthesis: {e}")))?;
+
+            if let Some(token) = self.resolve_voice_token(voice) {
+                let _ = sp_voice.SetVoice(&token);
+            }
+            let _ = sp_voice.SetRate(rate_to_sapi(rate));
+            let _ = sp_voice.SetVolume(volume_to_sapi(volume));
+
+            // In-memory stream that captures the rendered PCM.
+            let mem_stream: IStream = CoCreateInstance(&SpMemoryStream, None, CLSCTX_ALL)
+                .map_err(|e| TtsError(format!("Failed to create SpMemoryStream: {e}")))?;
+            sp_voice
+                .SetOutput(&mem_stream, true)
+                .map_err(|e| TtsError(format!("SAPI SetOutput failed: {e}")))?;
+
+            let (input_wide, is_xml, _) = build_sapi_input(text, pitch);
+            // Synchronous (no SPF_ASYNC) — Speak blocks until all audio is
+            // written to the stream.
+            let flags: u32 = if is_xml { SPF_IS_XML.0 as u32 } else { 0 };
+            sp_voice
+                .Speak(&input_wide, flags, None)
+                .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
+
+            // Query the captured audio format so we can build a valid header.
+            let fmt_stream: ISpStreamFormat = mem_stream
+                .cast()
+                .map_err(|e| TtsError(format!("Stream is not ISpStreamFormat: {e}")))?;
+            // GetFormat writes the format GUID into `format_guid` and returns
+            // a CoTaskMemAlloc'd WAVEFORMATEX; both need valid storage.
+            let format_guid = windows::core::GUID::zeroed();
+            let format_ptr = fmt_stream
+                .GetFormat(&raw const format_guid)
+                .map_err(|e| TtsError(format!("SAPI GetFormat failed: {e}")))?;
+
+            // Speak leaves the cursor at end-of-stream; rewind before reading.
+            let mut new_pos = 0u64;
+            mem_stream
+                .Seek(0, STREAM_SEEK_SET, Some(&raw mut new_pos))
+                .map_err(|e| TtsError(format!("SAPI stream seek failed: {e}")))?;
+
+            let mut pcm = Vec::new();
+            let mut chunk = [0u8; 16_384];
+            loop {
+                let mut read = 0u32;
+                mem_stream
+                    .Read(
+                        chunk.as_mut_ptr() as *mut _,
+                        chunk.len() as u32,
+                        Some(&raw mut read),
+                    )
+                    .ok()
+                    .map_err(|e| TtsError(format!("SAPI stream read failed: {e}")))?;
+                if read == 0 {
+                    break;
+                }
+                pcm.extend_from_slice(&chunk[..read as usize]);
+            }
+
+            let wav = build_wav(&*format_ptr, &pcm);
+            CoTaskMemFree(Some(format_ptr as *const _));
+            Ok(wav)
+        }
     }
 
     fn stop(&self) -> TtsResult<()> {
@@ -633,5 +783,56 @@ mod tests {
         // 22 kHz * 16-bit mono = 44,100 bytes/sec = 44.1 bytes/ms.
         let bpm = sapi_bytes_per_millisecond();
         assert!((bpm - 44.1).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_build_wav_emits_valid_pcm_header() {
+        // SAPI's default output: 22050 Hz, 16-bit, mono PCM.
+        let fmt = WAVEFORMATEX {
+            wFormatTag: 1,
+            nChannels: 1,
+            nSamplesPerSec: 22050,
+            nAvgBytesPerSec: 44100,
+            nBlockAlign: 2,
+            wBitsPerSample: 16,
+            cbSize: 0,
+        };
+        let pcm = vec![0u8; 100]; // 50 silent samples
+        let wav = build_wav(&fmt, &pcm);
+
+        // 44-byte header + payload.
+        assert_eq!(wav.len(), 44 + 100);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[12..16], b"fmt ");
+        assert_eq!(&wav[36..40], b"data");
+        // RIFF size = 4 ("WAVE") + 8+16 (fmt) + 8+100 (data) = 136.
+        assert_eq!(u32::from_le_bytes([wav[4], wav[5], wav[6], wav[7]]), 136);
+        // fmt chunk size is 16 for PCM, format tag is 1 (PCM).
+        assert_eq!(u32::from_le_bytes([wav[16], wav[17], wav[18], wav[19]]), 16);
+        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
+        // data length matches the input.
+        assert_eq!(
+            u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]),
+            100
+        );
+    }
+
+    #[test]
+    fn test_build_wav_non_pcm_includes_cbsize() {
+        // A non-PCM tag (e.g. 0x0002 ADPCM) must include the cbSize field,
+        // growing the fmt chunk to 18 bytes.
+        let fmt = WAVEFORMATEX {
+            wFormatTag: 2,
+            nChannels: 1,
+            nSamplesPerSec: 8000,
+            nAvgBytesPerSec: 4096,
+            nBlockAlign: 256,
+            wBitsPerSample: 4,
+            cbSize: 0,
+        };
+        let wav = build_wav(&fmt, &[1, 2, 3]);
+        // fmt chunk size = 18 for non-PCM (16 base + 2 for cbSize).
+        assert_eq!(u32::from_le_bytes([wav[16], wav[17], wav[18], wav[19]]), 18);
     }
 }

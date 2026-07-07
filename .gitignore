@@ -2,6 +2,9 @@
 **/*.orig
 Cargo.lock
 
+# Example output artifacts (generated when running examples locally)
+/examples/output/
+
 # Local-only live cloud tests (never commit credentials)
 /tests/live_cloud.rs
 *.live.env
