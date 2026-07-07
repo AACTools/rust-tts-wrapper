@@ -81,7 +81,14 @@ pub struct tts_ctx {
     rate: Mutex<f32>,
     pitch: Mutex<f32>,
     volume: Mutex<f32>,
-    last_error: Mutex<String>,
+    // Cached CString of the last error message. We must return a *const c_char
+    // from tts_get_last_error whose backing allocation outlives the function
+    // call; the previous version constructed a fresh CString inside the
+    // getter and returned its as_ptr() while the CString was dropped at end
+    // of scope — use-after-free, surfaced as empty reads on Windows.
+    // Storing the CString here keeps the allocation alive until the next
+    // error replaces it.
+    last_error: Mutex<CString>,
     // Callback + userdata are bundled into a single Mutex each so a reader
     // can never observe a new callback paired with stale userdata (or vice
     // versa). The `Send` wrapper below lets us ship the raw pointer across
@@ -217,7 +224,7 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
             rate: Mutex::new(1.0),
             pitch: Mutex::new(1.0),
             volume: Mutex::new(1.0),
-            last_error: Mutex::new(String::new()),
+            last_error: Mutex::new(CString::new("").unwrap()),
             on_audio: Mutex::new(AudioCallback {
                 cb: None,
                 userdata: ptr::null_mut(),
@@ -416,7 +423,9 @@ fn tts_speak_impl(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) -> i32
             }
             Err(e) => {
                 let msg = e.to_string();
-                ctx_ref.last_error.lock().unwrap().clone_from(&msg);
+                if let Ok(c) = CString::new(&msg[..]) {
+                    *ctx_ref.last_error.lock().unwrap() = c;
+                }
                 if let Some(cb) = error_cb.cb {
                     if let Ok(c_msg) = CString::new(msg) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
@@ -533,7 +542,9 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             }
             Err(e) => {
                 let msg = e.to_string();
-                ctx_ref.last_error.lock().unwrap().clone_from(&msg);
+                if let Ok(c) = CString::new(&msg[..]) {
+                    *ctx_ref.last_error.lock().unwrap() = c;
+                }
                 if let Some(cb) = error_cb.cb {
                     if let Ok(c_msg) = CString::new(msg) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
@@ -629,7 +640,8 @@ fn tts_get_voices_inner(
             0
         }
         Err(e) => {
-            *ctx_ref.last_error.lock().unwrap() = e.to_string();
+            *ctx_ref.last_error.lock().unwrap() =
+                CString::new(e.to_string()).unwrap_or_else(|_| CString::new("error").unwrap());
             -1
         }
     }
@@ -982,14 +994,17 @@ pub extern "C" fn tts_free_engines(engines: *mut types::tts_engine_info, count: 
 /// `ctx` may be null (returns global error), or a valid context pointer.
 #[no_mangle]
 pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
-    // If context provided and valid, return per-context error
+    // If context provided and valid, return per-context error.
+    //
+    // The CString is stored in the ctx (Mutex<CString>) so the returned
+    // pointer's backing allocation lives until the next error replaces it.
+    // The caller must copy if they need the string beyond the next
+    // synth/speak call on this ctx.
     if !ctx.is_null() {
         let ctx_ref = unsafe { &*ctx };
         if let Ok(guard) = ctx_ref.last_error.lock() {
             if !guard.is_empty() {
-                let cstr = std::ffi::CString::new(guard.as_str())
-                    .unwrap_or_else(|_| CString::new("error").unwrap());
-                return cstr.as_ptr();
+                return guard.as_ptr();
             }
         }
     }
@@ -1082,7 +1097,8 @@ pub extern "C" fn tts_synth_to_bytes(
                 0
             }
             Err(e) => {
-                *ctx_ref.last_error.lock().unwrap() = e.to_string();
+                *ctx_ref.last_error.lock().unwrap() =
+                    CString::new(e.to_string()).unwrap_or_else(|_| CString::new("error").unwrap());
                 -1
             }
         }
