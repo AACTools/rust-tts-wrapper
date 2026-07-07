@@ -1,12 +1,11 @@
 name: SherpaOnnx Live Tests
 
 on:
-  # Run twice a week so we catch upstream model-URL rot early.
-  schedule:
-    - cron: "0 5 * * 1,4"
-  # Allow manual triggering from the Actions tab.
+  # Manual trigger only — these tests download ~250 MB of models per
+  # platform and would burn CI minutes if run on every push.
   workflow_dispatch:
-  # Run on PRs that touch SherpaOnnx code or this workflow itself.
+  # Run on PRs that touch SherpaOnnx code or this workflow itself so
+  # regressions surface during development.
   pull_request:
     paths:
       - "src/sherpaonnx_engine.rs"
