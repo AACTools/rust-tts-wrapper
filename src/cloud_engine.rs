@@ -1115,31 +1115,51 @@ impl TtsEngine for CloudEngine {
 
         // When the caller passed W3C SSML (via tts_speak_ssml), adapt per engine:
         //  - Azure/Edge: pass through (their WS/REST paths handle SSML natively)
-        //  - Google: strip the <voice> wrapper, send inner SSML as Google's ssml
-        //    input (Google accepts W3C <phoneme alphabet='ipa'>, <prosody>, etc.)
+        //  - Google: strip <voice> wrapper, send inner SSML as Google's ssml input
+        //    (Google accepts W3C <phoneme alphabet='ipa'>, <prosody>, etc.)
+        //  - Watson: strip <voice> wrapper, send inner SSML as the text field
+        //    (Watson auto-detects SSML by the <speak> prefix)
         //  - Others (OpenAI, ElevenLabs, …): strip tags → plain text
         let mut voice_to_use = voice
             .map(std::string::ToString::to_string)
             .or_else(|| self.config.default_voice.clone())
             .unwrap_or_default();
 
-        let google_ssml_override: Option<String> = if is_ssml && self.config.provider_id == "google"
-        {
-            let (v, inner) = crate::engine::unwrap_voice_tag(&original_text);
-            if let Some(v) = v {
-                voice_to_use = v;
-            }
-            Some(inner)
-        } else {
-            None
-        };
+        let google_ssml_override: Option<String>;
+        let text: String;
 
-        let text =
-            if is_ssml && self.config.provider_id != "azure" && self.config.provider_id != "edge" {
-                crate::engine::strip_ssml_to_text(&original_text)
-            } else {
-                original_text
-            };
+        if is_ssml {
+            match self.config.provider_id.as_str() {
+                "azure" | "edge" => {
+                    google_ssml_override = None;
+                    text = original_text;
+                }
+                "google" => {
+                    let (v, inner) = crate::engine::unwrap_voice_tag(&original_text);
+                    if let Some(v) = v {
+                        voice_to_use = v;
+                    }
+                    google_ssml_override = Some(inner);
+                    text = crate::engine::strip_ssml_to_text(&original_text);
+                }
+                "watson" => {
+                    let (v, inner) = crate::engine::unwrap_voice_tag(&original_text);
+                    if let Some(v) = v {
+                        voice_to_use = v;
+                    }
+                    google_ssml_override = None;
+                    // Watson recognises SSML when the text starts with <speak>.
+                    text = inner;
+                }
+                _ => {
+                    google_ssml_override = None;
+                    text = crate::engine::strip_ssml_to_text(&original_text);
+                }
+            }
+        } else {
+            google_ssml_override = None;
+            text = original_text;
+        }
 
         // WebSocket approach: Azure when word boundaries are requested, or
         // Edge always (Edge is WS-only — it has no REST synth endpoint).
