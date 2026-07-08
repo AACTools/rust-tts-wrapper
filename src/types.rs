@@ -337,3 +337,41 @@ impl From<anyhow::Error> for TtsError {
 
 /// Result alias using [`TtsError`].
 pub type TtsResult<T> = Result<T, TtsError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(feature = "display_names")]
+    fn test_locale_display_name_known() {
+        let name = locale_display_name("en-US");
+        assert!(
+            name.to_lowercase().contains("english"),
+            "expected 'English' in display name for en-US, got {name}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "display_names")]
+    fn test_locale_display_name_non_latin() {
+        let name = locale_display_name("ar-EG");
+        assert!(
+            name.contains("Arabic") || name.contains("ar-EG"),
+            "expected Arabic in display name, got {name}"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "display_names")]
+    fn test_locale_display_name_unknown_falls_back() {
+        let name = locale_display_name("xx-YY");
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    #[cfg(not(feature = "display_names"))]
+    fn test_locale_display_name_fallback_is_raw_code() {
+        assert_eq!(locale_display_name("en-US"), "en-US");
+    }
+}

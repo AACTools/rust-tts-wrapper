@@ -1047,7 +1047,7 @@ pub(crate) fn azure_ws_extract_error(body: &str) -> Option<String> {
 /// Azure encodes offsets in 100-nanosecond ticks; we convert to milliseconds
 /// here so the caller doesn't have to.
 #[must_use]
-fn azure_ws_parse_word_boundary(item: &serde_json::Value) -> Option<(&str, u64, u64)> {
+fn azure_ws_parse_word_boundary(item: &serde_json::Value) -> Option<(&str, u64, u64, i32, i32)> {
     let data = item.get("Data")?;
     let offset_ticks = data
         .get("Offset")
@@ -1075,10 +1075,24 @@ fn azure_ws_parse_word_boundary(item: &serde_json::Value) -> Option<(&str, u64, 
         .or_else(|| data.get("text").and_then(|v| v.as_str()))
         .filter(|s| !s.is_empty())?;
 
+    // Extract character offset and length from the nested text object (when
+    // present). Azure WS sends: {"text": {"Text": "word", "Offset": 4, "Length": 5}}
+    let text_obj = data.get("text").and_then(|v| v.as_object());
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let char_offset = text_obj
+        .and_then(|o| o.get("Offset"))
+        .and_then(serde_json::Value::as_i64)
+        .map_or(-1, |v| v as i32);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let char_len = text_obj
+        .and_then(|o| o.get("Length"))
+        .and_then(serde_json::Value::as_i64)
+        .map_or(-1, |v| v as i32);
+
     // Ticks → ms: 1 ms = 10,000 ticks.
     let offset_ms = (offset_ticks.max(0) / 10_000) as u64;
     let duration_ms = (duration_ticks.max(0) / 10_000) as u64;
-    Some((word, offset_ms, duration_ms))
+    Some((word, offset_ms, duration_ms, char_offset, char_len))
 }
 
 /// Parse one `Viseme` metadata item into `(viseme_id, offset_sec)`.
@@ -1358,12 +1372,14 @@ impl TtsEngine for CloudEngine {
                                     for item in metadata {
                                         match item.get("Type").and_then(|v| v.as_str()) {
                                             Some("WordBoundary") => {
-                                                if let Some((word, offset_ms, duration_ms)) =
-                                                    azure_ws_parse_word_boundary(item)
+                                                if let Some((
+                                                    word,
+                                                    offset_ms,
+                                                    duration_ms,
+                                                    char_offset,
+                                                    char_len,
+                                                )) = azure_ws_parse_word_boundary(item)
                                                 {
-                                                    // Edge (no boundary callback) still
-                                                    // pumps audio — only dispatch when the
-                                                    // caller asked for boundaries.
                                                     if let Some(cb) = on_boundary.as_mut() {
                                                         #[allow(clippy::cast_precision_loss)]
                                                         cb(
@@ -1371,8 +1387,8 @@ impl TtsEngine for CloudEngine {
                                                             offset_ms as f32 / 1000.0,
                                                             (offset_ms + duration_ms) as f32
                                                                 / 1000.0,
-                                                            -1,
-                                                            -1,
+                                                            char_offset,
+                                                            char_len,
                                                         );
                                                     }
                                                 }
@@ -1534,8 +1550,18 @@ impl TtsEngine for CloudEngine {
 
             if let Some(cb) = on_boundary.as_mut() {
                 if let Some(alignment) = json.get("alignment").and_then(|v| v.as_object()) {
+                    let mut search_from = 0usize;
                     for (word, start, end) in parse_elevenlabs_alignment(alignment) {
-                        cb(&word, start, end, -1, -1);
+                        #[allow(clippy::cast_possible_truncation)]
+                        let char_offset = text[search_from..]
+                            .find(&word)
+                            .map_or(-1, |pos| (search_from + pos) as i32);
+
+                        if char_offset >= 0 {
+                            search_from = char_offset as usize + word.len();
+                        }
+                        let char_len = word.chars().count() as i32;
+                        cb(&word, start, end, char_offset, char_len);
                     }
                 }
             }
@@ -1580,13 +1606,23 @@ impl TtsEngine for CloudEngine {
                     }
                 } else {
                     let estimated = estimate_word_boundaries(&text);
+                    let mut search_from = 0usize;
                     for b in &estimated {
+                        #[allow(clippy::cast_possible_truncation)]
+                        let char_offset = text[search_from..]
+                            .find(&b.text)
+                            .map_or(-1, |pos| (search_from + pos) as i32);
+
+                        if char_offset >= 0 {
+                            search_from = char_offset as usize + b.text.len();
+                        }
+                        let char_len = b.text.chars().count() as i32;
                         cb(
                             &b.text,
                             b.offset as f32 / 1000.0,
                             (b.offset + b.duration) as f32 / 1000.0,
-                            -1,
-                            -1,
+                            char_offset,
+                            char_len,
                         );
                     }
                 }
@@ -1611,13 +1647,23 @@ impl TtsEngine for CloudEngine {
 
             if let Some(cb) = on_boundary.as_mut() {
                 let estimated = estimate_word_boundaries(&text);
+                let mut search_from = 0usize;
                 for b in &estimated {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let char_offset = text[search_from..]
+                        .find(&b.text)
+                        .map_or(-1, |pos| (search_from + pos) as i32);
+
+                    if char_offset >= 0 {
+                        search_from = char_offset as usize + b.text.len();
+                    }
+                    let char_len = b.text.chars().count() as i32;
                     cb(
                         &b.text,
                         b.offset as f32 / 1000.0,
                         (b.offset + b.duration) as f32 / 1000.0,
-                        -1,
-                        -1,
+                        char_offset,
+                        char_len,
                     );
                 }
             }
@@ -2676,10 +2722,32 @@ mod tests {
                 "text": {"Text": "Hello"}
             }
         });
-        let (word, offset_ms, duration_ms) = azure_ws_parse_word_boundary(&item).expect("parsed");
+        let (word, offset_ms, duration_ms, char_offset, char_len) =
+            azure_ws_parse_word_boundary(&item).expect("parsed");
         assert_eq!(word, "Hello");
         assert_eq!(offset_ms, 50);
         assert_eq!(duration_ms, 250);
+        // No Offset/Length in the text object → -1.
+        assert_eq!(char_offset, -1);
+        assert_eq!(char_len, -1);
+    }
+
+    #[test]
+    fn test_azure_ws_parse_word_boundary_with_text_offset() {
+        // Azure WS sends character offset and length in the nested text object.
+        let item = serde_json::json!({
+            "Type": "WordBoundary",
+            "Data": {
+                "Offset": 2_800_000,
+                "Duration": 1_500_000,
+                "text": {"Text": "quick", "Offset": 4, "Length": 5}
+            }
+        });
+        let (word, _, _, char_offset, char_len) =
+            azure_ws_parse_word_boundary(&item).expect("parsed");
+        assert_eq!(word, "quick");
+        assert_eq!(char_offset, 4);
+        assert_eq!(char_len, 5);
     }
 
     #[test]
@@ -2692,7 +2760,7 @@ mod tests {
                 "Text": {"Text": "Hi"}
             }
         });
-        let (word, _, _) = azure_ws_parse_word_boundary(&item).expect("parsed");
+        let (word, _, _, _, _) = azure_ws_parse_word_boundary(&item).expect("parsed");
         assert_eq!(word, "Hi");
     }
 
@@ -2702,7 +2770,7 @@ mod tests {
             "Type": "WordBoundary",
             "Data": {"Offset": 0, "Duration": 0, "text": "Yo"}
         });
-        let (word, _, _) = azure_ws_parse_word_boundary(&item).expect("parsed");
+        let (word, _, _, _, _) = azure_ws_parse_word_boundary(&item).expect("parsed");
         assert_eq!(word, "Yo");
     }
 

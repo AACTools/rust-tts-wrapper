@@ -420,12 +420,22 @@ impl TtsEngine for SherpaOnnxEngine {
 
         if let Some(cb) = on_boundary.as_mut() {
             let estimated = estimate_word_boundaries(text);
+            let mut search_from = 0usize;
             for b in &estimated {
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+                let char_offset = text[search_from..]
+                    .find(&b.text)
+                    .map_or(-1, |pos| (search_from + pos) as i32);
+
+                if char_offset >= 0 {
+                    search_from = char_offset as usize + b.text.len();
+                }
                 #[allow(clippy::cast_precision_loss)]
                 let start = b.offset as f32 / 1000.0;
                 #[allow(clippy::cast_precision_loss)]
                 let end = (b.offset + b.duration) as f32 / 1000.0;
-                cb(&b.text, start, end, -1, -1);
+                let char_len = b.text.chars().count() as i32;
+                cb(&b.text, start, end, char_offset, char_len);
             }
         }
 
