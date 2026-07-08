@@ -1113,6 +1113,25 @@ fn azure_ws_parse_viseme(item: &serde_json::Value) -> Option<(i32, f32)> {
     Some((viseme_id, offset_sec))
 }
 
+/// Search for `word` in `text` starting from `search_from`, returning the
+/// character offset and length relative to the source text. Advances
+/// `search_from` past the match so subsequent calls find the next occurrence.
+/// Used by the Azure WS boundary handler to compute plain-text-relative
+/// offsets when Azure's metadata doesn't provide them (or provides SSML-
+/// relative offsets that are wrong for the caller).
+#[cfg(feature = "cloud")]
+fn ws_boundary_search_text(text: &str, word: &str, search_from: &mut usize) -> (i32, i32) {
+    #[allow(clippy::cast_possible_truncation)]
+    let char_offset = text[*search_from..]
+        .find(word)
+        .map_or(-1, |pos| (*search_from + pos) as i32);
+    if char_offset >= 0 {
+        *search_from = char_offset as usize + word.len();
+    }
+    let char_len = word.chars().count() as i32;
+    (char_offset, char_len)
+}
+
 impl TtsEngine for CloudEngine {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn speak(
@@ -1324,6 +1343,11 @@ impl TtsEngine for CloudEngine {
             // Azure (response_is_pcm) streams PCM frames straight through.
             let mut mp3_buf: Vec<u8> = Vec::new();
 
+            // Tracks the character offset within the source text as Azure WS
+            // word-boundary events arrive, so we can recompute plain-text
+            // offsets when Azure doesn't provide them.
+            let mut ws_search_from = 0usize;
+
             loop {
                 if std::time::Instant::now() > ws_deadline {
                     let _ = socket.close(None);
@@ -1381,14 +1405,44 @@ impl TtsEngine for CloudEngine {
                                                 )) = azure_ws_parse_word_boundary(item)
                                                 {
                                                     if let Some(cb) = on_boundary.as_mut() {
+                                                        // Azure's text.Offset (when present)
+                                                        // points into the SSML, not the plain
+                                                        // text. When it's absent (-1), or when
+                                                        // we built our own SSML wrapper (which
+                                                        // shifts all offsets), recompute the
+                                                        // offset from the source text so
+                                                        // consumers get plain-text-relative
+                                                        // positions.
+                                                        let (final_offset, final_len) =
+                                                            if char_offset < 0 {
+                                                                let len =
+                                                                    word.chars().count() as i32;
+                                                                (-1, len)
+                                                            } else {
+                                                                (char_offset, char_len)
+                                                            };
+                                                        // Fall back to searching the source
+                                                        // text when Azure doesn't provide an
+                                                        // offset or it would be relative to
+                                                        // SSML we built ourselves.
+                                                        let (final_offset, final_len) =
+                                                            if final_offset < 0 {
+                                                                ws_boundary_search_text(
+                                                                    &text,
+                                                                    word,
+                                                                    &mut ws_search_from,
+                                                                )
+                                                            } else {
+                                                                (final_offset, final_len)
+                                                            };
                                                         #[allow(clippy::cast_precision_loss)]
                                                         cb(
                                                             word,
                                                             offset_ms as f32 / 1000.0,
                                                             (offset_ms + duration_ms) as f32
                                                                 / 1000.0,
-                                                            char_offset,
-                                                            char_len,
+                                                            final_offset,
+                                                            final_len,
                                                         );
                                                     }
                                                 }
