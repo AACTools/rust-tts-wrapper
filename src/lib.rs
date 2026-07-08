@@ -623,9 +623,17 @@ fn tts_get_voices_inner(
                         types::tts_voice {
                             id: CString::new(v.id.clone()).unwrap().into_raw(),
                             name: CString::new(v.name.clone()).unwrap().into_raw(),
-                            language: CString::new(v.primary_language().to_string())
-                                .unwrap()
-                                .into_raw(),
+                            language: CString::new({
+                                let lc = v.language_codes.first();
+                                match lc {
+                                    Some(lc) if !lc.display.is_empty() => {
+                                        format!("{} [{}]", lc.display, lc.bcp47)
+                                    }
+                                    _ => v.primary_language().to_string(),
+                                }
+                            })
+                            .unwrap()
+                            .into_raw(),
                             gender: CString::new(v.gender.to_string()).unwrap().into_raw(),
                             engine: CString::new(v.provider.clone()).unwrap().into_raw(),
                         },
