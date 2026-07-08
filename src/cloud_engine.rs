@@ -1596,6 +1596,7 @@ impl TtsEngine for CloudEngine {
                 if let Some(tps) = json.get("timepoints").and_then(|v| v.as_array()) {
                     let boundaries = parse_google_timepoints(tps, &words);
                     for b in &boundaries {
+                        #[allow(clippy::cast_precision_loss)]
                         cb(
                             &b.text,
                             b.offset as f32 / 1000.0,
@@ -1617,6 +1618,7 @@ impl TtsEngine for CloudEngine {
                             search_from = char_offset as usize + b.text.len();
                         }
                         let char_len = b.text.chars().count() as i32;
+                        #[allow(clippy::cast_precision_loss)]
                         cb(
                             &b.text,
                             b.offset as f32 / 1000.0,
@@ -1658,6 +1660,7 @@ impl TtsEngine for CloudEngine {
                         search_from = char_offset as usize + b.text.len();
                     }
                     let char_len = b.text.chars().count() as i32;
+                    #[allow(clippy::cast_precision_loss)]
                     cb(
                         &b.text,
                         b.offset as f32 / 1000.0,

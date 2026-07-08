@@ -72,7 +72,9 @@ impl TtsEngine for SystemEngine {
                 if char_offset >= 0 {
                     search_from = char_offset as usize + b.text.len();
                 }
+                #[allow(clippy::cast_precision_loss)]
                 let start = b.offset as f32 / 1000.0;
+                #[allow(clippy::cast_precision_loss)]
                 let end = (b.offset + b.duration) as f32 / 1000.0;
                 let char_len = b.text.chars().count() as i32;
                 cb(&b.text, start, end, char_offset, char_len);
