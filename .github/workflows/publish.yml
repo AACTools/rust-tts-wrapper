@@ -118,7 +118,8 @@ jobs:
             features: "sapi,cloud,sherpaonnx"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
-            allow_failure: true
+            # Strict: the NuGet package ships this DLL, so a sherpa-onnx build
+            # failure must block the release rather than shipping without it.
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -187,7 +188,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: lib-sapi-cloud-x86_64-windows
+          # Use the sherpaonnx-enabled build so the .NET package supports
+          # offline SherpaOnnx TTS out of the box (21 MB, statically linked —
+          # self-contained, no companion DLLs needed).
+          name: lib-sapi-cloud-sherpaonnx-x86_64-windows
           path: native
       - name: Place native DLL for packaging
         shell: pwsh
