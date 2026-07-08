@@ -1343,10 +1343,10 @@ impl TtsEngine for CloudEngine {
             // Azure (response_is_pcm) streams PCM frames straight through.
             let mut mp3_buf: Vec<u8> = Vec::new();
 
-            // Tracks the character offset within the source text as Azure WS
-            // word-boundary events arrive, so we can recompute plain-text
-            // offsets when Azure doesn't provide them.
-            let mut ws_search_from = 0usize;
+            // Tracks the cumulative character offset within the source text as
+            // Azure WS word-boundary events arrive. When Azure doesn't provide
+            // text.Offset, we compute it by accumulating word lengths + spaces.
+            let mut ws_cumulative_offset = 0usize;
 
             loop {
                 if std::time::Instant::now() > ws_deadline {
@@ -1405,36 +1405,27 @@ impl TtsEngine for CloudEngine {
                                                 )) = azure_ws_parse_word_boundary(item)
                                                 {
                                                     if let Some(cb) = on_boundary.as_mut() {
-                                                        // Azure's text.Offset (when present)
-                                                        // points into the SSML, not the plain
-                                                        // text. When it's absent (-1), or when
-                                                        // we built our own SSML wrapper (which
-                                                        // shifts all offsets), recompute the
-                                                        // offset from the source text so
-                                                        // consumers get plain-text-relative
-                                                        // positions.
-                                                        let (final_offset, final_len) =
-                                                            if char_offset < 0 {
-                                                                let len =
-                                                                    word.chars().count() as i32;
-                                                                (-1, len)
-                                                            } else {
-                                                                (char_offset, char_len)
-                                                            };
-                                                        // Fall back to searching the source
-                                                        // text when Azure doesn't provide an
-                                                        // offset or it would be relative to
-                                                        // SSML we built ourselves.
-                                                        let (final_offset, final_len) =
-                                                            if final_offset < 0 {
-                                                                ws_boundary_search_text(
-                                                                    &text,
-                                                                    word,
-                                                                    &mut ws_search_from,
-                                                                )
-                                                            } else {
-                                                                (final_offset, final_len)
-                                                            };
+                                                        // Azure doesn't always send
+                                                        // text.Offset (the field is absent,
+                                                        // not -1). When missing, compute
+                                                        // the offset by accumulating word
+                                                        // lengths + spaces as boundaries
+                                                        // arrive. This gives plain-text-
+                                                        // relative offsets without depending
+                                                        // on the SSML structure.
+                                                        let final_offset = if char_offset >= 0 {
+                                                            char_offset
+                                                        } else {
+                                                            ws_cumulative_offset as i32
+                                                        };
+                                                        let final_len = if char_len >= 0 {
+                                                            char_len
+                                                        } else {
+                                                            word.chars().count() as i32
+                                                        };
+                                                        // Advance the running offset past
+                                                        // this word + the space that follows.
+                                                        ws_cumulative_offset += word.len() + 1;
                                                         #[allow(clippy::cast_precision_loss)]
                                                         cb(
                                                             word,
