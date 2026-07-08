@@ -59,6 +59,70 @@ pub fn preprocess_speech_markdown(text: &str, _platform: &str) -> (String, bool)
     (text.to_string(), false)
 }
 
+/// Strip all XML/SSML tags from `ssml`, returning the plain-text content with
+/// collapsed whitespace. Used to convert incoming W3C SSML (from
+/// `tts_speak_ssml`) to plain text for engines that don't accept SSML
+/// (OpenAI, ElevenLabs, SherpaOnnx, etc.).
+#[must_use]
+pub fn strip_ssml_to_text(ssml: &str) -> String {
+    let mut out = String::with_capacity(ssml.len());
+    let mut in_tag = false;
+    for ch in ssml.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Extract the `name` attribute from a `<voice name='...'>` (or `"..."`) tag
+/// and return the inner SSML content wrapped in a bare `<speak>` element.
+///
+/// When the C++ adapter calls `tts_speak_ssml` it wraps content in
+/// `<speak version='...' xmlns='...'><voice name='...'>INNER</voice></speak>`.
+/// Google/Watson/Polly don't use the `<voice>` wrapper (voice is set via API
+/// config), so this strips it and returns `(voice_name, "<speak>INNER</speak>")`.
+///
+/// Returns `(None, original)` when no `<voice>` tag is found.
+#[must_use]
+pub fn unwrap_voice_tag(ssml: &str) -> (Option<String>, String) {
+    // Find <voice ...> opening tag.
+    let Some(open_idx) = ssml.find("<voice ") else {
+        return (None, ssml.to_string());
+    };
+    let Some(tag_offset) = ssml[open_idx..].find('>') else {
+        return (None, ssml.to_string());
+    };
+    let tag_end = open_idx + tag_offset;
+    let tag_str = &ssml[open_idx..=tag_end];
+
+    let voice_name = extract_name_attr(tag_str);
+
+    // Content between the voice tag's `>` and `</voice>`.
+    let content_start = tag_end + 1;
+    let content_end = ssml.find("</voice>").unwrap_or(ssml.len());
+    let inner = &ssml[content_start..content_end];
+
+    (voice_name, format!("<speak>{inner}</speak>"))
+}
+
+/// Pull `name='value'` or `name="value"` out of an XML tag string.
+fn extract_name_attr(tag: &str) -> Option<String> {
+    for quote in ['\'', '"'] {
+        let needle = format!("name={quote}");
+        if let Some(start) = tag.find(&needle) {
+            let val_start = start + needle.len();
+            if let Some(end) = tag[val_start..].find(quote) {
+                return Some(tag[val_start..val_start + end].to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Trait that every TTS engine must implement.
 ///
 /// Mirrors Swift's `TTSClient` protocol.
@@ -231,4 +295,65 @@ pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> V
     }
 
     boundaries
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_ssml_to_text_basic() {
+        assert_eq!(
+            strip_ssml_to_text("<speak>Hello world</speak>"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn test_strip_ssml_to_text_with_tags() {
+        let ssml = "<speak><voice name='en-US-Aria'>Hello <phoneme alphabet='ipa' ph='wɜːld'>world</phoneme></voice></speak>";
+        assert_eq!(strip_ssml_to_text(ssml), "Hello world");
+    }
+
+    #[test]
+    fn test_strip_ssml_to_text_collapses_whitespace() {
+        assert_eq!(
+            strip_ssml_to_text("<speak>\n  Hello\n  world\n</speak>"),
+            "Hello world"
+        );
+    }
+
+    #[test]
+    fn test_strip_ssml_to_text_plain_passthrough() {
+        assert_eq!(strip_ssml_to_text("just plain text"), "just plain text");
+    }
+
+    #[test]
+    fn test_unwrap_voice_tag_extracts_voice_and_inner() {
+        let ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis'>\
+                    <voice name='en-US-Wavenet-D'>Hello <prosody rate='+20%'>fast</prosody></voice>\
+                    </speak>";
+        let (voice, inner) = unwrap_voice_tag(ssml);
+        assert_eq!(voice.as_deref(), Some("en-US-Wavenet-D"));
+        assert!(inner.starts_with("<speak>"));
+        assert!(inner.contains("Hello"));
+        assert!(inner.contains("<prosody"));
+        assert!(!inner.contains("<voice"));
+    }
+
+    #[test]
+    fn test_unwrap_voice_tag_double_quotes() {
+        let ssml = "<speak><voice name=\"en-US-AriaNeural\">Hi</voice></speak>";
+        let (voice, inner) = unwrap_voice_tag(ssml);
+        assert_eq!(voice.as_deref(), Some("en-US-AriaNeural"));
+        assert!(inner.contains("Hi"));
+    }
+
+    #[test]
+    fn test_unwrap_voice_tag_no_voice_returns_original() {
+        let ssml = "<speak>Hello world</speak>";
+        let (voice, inner) = unwrap_voice_tag(ssml);
+        assert!(voice.is_none());
+        assert_eq!(inner, ssml);
+    }
 }

@@ -635,16 +635,24 @@ fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32)
 }
 
 /// Build JSON body for Google TTS REST API.
+///
+/// When `input_ssml` is `Some`, it is sent directly as Google's `"ssml"` input
+/// (used when `tts_speak_ssml` passes W3C SSML with the `<voice>` wrapper
+/// already stripped). Otherwise the text/marks path builds Google SSML or plain
+/// text from `text`.
 fn build_google_request(
     text: &str,
     voice: &str,
     add_marks: bool,
+    input_ssml: Option<&str>,
 ) -> (serde_json::Value, Vec<String>) {
     let lang = voice.chars().take(5).collect::<String>();
 
     let mut words_list = Vec::new();
 
-    let input = if add_marks {
+    let input = if let Some(ssml) = input_ssml {
+        serde_json::json!({ "ssml": ssml })
+    } else if add_marks {
         let words: Vec<&str> = text.split_whitespace().filter(|w| !w.is_empty()).collect();
         let mut ssml = String::from("<speak>");
         for (i, w) in words.iter().enumerate() {
@@ -1103,12 +1111,35 @@ impl TtsEngine for CloudEngine {
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
-        let voice_to_use = voice
+        let (original_text, is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
+
+        // When the caller passed W3C SSML (via tts_speak_ssml), adapt per engine:
+        //  - Azure/Edge: pass through (their WS/REST paths handle SSML natively)
+        //  - Google: strip the <voice> wrapper, send inner SSML as Google's ssml
+        //    input (Google accepts W3C <phoneme alphabet='ipa'>, <prosody>, etc.)
+        //  - Others (OpenAI, ElevenLabs, …): strip tags → plain text
+        let mut voice_to_use = voice
             .map(std::string::ToString::to_string)
             .or_else(|| self.config.default_voice.clone())
             .unwrap_or_default();
 
-        let (text, _is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
+        let google_ssml_override: Option<String> = if is_ssml && self.config.provider_id == "google"
+        {
+            let (v, inner) = crate::engine::unwrap_voice_tag(&original_text);
+            if let Some(v) = v {
+                voice_to_use = v;
+            }
+            Some(inner)
+        } else {
+            None
+        };
+
+        let text =
+            if is_ssml && self.config.provider_id != "azure" && self.config.provider_id != "edge" {
+                crate::engine::strip_ssml_to_text(&original_text)
+            } else {
+                original_text
+            };
 
         // WebSocket approach: Azure when word boundaries are requested, or
         // Edge always (Edge is WS-only — it has no REST synth endpoint).
@@ -1415,7 +1446,12 @@ impl TtsEngine for CloudEngine {
             req.body(ssml).send()
         } else if self.config.provider_id == "google" {
             // Google: build JSON body with proper structure
-            let (body, _words) = build_google_request(&text, &voice_to_use, on_boundary.is_some());
+            let (body, _words) = build_google_request(
+                &text,
+                &voice_to_use,
+                on_boundary.is_some(),
+                google_ssml_override.as_deref(),
+            );
             req = req.json(&body);
             req.send()
         } else {
@@ -1505,7 +1541,12 @@ impl TtsEngine for CloudEngine {
             }
 
             if let Some(cb) = on_boundary.as_mut() {
-                let (_, words) = build_google_request(&text, &voice_to_use, true);
+                let (_, words) = build_google_request(
+                    &text,
+                    &voice_to_use,
+                    true,
+                    google_ssml_override.as_deref(),
+                );
                 if let Some(tps) = json.get("timepoints").and_then(|v| v.as_array()) {
                     let boundaries = parse_google_timepoints(tps, &words);
                     for b in &boundaries {
@@ -1718,14 +1759,29 @@ mod tests {
 
     #[test]
     fn test_build_google_request_basic() {
-        let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", false);
+        let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", false, None);
         assert!(body["input"]["text"].as_str().unwrap() == "Hello world");
         assert!(words.is_empty());
     }
 
     #[test]
+    fn test_build_google_request_with_ssml_override() {
+        // When tts_speak_ssml passes W3C SSML, the <voice> wrapper is stripped
+        // and the inner SSML is sent as Google's ssml input.
+        let ssml = "<speak>Hello <phoneme alphabet='ipa' ph='wɜːld'>world</phoneme></speak>";
+        let (body, words) =
+            build_google_request("Hello world", "en-US-Wavenet-D", false, Some(ssml));
+        assert!(body["input"]["ssml"].as_str().unwrap().contains("<phoneme"));
+        assert!(body["input"]["ssml"].as_str().unwrap().contains("wɜːld"));
+        assert!(
+            words.is_empty(),
+            "no mark-based words when SSML override is used"
+        );
+    }
+
+    #[test]
     fn test_build_google_request_with_marks() {
-        let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", true);
+        let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", true, None);
         let ssml = body["input"]["ssml"].as_str().unwrap();
         assert!(ssml.contains("<mark name=\"0\"/>"));
         assert!(ssml.contains("<mark name=\"1\"/>"));
