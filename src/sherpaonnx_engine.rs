@@ -190,7 +190,11 @@ fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
     let obj = val.as_object()?;
     Some(SherpaModelInfo {
         id: id.to_string(),
-        model_type: obj.get("model_type")?.as_str()?.to_string(),
+        model_type: obj
+            .get("model_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("vits")
+            .to_string(),
         name: obj
             .get("name")
             .and_then(|v| v.as_str())
@@ -1387,6 +1391,36 @@ mod tests {
             err.to_string().contains("modelId"),
             "missing-model error should mention modelId: {err}"
         );
+    }
+
+    #[test]
+    fn test_parse_model_defaults_to_vits_when_model_type_absent() {
+        // MMS entries (1143 of them) lack model_type. Before the fix they were
+        // silently dropped by the `?` operator. Verify they now default to
+        // "vits" and parse successfully.
+        let json = serde_json::json!({
+            "language": [{"Iso Code": "eng", "Language Name": "English"}],
+            "url": "https://example.com/eng"
+        });
+        let model = parse_model("mms_eng", &json);
+        assert!(
+            model.is_some(),
+            "MMS entry without model_type must not be dropped"
+        );
+        assert_eq!(model.unwrap().model_type, "vits");
+    }
+
+    #[test]
+    fn test_parse_model_preserves_explicit_model_type() {
+        // Entries WITH model_type must still work (kokoro, matcha, vits).
+        let json = serde_json::json!({
+            "model_type": "kokoro",
+            "name": "test",
+            "url": "https://example.com/test"
+        });
+        let model = parse_model("test-kokoro", &json);
+        assert!(model.is_some());
+        assert_eq!(model.unwrap().model_type, "kokoro");
     }
 
     #[test]
