@@ -32,7 +32,7 @@ name = "simple-test"
 path = "examples/simple-test.rs"
 
 [features]
-default = ["system", "cloud", "sherpaonnx", "sapi"]
+default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
 system = ["speech-dispatcher"]
 cloud = ["reqwest", "serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "symphonia", "sha2"]
 sherpaonnx = ["sherpa-onnx", "serde_json"]
@@ -45,6 +45,10 @@ url = ["dep:url"]
 speechmarkdown = ["dep:speechmarkdown-rust"]
 avsynth = ["speechmarkdown"]
 sapi = ["windows", "speechmarkdown"]
+# Human-readable locale display names (e.g. "Afrikaans (South Africa)" from
+# "af-ZA") via ICU4X. Used by all voice mappers so consumers get consistent
+# names regardless of engine.
+display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 
 [dependencies]
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
@@ -63,6 +67,9 @@ url = { version = "2.5.8", optional = true }
 symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3"] }
 # SHA-256 for the Edge (Read Aloud) Sec-MS-GEC auth token.
 sha2 = { version = "0.10", optional = true }
+# Locale display names via ICU4X (compiled_data bundles the name table).
+icu_displaynames = { version = "0.11", optional = true, features = ["compiled_data"] }
+icu_locid = { version = "1.0.0-beta1", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole"], optional = true }

@@ -828,8 +828,8 @@ fn map_azure_voices(json: &[serde_json::Value]) -> Vec<Voice> {
                 display: v
                     .get("LocaleName")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(locale)
-                    .to_string(),
+                    .filter(|s| !s.is_empty())
+                    .map_or_else(|| crate::types::locale_display_name(locale), String::from),
             }],
         });
     }

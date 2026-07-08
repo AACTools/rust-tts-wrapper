@@ -620,7 +620,7 @@ impl TtsEngine for SapiEngine {
                     language_codes: vec![crate::types::LanguageCode {
                         bcp47: lang.clone(),
                         iso639_3: lang.split('-').next().unwrap_or("en").to_string(),
-                        display: lang,
+                        display: crate::types::locale_display_name(&lang),
                     }],
                 });
             }

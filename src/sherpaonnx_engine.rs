@@ -474,7 +474,7 @@ impl TtsEngine for SherpaOnnxEngine {
                 language_codes: vec![LanguageCode {
                     bcp47: lang.clone(),
                     iso639_3: iso639.clone(),
-                    display: lang.clone(),
+                    display: crate::types::locale_display_name(&lang),
                 }],
             });
         }

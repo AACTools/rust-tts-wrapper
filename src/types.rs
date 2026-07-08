@@ -67,6 +67,44 @@ impl Voice {
     }
 }
 
+/// Map a BCP-47 locale code to a human-readable display name.
+///
+/// Uses ICU4X (Unicode-maintained, covers ~8000 locales) when the
+/// `display_names` feature is enabled, producing consistent output like
+/// `"Afrikaans (South Africa)"` from `"af-ZA"` regardless of which engine
+/// provided the voice. Falls back to the raw code when the feature is off.
+#[cfg(feature = "display_names")]
+#[must_use]
+pub fn locale_display_name(bcp47: &str) -> String {
+    use icu_displaynames::{DisplayNamesOptions, LocaleDisplayNamesFormatter};
+
+    // Parse the BCP-47 code into a Locale (e.g. "af-ZA" → Locale).
+    let Ok(locale) = bcp47.parse::<icu_locid::Locale>() else {
+        return bcp47.to_string();
+    };
+
+    // Create a formatter that produces English display names, then format.
+    let Ok(formatter) = LocaleDisplayNamesFormatter::try_new(
+        &icu_locid::locale!("en").into(),
+        DisplayNamesOptions::default(),
+    ) else {
+        return bcp47.to_string();
+    };
+
+    let name = formatter.of(&locale);
+    if name.is_empty() {
+        bcp47.to_string()
+    } else {
+        name.into_owned()
+    }
+}
+
+#[cfg(not(feature = "display_names"))]
+#[must_use]
+pub fn locale_display_name(bcp47: &str) -> String {
+    bcp47.to_string()
+}
+
 /// Audio output format, matching Swift's `AudioFormat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFormat {
