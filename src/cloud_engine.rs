@@ -1874,7 +1874,7 @@ mod tests {
     #[test]
     fn test_build_google_request_basic() {
         let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", false, None);
-        assert!(body["input"]["text"].as_str().unwrap() == "Hello world");
+        assert_eq!(body["input"]["text"].as_str().unwrap(), "Hello world");
         assert!(words.is_empty());
     }
 
