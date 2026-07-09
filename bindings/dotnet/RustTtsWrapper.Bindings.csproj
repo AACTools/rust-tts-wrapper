@@ -36,6 +36,8 @@
       it up automatically in consuming projects.
     -->
     <NativeLibPath Condition="'$(NativeLibPath)' == ''">$(MSBuildProjectDirectory)/../../target/release/rust_tts_wrapper.dll</NativeLibPath>
+    <!-- 32-bit (x86) native library, bundled under runtimes/win-x86/native/ -->
+    <NativeLibPathX86 Condition="'$(NativeLibPathX86)' == ''">$(MSBuildProjectDirectory)/../../target/release/rust_tts_wrapper.x86.dll</NativeLibPathX86>
   </PropertyGroup>
 
   <ItemGroup>
@@ -43,9 +45,11 @@
   </ItemGroup>
 
   <!--
-    Bundle the native DLL into the NuGet package. The standard convention
+    Bundle the native DLLs into the NuGet package. The standard convention
     is runtimes/{RID}/native/{file}. MSBuild auto-resolves the correct
     file at build time based on the consuming project's RuntimeIdentifier.
+    Both x64 and x86 are shipped so 32-bit apps (e.g. older SAPI consumers)
+    work out of the box.
   -->
   <ItemGroup Condition="Exists('$(NativeLibPath)')">
     <Content Include="$(NativeLibPath)"
@@ -53,6 +57,14 @@
              PackagePath="runtimes/win-x64/native/rust_tts_wrapper.dll"
              CopyToOutputDirectory="PreserveNewest"
              Link="runtimes/win-x64/native/rust_tts_wrapper.dll" />
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('$(NativeLibPathX86)')">
+    <Content Include="$(NativeLibPathX86)"
+             Pack="true"
+             PackagePath="runtimes/win-x86/native/rust_tts_wrapper.dll"
+             CopyToOutputDirectory="PreserveNewest"
+             Link="runtimes/win-x86/native/rust_tts_wrapper.dll" />
   </ItemGroup>
 
   <!--

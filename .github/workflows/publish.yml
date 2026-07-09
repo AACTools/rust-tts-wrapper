@@ -120,6 +120,11 @@ jobs:
             lib_ext: dll
             # Strict: the NuGet package ships this DLL, so a sherpa-onnx build
             # failure must block the release rather than shipping without it.
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,sherpaonnx"
+            label: "sapi-cloud-sherpaonnx-i686-windows"
+            lib_ext: dll
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -188,21 +193,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          # Use the sherpaonnx-enabled build so the .NET package supports
-          # offline SherpaOnnx TTS out of the box (21 MB, statically linked —
-          # self-contained, no companion DLLs needed).
           name: lib-sapi-cloud-sherpaonnx-x86_64-windows
-          path: native
-      - name: Place native DLL for packaging
+          path: native-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-sapi-cloud-sherpaonnx-i686-windows
+          path: native-x86
+      - name: Place native DLLs for packaging
         shell: pwsh
         run: |
-          $dll = Get-ChildItem native/*.dll | Select-Object -First 1
-          if ($dll) {
-            New-Item -ItemType Directory -Force -Path target/release
-            Copy-Item $dll.FullName target/release/rust_tts_wrapper.dll
-            Write-Host "Placed $($dll.Name) → target/release/rust_tts_wrapper.dll"
+          $dll64 = Get-ChildItem native-x64/*.dll | Select-Object -First 1
+          $dll32 = Get-ChildItem native-x86/*.dll | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path target/release | Out-Null
+          if ($dll64) {
+            Copy-Item $dll64.FullName target/release/rust_tts_wrapper.dll
+            Write-Host "Placed $($dll64.Name) -> target/release/rust_tts_wrapper.dll (x64)"
           } else {
-            Write-Host "No Windows DLL found — packing managed-only"
+            Write-Host "WARNING: No x64 DLL found"
+          }
+          if ($dll32) {
+            Copy-Item $dll32.FullName target/release/rust_tts_wrapper.x86.dll
+            Write-Host "Placed $($dll32.Name) -> target/release/rust_tts_wrapper.x86.dll (x86)"
+          } else {
+            Write-Host "WARNING: No x86 DLL found — packing x64-only"
           }
       - uses: actions/setup-dotnet@v4
         with:
