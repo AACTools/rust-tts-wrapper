@@ -166,7 +166,7 @@ static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
 fn set_error(msg: &str) {
     if let Ok(mut guard) = LAST_ERROR.lock() {
-        *guard = Some(CString::new(msg).unwrap_or_else(|_| CString::new("error").unwrap()));
+        *guard = Some(safe_cstring(msg));
     }
 }
 
@@ -175,6 +175,21 @@ macro_rules! ffi_catch {
     ($expr:expr) => {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $expr)).unwrap_or(-1)
     };
+}
+
+/// Create a CString from any string, replacing interior null bytes with a
+/// replacement character so it never panics. Used for all FFI string
+/// conversions where the source data comes from engine APIs (voice names,
+/// error messages, etc.) and should never contain nulls, but we must not
+/// panic across the FFI boundary if it does.
+fn safe_cstring(s: impl AsRef<str>) -> CString {
+    let s = s.as_ref();
+    if let Ok(cs) = CString::new(s) {
+        return cs;
+    }
+    // Replace interior nulls and retry.
+    let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
+    CString::new(cleaned).unwrap_or_default()
 }
 
 /// Create a new TTS engine instance.
@@ -317,8 +332,15 @@ pub extern "C" fn tts_speak_ssml(ctx: *mut tts_ctx, ssml: *const c_char) -> i32 
     tts_speak_impl(ctx, ssml, true)
 }
 
-#[allow(clippy::too_many_lines)]
 fn tts_speak_impl(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tts_speak_impl_inner(ctx, text, raw_ssml)
+    }))
+    .unwrap_or(-1)
+}
+
+#[allow(clippy::too_many_lines)]
+fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) -> i32 {
     ffi_catch!({
         if ctx.is_null() || text.is_null() {
             return -1;
@@ -613,7 +635,14 @@ fn tts_get_voices_inner(
                 }
                 return 0;
             }
-            let layout = std::alloc::Layout::array::<types::tts_voice>(len).unwrap();
+            let Ok(layout) = std::alloc::Layout::array::<types::tts_voice>(len) else {
+                set_error(&format!("Voice array too large: {len} entries"));
+                unsafe {
+                    *out_voices = ptr::null_mut();
+                    *out_count = 0;
+                }
+                return -1;
+            };
             let arr_ptr = unsafe { std::alloc::alloc(layout).cast::<types::tts_voice>() };
             for (i, v) in voices.iter().enumerate() {
                 unsafe {
@@ -621,9 +650,9 @@ fn tts_get_voices_inner(
                     std::ptr::write(
                         entry,
                         types::tts_voice {
-                            id: CString::new(v.id.clone()).unwrap().into_raw(),
-                            name: CString::new(v.name.clone()).unwrap().into_raw(),
-                            language: CString::new({
+                            id: safe_cstring(&v.id).into_raw(),
+                            name: safe_cstring(&v.name).into_raw(),
+                            language: safe_cstring({
                                 let lc = v.language_codes.first();
                                 match lc {
                                     Some(lc) if !lc.display.is_empty() => {
@@ -632,10 +661,9 @@ fn tts_get_voices_inner(
                                     _ => v.primary_language().to_string(),
                                 }
                             })
-                            .unwrap()
                             .into_raw(),
-                            gender: CString::new(v.gender.to_string()).unwrap().into_raw(),
-                            engine: CString::new(v.provider.clone()).unwrap().into_raw(),
+                            gender: safe_cstring(v.gender.to_string()).into_raw(),
+                            engine: safe_cstring(&v.provider).into_raw(),
                         },
                     );
                 }
@@ -661,33 +689,41 @@ fn tts_get_voices_inner(
 /// `voices` must be a pointer from `tts_get_voices` with the matching `count`.
 #[no_mangle]
 pub extern "C" fn tts_free_voices(voices: *mut types::tts_voice, count: i32) {
-    if voices.is_null() || count <= 0 {
-        return;
-    }
-    for i in 0..count {
-        unsafe {
-            let v = voices.add(i as usize);
-            if !(*v).id.is_null() {
-                let _ = CString::from_raw((*v).id);
-            }
-            if !(*v).name.is_null() {
-                let _ = CString::from_raw((*v).name);
-            }
-            if !(*v).language.is_null() {
-                let _ = CString::from_raw((*v).language);
-            }
-            if !(*v).gender.is_null() {
-                let _ = CString::from_raw((*v).gender);
-            }
-            if !(*v).engine.is_null() {
-                let _ = CString::from_raw((*v).engine);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if voices.is_null() || count <= 0 {
+            return;
+        }
+        for i in 0..count {
+            unsafe {
+                let v = voices.add(i as usize);
+                if !(*v).id.is_null() {
+                    let _ = CString::from_raw((*v).id);
+                }
+                if !(*v).name.is_null() {
+                    let _ = CString::from_raw((*v).name);
+                }
+                if !(*v).language.is_null() {
+                    let _ = CString::from_raw((*v).language);
+                }
+                if !(*v).gender.is_null() {
+                    let _ = CString::from_raw((*v).gender);
+                }
+                if !(*v).engine.is_null() {
+                    let _ = CString::from_raw((*v).engine);
+                }
             }
         }
-    }
-    let layout = std::alloc::Layout::array::<types::tts_voice>(count as usize).unwrap();
-    unsafe {
-        std::alloc::dealloc(voices.cast::<u8>(), layout);
-    }
+        let Ok(layout) = std::alloc::Layout::array::<types::tts_voice>(count as usize) else {
+            return;
+        };
+        unsafe {
+            std::alloc::dealloc(voices.cast::<u8>(), layout);
+        }
+        // Zero the freed memory so a second call is a no-op (double-free protection).
+        unsafe {
+            std::ptr::write_bytes(voices, 0, count as usize);
+        }
+    }));
 }
 
 /// Set the voice for subsequent speak calls.
@@ -925,7 +961,9 @@ pub extern "C" fn tts_get_engines(
             return 0;
         }
 
-        let layout = std::alloc::Layout::array::<types::tts_engine_info>(count).unwrap();
+        let Ok(layout) = std::alloc::Layout::array::<types::tts_engine_info>(count) else {
+            return -1;
+        };
         let ptr = unsafe { std::alloc::alloc(layout) } as *mut types::tts_engine_info;
 
         if ptr.is_null() {
@@ -938,12 +976,10 @@ pub extern "C" fn tts_get_engines(
                 std::ptr::write(
                     entry,
                     types::tts_engine_info {
-                        id: CString::new(e.id.clone()).unwrap().into_raw(),
-                        name: CString::new(e.name.clone()).unwrap().into_raw(),
+                        id: safe_cstring(&e.id).into_raw(),
+                        name: safe_cstring(&e.name).into_raw(),
                         needs_credentials: e.needs_credentials,
-                        credential_keys_json: CString::new(e.credential_keys_json.clone())
-                            .unwrap()
-                            .into_raw(),
+                        credential_keys_json: safe_cstring(&e.credential_keys_json).into_raw(),
                     },
                 );
             }
@@ -966,27 +1002,35 @@ pub extern "C" fn tts_get_engines(
 /// `engines` must be a pointer from `tts_get_engines` with the matching `count`.
 #[no_mangle]
 pub extern "C" fn tts_free_engines(engines: *mut types::tts_engine_info, count: i32) {
-    if engines.is_null() || count <= 0 {
-        return;
-    }
-    for i in 0..count {
-        unsafe {
-            let e = engines.add(i as usize);
-            if !(*e).id.is_null() {
-                let _ = CString::from_raw((*e).id);
-            }
-            if !(*e).name.is_null() {
-                let _ = CString::from_raw((*e).name);
-            }
-            if !(*e).credential_keys_json.is_null() {
-                let _ = CString::from_raw((*e).credential_keys_json);
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if engines.is_null() || count <= 0 {
+            return;
+        }
+        for i in 0..count {
+            unsafe {
+                let e = engines.add(i as usize);
+                if !(*e).id.is_null() {
+                    let _ = CString::from_raw((*e).id);
+                }
+                if !(*e).name.is_null() {
+                    let _ = CString::from_raw((*e).name);
+                }
+                if !(*e).credential_keys_json.is_null() {
+                    let _ = CString::from_raw((*e).credential_keys_json);
+                }
             }
         }
-    }
-    let layout = std::alloc::Layout::array::<types::tts_engine_info>(count as usize).unwrap();
-    unsafe {
-        std::alloc::dealloc(engines.cast::<u8>(), layout);
-    }
+        let Ok(layout) = std::alloc::Layout::array::<types::tts_engine_info>(count as usize) else {
+            return;
+        };
+        // Zero the freed memory so a second call is a no-op (double-free protection).
+        unsafe {
+            std::ptr::write_bytes(engines, 0, count as usize);
+        }
+        unsafe {
+            std::alloc::dealloc(engines.cast::<u8>(), layout);
+        }
+    }));
 }
 
 /// Return the last error message as a C string, or null if none.
@@ -1094,7 +1138,10 @@ pub extern "C" fn tts_synth_to_bytes(
                     return 0;
                 }
                 let len = data.len();
-                let layout = std::alloc::Layout::array::<u8>(len).unwrap();
+                let Ok(layout) = std::alloc::Layout::array::<u8>(len) else {
+                    set_error(&format!("Audio buffer too large: {len} bytes"));
+                    return -1;
+                };
                 let ptr = unsafe { std::alloc::alloc(layout) };
                 unsafe {
                     ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
@@ -1119,11 +1166,15 @@ pub extern "C" fn tts_synth_to_bytes(
 /// `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
 #[no_mangle]
 pub extern "C" fn tts_free_bytes(bytes: *mut u8, len: usize) {
-    if bytes.is_null() || len == 0 {
-        return;
-    }
-    let layout = std::alloc::Layout::array::<u8>(len).unwrap();
-    unsafe {
-        std::alloc::dealloc(bytes, layout);
-    }
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if bytes.is_null() || len == 0 {
+            return;
+        }
+        let Ok(layout) = std::alloc::Layout::array::<u8>(len) else {
+            return;
+        };
+        unsafe {
+            std::alloc::dealloc(bytes, layout);
+        }
+    }));
 }
