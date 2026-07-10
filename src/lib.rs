@@ -719,10 +719,6 @@ pub extern "C" fn tts_free_voices(voices: *mut types::tts_voice, count: i32) {
         unsafe {
             std::alloc::dealloc(voices.cast::<u8>(), layout);
         }
-        // Zero the freed memory so a second call is a no-op (double-free protection).
-        unsafe {
-            std::ptr::write_bytes(voices, 0, count as usize);
-        }
     }));
 }
 
@@ -1023,10 +1019,6 @@ pub extern "C" fn tts_free_engines(engines: *mut types::tts_engine_info, count: 
         let Ok(layout) = std::alloc::Layout::array::<types::tts_engine_info>(count as usize) else {
             return;
         };
-        // Zero the freed memory so a second call is a no-op (double-free protection).
-        unsafe {
-            std::ptr::write_bytes(engines, 0, count as usize);
-        }
         unsafe {
             std::alloc::dealloc(engines.cast::<u8>(), layout);
         }
