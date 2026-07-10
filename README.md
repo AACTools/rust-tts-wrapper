@@ -30,6 +30,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 
 - **Streaming**: Audio is delivered through the `on_audio` callback in 8 KB chunks. Cloud engines stream as bytes arrive over the network; Sherpa-ONNX synthesises the whole clip first, then slices the rendered PCM into 8 KB chunks (matching the cloud delivery shape and the js-tts-wrapper / swift-tts-wrapper siblings).
+- **Native engine varies by platform**: the table shows `system` (Linux speech-dispatcher); macOS uses `avsynth` (AVSpeechSynthesizer) and Windows uses `sapi`. "22 total" counts one native engine + Sherpa-ONNX + the 20 cloud engines, per platform.
 
 ## Formatting & Testing
 
@@ -255,7 +256,9 @@ cargo build --all-features
 ### Features
 
 - `system` — speech-dispatcher (Linux system TTS)
-- `cloud` — all 19 cloud engines via HTTP + speechmarkdown-rust + base64
+- `avsynth` — AVSpeechSynthesizer (macOS system TTS)
+- `sapi` — SAPI (Windows system TTS)
+- `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
 - `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
 
 ### Lint & Test
@@ -313,7 +316,7 @@ client.stop()
       +--------------+--------------+
       |              |              |
   SystemEngine   CloudEngine   SherpaOnnxEngine
-  (speech-       (19 cloud      (1300+ local
+  (speech-       (20 cloud      (1300+ local
   dispatcher)    providers)     models)
 ```
 
