@@ -244,7 +244,10 @@ fn test_speech_markdown_detection() {
     let (result, is_ssml) =
         preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
     assert!(is_ssml);
-    assert!(result.contains("<speak>"));
+    assert!(
+        result.contains("<speak "),
+        "expected <speak> with attributes: {result}"
+    );
 }
 
 #[test]
@@ -260,7 +263,10 @@ fn test_speech_markdown_azure_platform() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
     let (result, is_ssml) = preprocess_speech_markdown("This is +important+", "azure");
     assert!(is_ssml);
-    assert!(result.contains("microsoft") || result.contains("<speak>"));
+    assert!(
+        result.contains("microsoft") || result.contains("<speak "),
+        "expected microsoft platform or <speak> with attrs: {result}"
+    );
 }
 
 #[test]
