@@ -590,7 +590,8 @@ fn inject_voice_if_missing(ssml: &str, voice: &str) -> String {
     if ssml.contains("<voice") || voice.is_empty() {
         return ssml.to_string();
     }
-    // Inject <voice name='...'> right after the opening <speak ...> tag.
+    // Inject <voice name='...'> right after the opening <speak ...> tag,
+    // and </voice> right before the closing </speak> tag.
     let voice_tag = format!("<voice name='{voice}'>");
     if let Some(close_idx) = ssml.find('>') {
         // Check this is the <speak> tag, not something else.
@@ -602,7 +603,14 @@ fn inject_voice_if_missing(ssml: &str, voice: &str) -> String {
         {
             let insert_at = close_idx + 1;
             let (before, after) = ssml.split_at(insert_at);
-            return format!("{before}{voice_tag}{after}</voice>");
+            // Insert </voice> before </speak> in the "after" part.
+            let after_with_close = if let Some(pos) = after.rfind("</speak") {
+                let (content, close) = after.split_at(pos);
+                format!("{content}</voice>{close}")
+            } else {
+                format!("{after}</voice>")
+            };
+            return format!("{before}{voice_tag}{after_with_close}");
         }
     }
     ssml.to_string()
@@ -1928,6 +1936,94 @@ mod tests {
         assert!(ssml.contains("rate=\"+50%\""));
         assert!(ssml.contains("pitch=\"-10%\""));
         assert!(ssml.contains("volume=\"+40%\""));
+    }
+
+    // ===== inject_voice_if_missing =====
+
+    #[test]
+    fn test_inject_voice_when_ssml_has_no_voice_tag() {
+        let ssml = "<speak><prosody rate='slow'>Hello</prosody></speak>";
+        let result = inject_voice_if_missing(ssml, "en-GB-AbbiNeural");
+        assert!(
+            result.contains("<voice name='en-GB-AbbiNeural'>"),
+            "voice tag should be injected"
+        );
+        assert!(
+            result.contains("<prosody rate='slow'>Hello</prosody>"),
+            "original content should be preserved"
+        );
+        assert!(
+            result.contains("</voice>"),
+            "closing voice tag should be added"
+        );
+    }
+
+    #[test]
+    fn test_inject_voice_when_ssml_already_has_voice_tag() {
+        let ssml = "<speak><voice name='en-US-Aria'>Hello</voice></speak>";
+        let result = inject_voice_if_missing(ssml, "en-GB-AbbiNeural");
+        // Should be unchanged — don't inject a second <voice> tag.
+        assert_eq!(result, ssml);
+    }
+
+    #[test]
+    fn test_inject_voice_with_empty_voice_name_is_noop() {
+        let ssml = "<speak>Hello</speak>";
+        let result = inject_voice_if_missing(ssml, "");
+        assert_eq!(result, ssml);
+    }
+
+    #[test]
+    fn test_inject_voice_with_speak_attributes() {
+        // <speak> with version/xmlns attributes should still get the injection
+        // after the closing > of the <speak ...> tag.
+        let ssml = "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis'>Hello</speak>";
+        let result = inject_voice_if_missing(ssml, "en-US-JennyNeural");
+        assert!(result.contains("<voice name='en-US-JennyNeural'>"));
+        assert!(result.contains("Hello</voice>"));
+        assert!(result.contains("</speak>"));
+    }
+
+    // ===== SSML passthrough regression =====
+    // These tests guard against the bug where tts_speak_ssml SSML was
+    // double-wrapped by build_azure_ssml, causing Azure to speak the tags
+    // literally. The fix: when is_ssml=true, SSML is passed through directly
+    // (not via build_azure_ssml). We verify the invariant by checking that
+    // build_azure_ssml DOES escape tags (proving it must NOT be called for
+    // raw SSML), and that inject_voice_if_missing does NOT escape them.
+
+    #[test]
+    fn test_build_azure_ssml_escapes_tags() {
+        // Regression: build_azure_ssml XML-escapes its input. If raw SSML
+        // were passed through this function, <prosody> would become
+        // &lt;prosody&gt; and Azure would speak it literally.
+        let ssml = build_azure_ssml(
+            "<prosody rate='slow'>Hello</prosody>",
+            "en-US-Aria",
+            1.0,
+            1.0,
+            1.0,
+        );
+        assert!(
+            ssml.contains("&lt;prosody"),
+            "build_azure_ssml must escape tags — this proves it must NOT be used for raw SSML"
+        );
+    }
+
+    #[test]
+    fn test_inject_voice_preserves_ssml_tags() {
+        // Regression: inject_voice_if_missing (the is_ssml=true path) must
+        // NOT escape SSML tags. Otherwise Azure receives literal text.
+        let ssml = "<speak><prosody rate='slow'>Hello</prosody></speak>";
+        let result = inject_voice_if_missing(ssml, "en-US-Aria");
+        assert!(
+            !result.contains("&lt;"),
+            "SSML tags must NOT be escaped in the is_ssml path"
+        );
+        assert!(
+            result.contains("<prosody rate='slow'>"),
+            "SSML tags must be preserved verbatim"
+        );
     }
 
     #[test]
