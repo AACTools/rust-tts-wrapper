@@ -213,7 +213,13 @@ static WS_POOL: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<PooledC
 /// idle sessions after ~3-5 min). Capping at 3 min keeps us from handing out a
 /// server-closed connection.
 #[cfg(feature = "cloud")]
-const WS_MAX_AGE: std::time::Duration = std::time::Duration::from_mins(3);
+// clippy's duration_suboptimal_units suggests Duration::from_mins here, but the
+// minute/hour constructors are const only behind the unstable
+// `duration_constructors_lite` feature and don't build on the stable rustc used
+// downstream (e.g. the GNOME SDK rust-stable in the Dasher-GTK Flatpak). Keep
+// the portable, const-stable from_secs.
+#[allow(clippy::duration_suboptimal_units)]
+const WS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3 * 60);
 /// Max connections cached per URL — bounds memory for busy callers.
 #[cfg(feature = "cloud")]
 const WS_POOL_MAX_PER_URL: usize = 4;
@@ -1379,7 +1385,9 @@ impl TtsEngine for CloudEngine {
             // Overall timeout for the WS session. Azure typically completes
             // within a few seconds; 60s is a generous safety net that prevents
             // tts_speak from hanging indefinitely if the service stalls.
-            let ws_deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
+            // from_secs (not the unstable const from_mins) for stable-rustc portability.
+            #[allow(clippy::duration_suboptimal_units)]
+            let ws_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
 
             // Edge returns MP3 frames (raw PCM isn't supported on its free
             // endpoint). Accumulate them here and decode once the session ends;
