@@ -717,14 +717,11 @@ pub extern "C" fn tts_free_voices(voices: *mut types::tts_voice, count: i32) {
             return;
         };
         // Zero the struct memory BEFORE dealloc so a second call sees null
-        // pointers (double-free protection). write_bytes takes a byte count,
-        // so multiply by the struct size.
+        // pointers (double-free protection). voices is *mut tts_voice, so
+        // write_bytes already multiplies by size_of::<tts_voice>() — pass
+        // the element count, not the byte count.
         unsafe {
-            std::ptr::write_bytes(
-                voices,
-                0,
-                count as usize * std::mem::size_of::<types::tts_voice>(),
-            );
+            std::ptr::write_bytes(voices, 0, count as usize);
         }
         unsafe {
             std::alloc::dealloc(voices.cast::<u8>(), layout);
@@ -1029,13 +1026,10 @@ pub extern "C" fn tts_free_engines(engines: *mut types::tts_engine_info, count: 
         let Ok(layout) = std::alloc::Layout::array::<types::tts_engine_info>(count as usize) else {
             return;
         };
-        // Zero BEFORE dealloc (double-free protection), with correct byte count.
+        // Zero BEFORE dealloc (double-free protection). engines is *mut
+        // tts_engine_info, so write_bytes multiplies by size_of automatically.
         unsafe {
-            std::ptr::write_bytes(
-                engines,
-                0,
-                count as usize * std::mem::size_of::<types::tts_engine_info>(),
-            );
+            std::ptr::write_bytes(engines, 0, count as usize);
         }
         unsafe {
             std::alloc::dealloc(engines.cast::<u8>(), layout);
