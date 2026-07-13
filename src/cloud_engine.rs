@@ -1746,24 +1746,42 @@ impl TtsEngine for CloudEngine {
             return Ok(vec![]);
         };
 
-        let mut req = self.client.get(voices_url.as_str());
+        // reqwest::blocking::Client::send() internally creates a tokio
+        // runtime on the calling thread. When the caller is a managed
+        // runtime (.NET, Python) that has already set up threading state
+        // on the current thread, this causes a native access violation
+        // (0xc0000005 on Windows). Running the HTTP call on a dedicated
+        // OS thread gives us a clean thread state with no conflicts.
+        let url = voices_url.clone();
+        let auth_header = self.config.auth_header.clone();
+        let auth_value = if self.config.auth_header.is_empty() {
+            String::new()
+        } else {
+            format!("{}{}", self.config.auth_prefix, self.api_key)
+        };
+        let client = self.client.clone();
 
-        if !self.config.auth_header.is_empty() {
-            let val = format!("{}{}", self.config.auth_prefix, self.api_key);
-            req = req.header(&self.config.auth_header, val);
-        }
+        let handle = std::thread::Builder::new()
+            .name("tts-voice-list".into())
+            .spawn(move || -> TtsResult<serde_json::Value> {
+                let mut req = client.get(url.as_str());
+                if !auth_header.is_empty() {
+                    req = req.header(&auth_header, auth_value);
+                }
+                let resp = req
+                    .send()
+                    .map_err(|e| TtsError(format!("Voice list HTTP error: {e}")))?;
+                if !resp.status().is_success() {
+                    return Ok(serde_json::Value::Array(vec![]));
+                }
+                resp.json::<serde_json::Value>()
+                    .map_err(|e| TtsError(format!("Voice list parse error: {e}")))
+            })
+            .map_err(|e| TtsError(format!("Failed to spawn voice-list thread: {e}")))?;
 
-        let resp = req
-            .send()
-            .map_err(|e| TtsError(format!("Voice list HTTP error: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Ok(vec![]);
-        }
-
-        let json: serde_json::Value = resp
-            .json()
-            .map_err(|e| TtsError(format!("Voice list parse error: {e}")))?;
+        let json = handle
+            .join()
+            .map_err(|_| TtsError("Voice-list thread panicked".into()))??;
 
         match self.config.provider_id.as_str() {
             // Azure and Edge share the same voice-list JSON shape
