@@ -2173,7 +2173,20 @@ mod tests {
         let (result, is_ssml) =
             preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", "azure");
         assert!(is_ssml);
-        assert!(result.contains("<speak>"));
+        // The patched speechmarkdown-rust (v0.4.10+) adds Azure-required
+        // attributes (version, xmlns, xml:lang) to the <speak> tag.
+        assert!(
+            result.contains("<speak "),
+            "expected <speak> with attributes: {result}"
+        );
+        assert!(
+            result.contains("version="),
+            "missing version attr: {result}"
+        );
+        assert!(
+            result.contains("www.w3.org/2001/10/synthesis"),
+            "missing xmlns attr: {result}"
+        );
     }
 
     #[test]
