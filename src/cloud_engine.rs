@@ -582,6 +582,32 @@ fn base64_encode(data: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
 }
 
+/// If `ssml` doesn't contain a `<voice>` tag, inject one with the given voice
+/// name so that `tts_set_voice` takes effect when using `tts_speak_ssml`.
+/// The SSML is otherwise passed through unchanged.
+#[cfg(feature = "cloud")]
+fn inject_voice_if_missing(ssml: &str, voice: &str) -> String {
+    if ssml.contains("<voice") || voice.is_empty() {
+        return ssml.to_string();
+    }
+    // Inject <voice name='...'> right after the opening <speak ...> tag.
+    let voice_tag = format!("<voice name='{voice}'>");
+    if let Some(close_idx) = ssml.find('>') {
+        // Check this is the <speak> tag, not something else.
+        let tag_start = &ssml[..=close_idx];
+        if tag_start
+            .trim_start()
+            .to_ascii_lowercase()
+            .starts_with("<speak")
+        {
+            let insert_at = close_idx + 1;
+            let (before, after) = ssml.split_at(insert_at);
+            return format!("{before}{voice_tag}{after}</voice>");
+        }
+    }
+    ssml.to_string()
+}
+
 /// Build SSML for Azure TTS.
 fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32) -> String {
     let lang = voice.chars().take(5).collect::<String>();
@@ -1323,8 +1349,17 @@ impl TtsEngine for CloudEngine {
                 .send(Message::Text(config_msg.into()))
                 .map_err(|e| TtsError(format!("WS config send error: {e}")))?;
 
-            // Send SSML
-            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, volume);
+            // Send SSML.
+            // When is_ssml=true (tts_speak_ssml), the text IS already SSML —
+            // send it directly without build_azure_ssml wrapping (which would
+            // XML-escape the tags). If the SSML lacks a <voice> tag but the
+            // caller set one via tts_set_voice, inject it so the voice takes
+            // effect.
+            let ssml = if is_ssml {
+                inject_voice_if_missing(&text, &voice_to_use)
+            } else {
+                build_azure_ssml(&text, &voice_to_use, rate, pitch, volume)
+            };
             let ssml_msg = format!(
                 "X-RequestId:{request_id}\r\nX-Timestamp:{}\r\nContent-Type:application/ssml+xml\r\nX-StreamId:{request_id}\r\nPath:ssml\r\n\r\n{ssml}",
                 now_timestamp()
@@ -1516,8 +1551,14 @@ impl TtsEngine for CloudEngine {
 
         // Body depends on engine type
         let resp = if self.config.body_is_ssml {
-            // Azure: send SSML XML body
-            let ssml = build_azure_ssml(&text, &voice_to_use, rate, pitch, volume);
+            // Azure: send SSML XML body. When is_ssml=true, the text is
+            // already SSML — send it directly (don't escape/wrap with
+            // build_azure_ssml). Inject voice if the SSML lacks a <voice> tag.
+            let ssml = if is_ssml {
+                inject_voice_if_missing(&text, &voice_to_use)
+            } else {
+                build_azure_ssml(&text, &voice_to_use, rate, pitch, volume)
+            };
             let ct = self
                 .config
                 .content_type
