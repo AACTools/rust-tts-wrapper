@@ -37,6 +37,12 @@ pub type OnErrorCallback<'a> = &'a mut dyn FnMut(&str);
 pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) {
     use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
 
+    // If the input is already SSML (starts with <speak), pass it through
+    // unchanged and flag it so the engine knows not to escape/wrap it.
+    if text.trim_start().to_ascii_lowercase().starts_with("<speak") {
+        return (text.to_string(), true);
+    }
+
     if !SpeechMarkdownParser::is_speech_markdown(text) {
         return (text.to_string(), false);
     }
