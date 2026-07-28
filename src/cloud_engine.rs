@@ -686,7 +686,16 @@ fn build_google_request(
     add_marks: bool,
     input_ssml: Option<&str>,
 ) -> (serde_json::Value, Vec<String>) {
-    let lang = voice.chars().take(5).collect::<String>();
+    // Derive the language code from the voice name. Standard Google voice
+    // names start with "xx-YY" (e.g. "en-US-Wavenet-D"). Newer named
+    // voices (Gemini/Chirp3-HD: "Algieba", "Aoede", etc.) don't — Google
+    // routes those by name alone, so we omit languageCode for them.
+    let voice_obj = if voice.len() >= 5 && voice.as_bytes().get(2) == Some(&b'-') {
+        let lang = &voice[..5];
+        serde_json::json!({ "languageCode": lang, "name": voice })
+    } else {
+        serde_json::json!({ "name": voice })
+    };
 
     let mut words_list = Vec::new();
 
@@ -710,7 +719,7 @@ fn build_google_request(
 
     let mut body = serde_json::json!({
         "input": input,
-        "voice": { "languageCode": lang, "name": voice },
+        "voice": voice_obj,
         "audioConfig": { "audioEncoding": "MP3" }
     });
 
@@ -883,6 +892,14 @@ fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
         let Some(name) = v.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
+        // Google returns bare named voices (e.g. "Algieba", "Aoede") for
+        // Gemini/Chirp3-HD alongside the locale-prefixed duplicates (e.g.
+        // "en-US-Chirp3-HD-Algieba"). The bare names fail at synthesis
+        // ("requires a model name"). Skip them — the prefixed versions
+        // work correctly.
+        if !name.contains('-') {
+            continue;
+        }
         let gender_raw = v.get("ssmlGender").and_then(|v| v.as_str()).unwrap_or("");
         let lang_codes = v
             .get("languageCodes")
@@ -1667,7 +1684,9 @@ impl TtsEngine for CloudEngine {
                     }
                 }
             }
-        } else if self.config.provider_id == "google" && on_boundary.is_some() {
+        } else if self.config.provider_id == "google"
+            && (on_boundary.is_some() || on_audio.is_some())
+        {
             // Google returns base64-encoded audio in JSON
             let resp_text = resp
                 .text()
