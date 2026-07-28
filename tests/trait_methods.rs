@@ -79,12 +79,17 @@ fn cloud_check_credentials_returns_false_when_no_voices_url() {
 }
 
 #[test]
-fn cloud_get_voices_for_openai_returns_empty_without_network() {
-    // OpenAI has no voice list endpoint. The cloud engine returns Ok(vec![])
-    // when voices_url is None — verify that's the offline path.
+fn cloud_get_voices_for_openai_returns_static_list_offline() {
+    // OpenAI has no voice-list API endpoint. The cloud engine returns a
+    // static list of the 11 documented gpt-4o-mini-tts voices without
+    // any network call.
     let e = dummy_openai();
     let voices = e.get_voices().expect("get_voices");
-    assert!(voices.is_empty(), "openai should report no voices offline");
+    assert!(
+        !voices.is_empty(),
+        "openai should return static voice list offline"
+    );
+    assert_eq!(voices.len(), 11, "openai should have 11 static voices");
 }
 
 // ===== SpeakOptions plumbing =====
