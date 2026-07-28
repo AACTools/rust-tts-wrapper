@@ -420,6 +420,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             voice_param: "model".into(), // Fixed: Deepgram uses "model" not "voice"
             default_voice: Some("aura-asteria-en".into()),
             text_field: "text".into(),
+            voices_url: Some("https://api.deepgram.com/v1/voices".into()),
             provider_id: "deepgram".into(),
             ..Default::default()
         }),
@@ -433,6 +434,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 auth_prefix: "Bearer ".into(),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
+                voices_url: Some("https://api.play.ht/api/v2/voices".into()),
                 extra_headers,
                 provider_id: "playht".into(),
                 ..Default::default()
@@ -444,6 +446,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Bearer ".into(),
             voice_param: "reference_id".into(),
             text_field: "text".into(),
+            voices_url: Some("https://api.fish.audio/v1/model".into()),
             provider_id: "fishaudio".into(),
             ..Default::default()
         }),
@@ -491,6 +494,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             auth_prefix: "Token ".into(),
             voice_param: "voice_uuid".into(),
             text_field: "text".into(),
+            voices_url: Some("https://app.resemble.ai/api/v2/voices".into()),
             provider_id: "resemble".into(),
             ..Default::default()
         }),
@@ -534,6 +538,9 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 ),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
+                voices_url: Some(format!(
+                    "https://{region}.text-to-speech.watson.cloud.ibm.com/instances/{instance_id}/v1/voices"
+                )),
                 provider_id: "watson".into(),
                 ..Default::default()
             })
@@ -542,6 +549,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
             synth_url: "https://api.wit.ai/synthesize?v=20240304".into(),
             auth_header: "Authorization".into(),
             auth_prefix: "Bearer ".into(),
+            voices_url: Some("https://api.wit.ai/voices?v=20240304".into()),
             provider_id: "witai".into(),
             ..Default::default()
         }),
@@ -1820,10 +1828,9 @@ impl TtsEngine for CloudEngine {
 
     #[allow(clippy::too_many_lines)]
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
-        // OpenAI doesn't expose a voice-list endpoint, so return the
-        // documented static list. These are the gpt-4o-mini-tts voices.
-        if self.config.provider_id == "openai" {
-            return Ok(openai_static_voices());
+        // Engines that have no voice-list endpoint return a static list.
+        if let Some(voices) = static_voices(&self.config.provider_id) {
+            return Ok(voices);
         }
 
         let Some(ref voices_url) = self.config.voices_url else {
@@ -1940,37 +1947,630 @@ impl TtsEngine for CloudEngine {
     }
 }
 
-/// Static voice list for OpenAI. The API doesn't expose a voice-list
-/// endpoint, so these are the documented gpt-4o-mini-tts voices.
+/// Static voice lists for engines that don't expose a voice-list API.
+/// Returns `None` for engines that *do* have a `voices_url` (those go
+/// through the HTTP path in `get_voices`).
 #[cfg(feature = "cloud")]
-fn openai_static_voices() -> Vec<Voice> {
-    let voices = [
-        ("alloy", Gender::Female),
-        ("ash", Gender::Male),
-        ("ballad", Gender::Male),
-        ("coral", Gender::Female),
-        ("echo", Gender::Male),
-        ("fable", Gender::Male),
-        ("nova", Gender::Female),
-        ("onyx", Gender::Male),
-        ("sage", Gender::Female),
-        ("shimmer", Gender::Female),
-        ("verse", Gender::Unknown),
-    ];
-    voices
-        .iter()
-        .map(|(name, gender)| Voice {
-            id: (*name).to_string(),
-            name: format!("OpenAI {name}"),
-            gender: *gender,
-            provider: "openai".to_string(),
-            language_codes: vec![LanguageCode {
-                bcp47: "en-US".to_string(),
-                iso639_3: "eng".to_string(),
-                display: "English (United States)".to_string(),
-            }],
-        })
-        .collect()
+#[allow(clippy::too_many_lines)]
+fn static_voices(provider: &str) -> Option<Vec<Voice>> {
+    let en_us = || LanguageCode {
+        bcp47: "en-US".to_string(),
+        iso639_3: "eng".to_string(),
+        display: "English (United States)".to_string(),
+    };
+    let lang = |bcp47: &str, iso: &str, display: &str| LanguageCode {
+        bcp47: bcp47.to_string(),
+        iso639_3: iso.to_string(),
+        display: display.to_string(),
+    };
+    let voice =
+        |id: &str, name: &str, gender: Gender, provider: &str, lcs: Vec<LanguageCode>| Voice {
+            id: id.to_string(),
+            name: name.to_string(),
+            gender,
+            provider: provider.to_string(),
+            language_codes: lcs,
+        };
+
+    match provider {
+        "openai" => Some(vec![
+            voice(
+                "alloy",
+                "OpenAI alloy",
+                Gender::Female,
+                "openai",
+                vec![en_us()],
+            ),
+            voice("ash", "OpenAI ash", Gender::Male, "openai", vec![en_us()]),
+            voice(
+                "ballad",
+                "OpenAI ballad",
+                Gender::Male,
+                "openai",
+                vec![en_us()],
+            ),
+            voice(
+                "coral",
+                "OpenAI coral",
+                Gender::Female,
+                "openai",
+                vec![en_us()],
+            ),
+            voice("echo", "OpenAI echo", Gender::Male, "openai", vec![en_us()]),
+            voice(
+                "fable",
+                "OpenAI fable",
+                Gender::Male,
+                "openai",
+                vec![en_us()],
+            ),
+            voice(
+                "nova",
+                "OpenAI nova",
+                Gender::Female,
+                "openai",
+                vec![en_us()],
+            ),
+            voice("onyx", "OpenAI onyx", Gender::Male, "openai", vec![en_us()]),
+            voice(
+                "sage",
+                "OpenAI sage",
+                Gender::Female,
+                "openai",
+                vec![en_us()],
+            ),
+            voice(
+                "shimmer",
+                "OpenAI shimmer",
+                Gender::Female,
+                "openai",
+                vec![en_us()],
+            ),
+            voice(
+                "verse",
+                "OpenAI verse",
+                Gender::Unknown,
+                "openai",
+                vec![en_us()],
+            ),
+        ]),
+        "hume" => Some(vec![
+            voice("ito", "Hume Ito", Gender::Unknown, "hume", vec![en_us()]),
+            voice(
+                "acantha",
+                "Hume Acantha",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice(
+                "ant ai gonus",
+                "Hume Antigonos",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice("ari", "Hume Ari", Gender::Unknown, "hume", vec![en_us()]),
+            voice(
+                "brant",
+                "Hume Brant",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice(
+                "daniel",
+                "Hume Daniel",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice("fin", "Hume Fin", Gender::Unknown, "hume", vec![en_us()]),
+            voice("hype", "Hume Hype", Gender::Unknown, "hume", vec![en_us()]),
+            voice("kora", "Hume Kora", Gender::Unknown, "hume", vec![en_us()]),
+            voice(
+                "mango",
+                "Hume Mango",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice(
+                "marek",
+                "Hume Marek",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice("ogma", "Hume Ogma", Gender::Unknown, "hume", vec![en_us()]),
+            voice("sora", "Hume Sora", Gender::Unknown, "hume", vec![en_us()]),
+            voice(
+                "terrence",
+                "Hume Terrence",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice(
+                "vitor",
+                "Hume Vitor",
+                Gender::Unknown,
+                "hume",
+                vec![en_us()],
+            ),
+            voice("zach", "Hume Zach", Gender::Unknown, "hume", vec![en_us()]),
+        ]),
+        "mistral" => Some(vec![
+            voice(
+                "Amalthea",
+                "Mistral Amalthea",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Achan",
+                "Mistral Achan",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Brave",
+                "Mistral Brave",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Contessa",
+                "Mistral Contessa",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Daintree",
+                "Mistral Daintree",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Eugora",
+                "Mistral Eugora",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Fornax",
+                "Mistral Fornax",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Griffin",
+                "Mistral Griffin",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Hestia",
+                "Mistral Hestia",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Irving",
+                "Mistral Irving",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Jasmine",
+                "Mistral Jasmine",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Kestra",
+                "Mistral Kestra",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Lorentz",
+                "Mistral Lorentz",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Mara",
+                "Mistral Mara",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Nettle",
+                "Mistral Nettle",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Orin",
+                "Mistral Orin",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Puck",
+                "Mistral Puck",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Quinn",
+                "Mistral Quinn",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Rune",
+                "Mistral Rune",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Simbe",
+                "Mistral Simbe",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Tertia",
+                "Mistral Tertia",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Umbriel",
+                "Mistral Umbriel",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Vesta",
+                "Mistral Vesta",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Wystan",
+                "Mistral Wystan",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Xeno",
+                "Mistral Xeno",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Yara",
+                "Mistral Yara",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+            voice(
+                "Zephyr",
+                "Mistral Zephyr",
+                Gender::Unknown,
+                "mistral",
+                vec![en_us()],
+            ),
+        ]),
+        "murf" => {
+            let de = || lang("de-DE", "deu", "German (Germany)");
+            let es = || lang("es-ES", "spa", "Spanish (Spain)");
+            let fr = || lang("fr-FR", "fra", "French (France)");
+            let pt = || lang("pt-BR", "por", "Portuguese (Brazil)");
+            let it = || lang("it-IT", "ita", "Italian (Italy)");
+            Some(vec![
+                voice(
+                    "en-US-natalie",
+                    "Murf Natalie",
+                    Gender::Female,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-owen",
+                    "Murf Owen",
+                    Gender::Male,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-amira",
+                    "Murf Amira",
+                    Gender::Female,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-daniel",
+                    "Murf Daniel",
+                    Gender::Male,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-taylor",
+                    "Murf Taylor",
+                    Gender::Female,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-alex",
+                    "Murf Alex",
+                    Gender::Male,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-emily",
+                    "Murf Emily",
+                    Gender::Female,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice("en-US-ben", "Murf Ben", Gender::Male, "murf", vec![en_us()]),
+                voice(
+                    "en-US-claire",
+                    "Murf Claire",
+                    Gender::Female,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "en-US-glen",
+                    "Murf Glen",
+                    Gender::Male,
+                    "murf",
+                    vec![en_us()],
+                ),
+                voice(
+                    "de-DE-detlef",
+                    "Murf Detlef",
+                    Gender::Male,
+                    "murf",
+                    vec![de()],
+                ),
+                voice(
+                    "es-ES-rosalyn",
+                    "Murf Rosalyn",
+                    Gender::Female,
+                    "murf",
+                    vec![es()],
+                ),
+                voice(
+                    "fr-FR-henri",
+                    "Murf Henri",
+                    Gender::Male,
+                    "murf",
+                    vec![fr()],
+                ),
+                voice(
+                    "pt-BR-thomas",
+                    "Murf Thomas",
+                    Gender::Male,
+                    "murf",
+                    vec![pt()],
+                ),
+                voice(
+                    "it-IT-giulia",
+                    "Murf Giulia",
+                    Gender::Female,
+                    "murf",
+                    vec![it()],
+                ),
+            ])
+        }
+        "unrealspeech" => Some(vec![
+            voice(
+                "Sierra",
+                "UnrealSpeech Sierra",
+                Gender::Female,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Dan",
+                "UnrealSpeech Dan",
+                Gender::Male,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Will",
+                "UnrealSpeech Will",
+                Gender::Male,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Scarlett",
+                "UnrealSpeech Scarlett",
+                Gender::Female,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Liv",
+                "UnrealSpeech Liv",
+                Gender::Female,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Amy",
+                "UnrealSpeech Amy",
+                Gender::Female,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Eric",
+                "UnrealSpeech Eric",
+                Gender::Male,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+            voice(
+                "Brian",
+                "UnrealSpeech Brian",
+                Gender::Male,
+                "unrealspeech",
+                vec![en_us()],
+            ),
+        ]),
+        "xai" => Some(vec![
+            voice(
+                "avalon-47",
+                "xAI Avalon",
+                Gender::Female,
+                "xai",
+                vec![en_us()],
+            ),
+            voice("orion-56", "xAI Orion", Gender::Male, "xai", vec![en_us()]),
+            voice("luna-30", "xAI Luna", Gender::Female, "xai", vec![en_us()]),
+            voice("atlas-84", "xAI Atlas", Gender::Male, "xai", vec![en_us()]),
+            voice("aria-42", "xAI Aria", Gender::Female, "xai", vec![en_us()]),
+            voice("cosmo-01", "xAI Cosmo", Gender::Male, "xai", vec![en_us()]),
+        ]),
+        "upliftai" => {
+            let ur = || lang("ur-PK", "urd", "Urdu (Pakistan)");
+            Some(vec![
+                voice(
+                    "v_8eelc901",
+                    "UpliftAI Info/Education",
+                    Gender::Unknown,
+                    "upliftai",
+                    vec![ur()],
+                ),
+                voice(
+                    "v_30s70t3a",
+                    "UpliftAI Nostalgic News",
+                    Gender::Unknown,
+                    "upliftai",
+                    vec![ur()],
+                ),
+                voice(
+                    "v_yypgzenx",
+                    "UpliftAI Dada Jee",
+                    Gender::Unknown,
+                    "upliftai",
+                    vec![ur()],
+                ),
+                voice(
+                    "v_kwmp7zxt",
+                    "UpliftAI Gen Z",
+                    Gender::Unknown,
+                    "upliftai",
+                    vec![ur()],
+                ),
+            ])
+        }
+        "modelslab" => Some(vec![
+            voice(
+                "madison",
+                "ModelsLab Madison",
+                Gender::Female,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "tara",
+                "ModelsLab Tara",
+                Gender::Female,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "leah",
+                "ModelsLab Leah",
+                Gender::Female,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "jess",
+                "ModelsLab Jess",
+                Gender::Female,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "mia",
+                "ModelsLab Mia",
+                Gender::Female,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "zoe",
+                "ModelsLab Zoe",
+                Gender::Female,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "leo",
+                "ModelsLab Leo",
+                Gender::Male,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "dan",
+                "ModelsLab Dan",
+                Gender::Male,
+                "modelslab",
+                vec![en_us()],
+            ),
+            voice(
+                "zac",
+                "ModelsLab Zac",
+                Gender::Male,
+                "modelslab",
+                vec![en_us()],
+            ),
+        ]),
+        _ => None,
+    }
 }
 
 /// Create a cloud engine from a JSON credentials string.
@@ -2508,7 +3108,10 @@ mod tests {
         assert_eq!(cfg.auth_prefix, "Token ");
         assert_eq!(cfg.voice_param, "model");
         assert_eq!(cfg.default_voice.as_deref(), Some("aura-asteria-en"));
-        assert!(cfg.voices_url.is_none());
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://api.deepgram.com/v1/voices")
+        );
     }
 
     #[test]
@@ -2520,6 +3123,10 @@ mod tests {
         assert_eq!(
             cfg.extra_headers.get("X-User-ID").map(String::as_str),
             Some("u-123")
+        );
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://api.play.ht/api/v2/voices")
         );
     }
 
@@ -2574,6 +3181,10 @@ mod tests {
         assert_eq!(cfg.auth_header, "Authorization");
         assert_eq!(cfg.auth_prefix, "Token ");
         assert_eq!(cfg.voice_param, "voice_uuid");
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://app.resemble.ai/api/v2/voices")
+        );
     }
 
     #[test]
@@ -2614,6 +3225,7 @@ mod tests {
             .unwrap()
         };
         assert_eq!(decoded, "apikey:TESTKEY");
+        assert!(cfg.voices_url.as_deref().unwrap().ends_with("/v1/voices"));
     }
 
     #[test]
@@ -2622,6 +3234,10 @@ mod tests {
         assert_eq!(cfg.synth_url, "https://api.wit.ai/synthesize?v=20240304");
         assert_eq!(cfg.auth_header, "Authorization");
         assert_eq!(cfg.auth_prefix, "Bearer ");
+        assert_eq!(
+            cfg.voices_url.as_deref(),
+            Some("https://api.wit.ai/voices?v=20240304")
+        );
     }
 
     #[test]
@@ -2639,6 +3255,34 @@ mod tests {
         assert_eq!(cfg.synth_url, "https://modelslab.com/api/v1/text_to_speech");
         // ModelsLab has no auth header — key goes in the body by convention.
         assert_eq!(cfg.auth_header, "");
+    }
+
+    // ===== Static voice lists =====
+
+    #[test]
+    fn test_static_voice_counts() {
+        assert_eq!(static_voices("openai").unwrap().len(), 11);
+        assert_eq!(static_voices("hume").unwrap().len(), 16);
+        assert_eq!(static_voices("mistral").unwrap().len(), 27);
+        assert_eq!(static_voices("murf").unwrap().len(), 15);
+        assert_eq!(static_voices("unrealspeech").unwrap().len(), 8);
+        assert_eq!(static_voices("xai").unwrap().len(), 6);
+        assert_eq!(static_voices("upliftai").unwrap().len(), 4);
+        assert_eq!(static_voices("modelslab").unwrap().len(), 9);
+    }
+
+    #[test]
+    fn test_static_voices_returns_none_for_api_engines() {
+        // These engines fetch from an API, not a static list.
+        assert!(static_voices("azure").is_none());
+        assert!(static_voices("google").is_none());
+        assert!(static_voices("elevenlabs").is_none());
+        assert!(static_voices("deepgram").is_none());
+        assert!(static_voices("playht").is_none());
+        assert!(static_voices("fishaudio").is_none());
+        assert!(static_voices("watson").is_none());
+        assert!(static_voices("witai").is_none());
+        assert!(static_voices("resemble").is_none());
     }
 
     // ===== Voice-list response parsers =====
