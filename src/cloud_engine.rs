@@ -20,7 +20,9 @@ pub fn set_viseme_callback(cb: Option<Box<dyn FnMut(i32, f32)>>) {
 }
 
 use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
-use crate::types::{normalize_gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
+use crate::types::{
+    normalize_gender, Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -1818,6 +1820,12 @@ impl TtsEngine for CloudEngine {
 
     #[allow(clippy::too_many_lines)]
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
+        // OpenAI doesn't expose a voice-list endpoint, so return the
+        // documented static list. These are the gpt-4o-mini-tts voices.
+        if self.config.provider_id == "openai" {
+            return Ok(openai_static_voices());
+        }
+
         let Some(ref voices_url) = self.config.voices_url else {
             return Ok(vec![]);
         };
@@ -1930,6 +1938,39 @@ impl TtsEngine for CloudEngine {
             _ => "cloud",
         }
     }
+}
+
+/// Static voice list for OpenAI. The API doesn't expose a voice-list
+/// endpoint, so these are the documented gpt-4o-mini-tts voices.
+#[cfg(feature = "cloud")]
+fn openai_static_voices() -> Vec<Voice> {
+    let voices = [
+        ("alloy", Gender::Female),
+        ("ash", Gender::Male),
+        ("ballad", Gender::Male),
+        ("coral", Gender::Female),
+        ("echo", Gender::Male),
+        ("fable", Gender::Male),
+        ("nova", Gender::Female),
+        ("onyx", Gender::Male),
+        ("sage", Gender::Female),
+        ("shimmer", Gender::Female),
+        ("verse", Gender::Unknown),
+    ];
+    voices
+        .iter()
+        .map(|(name, gender)| Voice {
+            id: (*name).to_string(),
+            name: format!("OpenAI {name}"),
+            gender: *gender,
+            provider: "openai".to_string(),
+            language_codes: vec![LanguageCode {
+                bcp47: "en-US".to_string(),
+                iso639_3: "eng".to_string(),
+                display: "English (United States)".to_string(),
+            }],
+        })
+        .collect()
 }
 
 /// Create a cloud engine from a JSON credentials string.
