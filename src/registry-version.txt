@@ -1,19 +1,7 @@
-# Provenance of src/merged_models.json — do not edit by hand.
-#
-# This file records exactly which version of the sherpa-onnx TTS model
-# registry is embedded in the build. CI asserts that the sha256 below
-# matches src/merged_models.json so the two never drift apart.
-#
-# To pull a new version from the canonical registry repo:
-#   ./scripts/sync-registry.sh v2026-08-10
-# (see https://github.com/AACTools/sherpa-onnx-tts-models — releases)
-#
-# --- current state ----------------------------------------------------------
-# This copy was hand-maintained (derived from tts-wrapper's createindex.py)
-# before the registry was split into its own repo. It will be replaced by a
-# tagged-release sync once AACTools/sherpa-onnx-tts-models is published.
-tag: legacy-hand-maintained
-models.json.sha256: 4426c3997b2001e99e1cd72485601fb9168cffab6849e7e92f628f1f8ba4541e
-entries: 1335
-source: local (pre-registry-split)
-fetched_at: 2026-08-10T12:10:00Z
+# Provenance of src/merged_models.json - do not edit by hand.
+# Regenerate with: ./scripts/sync-registry.sh
+tag: v2026-08-10
+models.json.sha256: e00175e8ce42c218d6e8b580988e2f9ae86d3c38a1d979b4121d1f62fac011d6
+entries: 1399
+source: https://github.com/AACTools/sherpa-onnx-tts-models
+fetched_at: 2026-08-10T11:14:37Z

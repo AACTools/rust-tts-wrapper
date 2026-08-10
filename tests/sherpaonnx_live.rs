@@ -13,7 +13,7 @@
 //! Models used (smallest available per family at the time of writing):
 //!   vits       — piper-uk-lada-low        (~25 MB)  Eastern European Piper voice
 //!   matcha     — icefall-fs-ljspeech      (~73 MB)  Matcha-TTS English (LJSpeech)
-//!   kokoro     — kokoro-zh_en-int8-multi  (~140 MB) Kokoro multilingual
+//!   kokoro     — kokoro-zh_en-int8  (~140 MB) Kokoro multilingual
 //!   supertonic — supertonic-3-multilingual (~123 MB) Supertonic 3 (31 langs)
 //!
 //! Matcha models need a separate vocoder (`hifigan_v2.onnx`) in the base
@@ -278,7 +278,7 @@ fn vits_piper_multi_speaker_voice_id_selectable() {
     // parameter. Synthesise twice with two different ids and confirm both
     // produce audio (we can't easily assert they differ without a model
     // diff, but a crash or empty result would surface here).
-    let id = model_id("SHERPA_VITS_MULTI_MODEL", "vits-coqui-en-vctk");
+    let id = model_id("SHERPA_VITS_MULTI_MODEL", "coqui-en-vctk");
     // Skip cleanly if the multi-speaker model isn't downloaded.
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let present = std::path::PathBuf::from(home)
@@ -363,7 +363,7 @@ fn matcha_word_boundaries_fire() {
 #[test]
 #[ignore]
 fn kokoro_synthesises_nonempty_audio() {
-    let id = model_id("SHERPA_KOKORO_MODEL", "kokoro-zh_en-int8-multi");
+    let id = model_id("SHERPA_KOKORO_MODEL", "kokoro-zh_en-int8");
     let engine = engine_for(&id);
     let total = Arc::new(Mutex::new(0usize));
     let t = total.clone();
@@ -390,7 +390,7 @@ fn kokoro_voices_bin_loaded_from_registry() {
     // Kokoro ships voices.bin — get_voices() should still return the
     // registry-based speaker list (the engine doesn't introspect voices.bin
     // directly). Smoke-test that voice enumeration doesn't panic.
-    let id = model_id("SHERPA_KOKORO_MODEL", "kokoro-zh_en-int8-multi");
+    let id = model_id("SHERPA_KOKORO_MODEL", "kokoro-zh_en-int8");
     let engine = engine_for(&id);
     let voices = engine.get_voices().expect("voices");
     assert!(!voices.is_empty());

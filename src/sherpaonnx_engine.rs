@@ -112,7 +112,7 @@ impl SherpaOnnxEngine {
     /// Credentials JSON keys:
     /// - `modelPath`: directory containing downloaded models (defaults to
     ///   `~/.rust-tts-wrapper/sherpaonnx`)
-    /// - `modelId`: id from the registry (e.g. `kokoro-en-en-19`). Required —
+    /// - `modelId`: id from the registry (e.g. `kokoro-en-v0_19`). Required —
     ///   if absent, no model is loaded and `speak` will return an error rather
     ///   than silently forcing a 305 MB download.
     /// - `numThreads`: ONNX runtime intra-op thread count (default 2).
@@ -802,7 +802,7 @@ fn is_piper_or_github_model(model_id: &str) -> bool {
 }
 
 /// Collect lexicon paths for a Kokoro model. Multilingual releases (e.g.
-/// `kokoro-zh_en-int8-multi`) ship several `lexicon-*.txt` files which
+/// `kokoro-zh_en-int8`) ship several `lexicon-*.txt` files which
 /// sherpa-onnx accepts as a comma-separated list; English-only Kokoro has
 /// none and relies on `espeak-ng-data/` instead. Returns `None` when no
 /// lexicon files are present so the field is left unset.
@@ -1126,7 +1126,7 @@ mod tests {
         assert!(is_piper_or_github_model("zh-cantonese"));
         assert!(is_piper_or_github_model("ljs-en"));
         assert!(is_piper_or_github_model("cantonese-fs-xiaomaiiwn"));
-        assert!(is_piper_or_github_model("kokoro-en-en-19"));
+        assert!(is_piper_or_github_model("kokoro-en-v0_19"));
     }
 
     #[test]
@@ -1785,15 +1785,15 @@ mod tests {
         // Pick a known multi-speaker model from the registry and verify
         // get_voices() enumerates `num_speakers` voice ids without needing
         // the actual model files (it reads from the registry only).
-        let engine = SherpaOnnxEngine::new(r#"{"modelId":"vits-coqui-en-vctk"}"#);
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"coqui-en-vctk"}"#);
         // If this particular id isn't in the registry, skip loudly so the
         // test output shows the skip rather than passing vacuously. A
         // silent `return` here previously masked the test becoming a no-op
         // when the model id was renamed.
-        let known = engine.models.contains_key("vits-coqui-en-vctk");
+        let known = engine.models.contains_key("coqui-en-vctk");
         if !known {
             eprintln!(
-                "skipping: 'vits-coqui-en-vctk' is no longer in the registry; \
+                "skipping: 'coqui-en-vctk' is no longer in the registry; \
                  update the model id in this test"
             );
             return;
@@ -1809,7 +1809,7 @@ mod tests {
 
     #[test]
     fn test_engine_get_voices_single_speaker_returns_one() {
-        let engine = SherpaOnnxEngine::new(r#"{"modelId":"kokoro-en-en-19"}"#);
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"kokoro-en-v0_19"}"#);
         let voices = engine.get_voices().expect("voices");
         assert_eq!(voices.len(), 1);
         assert_eq!(voices[0].id, "0");

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 #
-# sync-registry.sh — pull a pinned, checksummed release of the sherpa-onnx
+# sync-registry.sh - pull a pinned, checksummed release of the sherpa-onnx
 # TTS model registry into src/merged_models.json.
 #
 # The registry lives in its own repo (AACTools/sherpa-onnx-tts-models) and
 # is published as a tagged GitHub release. This script fetches a specific
 # tag, verifies the SHA-256, drops the JSON into src/, and records the
 # provenance in src/registry-version.txt so every build is reproducible and
-# auditable. Commit both files after running — the build itself needs no
+# auditable. Commit both files after running - the build itself needs no
 # network.
 #
 # Usage:
@@ -55,15 +55,15 @@ BASE_URL="https://github.com/${REGISTRY_REPO}/releases/download/${TAG}"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-echo "Fetching registry $TAG from $REGISTRY_REPO…"
+echo "Fetching registry $TAG from $REGISTRY_REPO..."
 
 # --- Download models.json + its checksum ------------------------------------
 curl -fsSL -o "$TMP/models.json"        "$BASE_URL/models.json"
-# The checksum file is optional in older releases — warn, don't fail, if missing.
+# The checksum file is optional in older releases - warn, don't fail, if missing.
 if curl -fsSL -o "$TMP/models.json.sha256" "$BASE_URL/models.json.sha256"; then
   EXPECTED="$(awk '{print $1}' "$TMP/models.json.sha256")"
 else
-  echo "  (no models.json.sha256 in this release — skipping checksum verification)"
+  echo "  (no models.json.sha256 in this release - skipping checksum verification)"
   EXPECTED=""
 fi
 
@@ -80,16 +80,16 @@ if [[ -n "$EXPECTED" ]]; then
 fi
 
 # --- Validate it parses + count entries -------------------------------------
-COUNT="$(python3 -c "import json,sys; print(len(json.load(open('$TMP/models.json'))))")" 2>/dev || {
+if ! COUNT="$(python3 -c "import json; print(len(json.load(open('$TMP/models.json'))))" 2>/dev/null)"; then
   echo "error: downloaded models.json is not valid JSON" >&2
   exit 1
-}
+fi
 echo "  $COUNT entries"
 
 # --- Swap into place (atomic) + write provenance ---------------------------
 mv "$TMP/models.json" "$MODELS_FILE"
 cat > "$VERSION_FILE" <<EOF
-# Provenance of src/merged_models.json — do not edit by hand.
+# Provenance of src/merged_models.json - do not edit by hand.
 # Regenerate with: ./scripts/sync-registry.sh
 tag: ${TAG}
 models.json.sha256: ${ACTUAL}
@@ -99,7 +99,7 @@ fetched_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
 echo
-echo "Synced ${TAG} → src/merged_models.json"
+echo "Synced ${TAG} -> src/merged_models.json"
 echo "  $COUNT entries, sha256 $ACTUAL"
 echo
 echo "Next: review the diff and commit both files:"

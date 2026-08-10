@@ -258,7 +258,7 @@ pub struct EngineDescriptor {
 /// Metadata for a Sherpa-ONNX model from the registry.
 #[derive(Debug, Clone)]
 pub struct SherpaModelInfo {
-    /// Model identifier (e.g. `"kokoro-en-en-19"`).
+    /// Model identifier (e.g. `"kokoro-en-v0_19"`).
     pub id: String,
     /// Model type (e.g. `"kokoro"`, `"vits"`).
     pub model_type: String,

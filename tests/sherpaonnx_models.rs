@@ -101,7 +101,7 @@ mod sherpaonnx_tests {
         // A handful of well-known model ids from the registry. If any of these
         // disappear, the registry parsing has changed and consumers will break.
         for id in &[
-            "kokoro-en-en-19",
+            "kokoro-en-v0_19",
             "coqui-en-ljspeech",
             "cantonese-fs-xiaomaiiwn",
         ] {
