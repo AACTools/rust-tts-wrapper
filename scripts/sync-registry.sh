@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # sync-registry.sh - pull a pinned, checksummed release of the sherpa-onnx
-# TTS model registry into src/merged_models.json.
+# TTS model registry into src/models.json.
 #
 # The registry lives in its own repo (AACTools/sherpa-onnx-tts-models) and
 # is published as a tagged GitHub release. This script fetches a specific
@@ -33,7 +33,7 @@ REGISTRY_REPO="${REGISTRY_REPO:-AACTools/sherpa-onnx-tts-models}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)/src"
 VERSION_FILE="$SRC_DIR/registry-version.txt"
-MODELS_FILE="$SRC_DIR/merged_models.json"
+MODELS_FILE="$SRC_DIR/models.json"
 
 # Resolve the tag: explicit arg wins, else read the currently-pinned tag.
 if [[ $# -ge 1 ]]; then
@@ -89,7 +89,7 @@ echo "  $COUNT entries"
 # --- Swap into place (atomic) + write provenance ---------------------------
 mv "$TMP/models.json" "$MODELS_FILE"
 cat > "$VERSION_FILE" <<EOF
-# Provenance of src/merged_models.json - do not edit by hand.
+# Provenance of src/models.json - do not edit by hand.
 # Regenerate with: ./scripts/sync-registry.sh
 tag: ${TAG}
 models.json.sha256: ${ACTUAL}
@@ -99,9 +99,9 @@ fetched_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 EOF
 
 echo
-echo "Synced ${TAG} -> src/merged_models.json"
+echo "Synced ${TAG} -> src/models.json"
 echo "  $COUNT entries, sha256 $ACTUAL"
 echo
 echo "Next: review the diff and commit both files:"
-echo "  git add src/merged_models.json src/registry-version.txt"
+echo "  git add src/models.json src/registry-version.txt"
 echo "  git commit -m \"sync sherpa-onnx registry ${TAG}\""

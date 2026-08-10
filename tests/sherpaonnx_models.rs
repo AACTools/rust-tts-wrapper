@@ -20,12 +20,12 @@ mod sherpaonnx_tests {
     }
 
     /// Mirror of `sherpaonnx_engine::load_models` — parses the embedded
-    /// `merged_models.json` so we can validate the registry actually loads
+    /// `models.json` so we can validate the registry actually loads
     /// and the per-type counts match what the README advertises.
     fn parse_registry() -> HashMap<String, ModelInfo> {
-        let json = include_str!("../src/merged_models.json");
+        let json = include_str!("../src/models.json");
         let raw: HashMap<String, serde_json::Value> =
-            serde_json::from_str(json).expect("merged_models.json must parse");
+            serde_json::from_str(json).expect("models.json must parse");
         let mut out = HashMap::new();
         for (key, val) in raw {
             let Some(obj) = val.as_object() else {

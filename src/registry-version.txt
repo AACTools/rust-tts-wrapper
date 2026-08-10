@@ -1,4 +1,4 @@
-# Provenance of src/merged_models.json - do not edit by hand.
+# Provenance of src/models.json - do not edit by hand.
 # Regenerate with: ./scripts/sync-registry.sh
 tag: v2026-08-10
 models.json.sha256: e00175e8ce42c218d6e8b580988e2f9ae86d3c38a1d979b4121d1f62fac011d6

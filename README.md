@@ -327,7 +327,7 @@ Cloud engines use provider-specific `CloudConfig`:
 
 ## Sherpa-ONNX Models
 
-1300+ models from the bundled `merged_models.json` registry. Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
+1300+ models from the bundled `models.json` registry. Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
 
 ### Updating the registry
 
@@ -342,7 +342,7 @@ this crate:
 ```
 
 The script downloads `models.json` from the release, verifies its SHA-256,
-writes it to `src/merged_models.json`, and records the tag + checksum in
+writes it to `src/models.json`, and records the tag + checksum in
 `src/registry-version.txt`. Commit both files — the build then needs no
 network. CI (`lint.yml → registry-consistency`) asserts the two never drift
 apart.

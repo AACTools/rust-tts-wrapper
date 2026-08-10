@@ -37,7 +37,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev wget bzip2 tar
 
       - name: Cache SherpaOnnx models
-        # Key on the hash of merged_models.json so any registry update
+        # Key on the hash of models.json so any registry update
         # (which could rename or remove a model id) busts the cache and
         # re-downloads. Without this the workflow re-pulled ~250 MB per
         # platform on every PR that touched sherpaonnx_engine.rs.
@@ -49,7 +49,7 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8-multi
             ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
-          key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/merged_models.json') }}
+          key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/models.json') }}
           restore-keys: |
             sherpa-models-${{ matrix.os }}-
 

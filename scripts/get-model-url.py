@@ -8,8 +8,8 @@ human-readable error on stderr otherwise. Used by the
 sherpaonnx-live.yml GitHub Actions workflow so a registry rename produces
 a clear error rather than an opaque Python traceback.
 
-The registry path can be overridden via the RTW_MERGED_MODELS env var;
-defaults to src/merged_models.json relative to the repo root.
+The registry path can be overridden via the RTW_MODELS env var;
+    defaults to src/models.json relative to the repo root.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ def main() -> int:
     model_id = sys.argv[1]
     registry_path = Path(
         os.environ.get(
-            "RTW_MERGED_MODELS",
-            Path(__file__).resolve().parent.parent / "src" / "merged_models.json",
+            "RTW_MODELS",
+            Path(__file__).resolve().parent.parent / "src" / "models.json",
         )
     )
 

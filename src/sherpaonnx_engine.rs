@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
-/// Embedded model registry compiled from `merged_models.json`.
-static MERGED_MODELS_JSON: &str = include_str!("merged_models.json");
+/// Embedded model registry compiled from `models.json`.
+static MODELS_JSON: &str = include_str!("models.json");
 
 /// Shared cancellation flag — set by `stop()`, read by the progress callback.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -185,9 +185,9 @@ fn default_model_dir() -> PathBuf {
     dir
 }
 
-/// Parse the embedded `merged_models.json` into a hashmap.
+/// Parse the embedded `models.json` into a hashmap.
 fn load_models() -> HashMap<String, SherpaModelInfo> {
-    let raw: HashMap<String, serde_json::Value> = match serde_json::from_str(MERGED_MODELS_JSON) {
+    let raw: HashMap<String, serde_json::Value> = match serde_json::from_str(MODELS_JSON) {
         Ok(v) => v,
         Err(_) => return HashMap::new(),
     };
@@ -312,7 +312,7 @@ impl TtsEngine for SherpaOnnxEngine {
         //   unknown   espeak-ng-data; they ship just model.onnx + tokens.txt
         //             + lexicon.txt.
         //
-        // The merged_models registry has ~1143 MMS entries that omit
+        // The registry has ~1143 MMS entries that omit
         // `model_type`, so empty/unknown falls through to VITS handling.
         let id_lower = self.loaded_model_id.to_ascii_lowercase();
         let is_piper_or_github = is_piper_or_github_model(&id_lower);
@@ -1537,7 +1537,7 @@ mod tests {
         if !engine.models.contains_key("supertonic-3-multilingual") {
             eprintln!(
                 "skipping: 'supertonic-3-multilingual' missing from registry; \
-                 check merged_models.json"
+                 check src/models.json"
             );
             return;
         }
