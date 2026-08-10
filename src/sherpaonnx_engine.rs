@@ -81,6 +81,9 @@ pub struct SherpaOnnxEngine {
     model_dir: PathBuf,
     loaded_model_id: String,
     num_threads: i32,
+    /// Supertonic denoising step count (quality knob: 5 low → 12 high,
+    /// default 8). Ignored by other model types.
+    num_steps: i32,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -93,6 +96,7 @@ impl fmt::Debug for SherpaOnnxEngine {
         f.debug_struct("SherpaOnnxEngine")
             .field("loaded_model_id", &self.loaded_model_id)
             .field("num_threads", &self.num_threads)
+            .field("num_steps", &self.num_steps)
             .field("provider", &self.provider)
             .field(
                 "tts_cached",
@@ -112,11 +116,14 @@ impl SherpaOnnxEngine {
     ///   if absent, no model is loaded and `speak` will return an error rather
     ///   than silently forcing a 305 MB download.
     /// - `numThreads`: ONNX runtime intra-op thread count (default 2).
+    /// - `numSteps`: Supertonic denoising steps, 5–12 (default 8). Out-of-range
+    ///   values fall back to 8. Ignored by non-Supertonic models.
     /// - `provider`: `cpu` (default), `coreml`, `cuda`, `directml`, etc.
     pub fn new(credentials_json: &str) -> Self {
         let mut model_dir = default_model_dir();
         let mut model_id = String::new();
         let mut num_threads = 2;
+        let mut num_steps = 8;
         let mut provider: Option<String> = None;
 
         if !credentials_json.is_empty() {
@@ -130,6 +137,14 @@ impl SherpaOnnxEngine {
                 if let Some(t) = creds.get("numThreads").and_then(|s| s.parse::<i32>().ok()) {
                     if t > 0 {
                         num_threads = t;
+                    }
+                }
+                if let Some(s) = creds.get("numSteps").and_then(|s| s.parse::<i32>().ok()) {
+                    // Clamp to Supertonic's supported quality range. Values
+                    // outside 5–12 degrade output or waste compute, so fall
+                    // back to the default rather than passing them through.
+                    if (5..=12).contains(&s) {
+                        num_steps = s;
                     }
                 }
                 if let Some(p) = creds.get("provider") {
@@ -147,6 +162,7 @@ impl SherpaOnnxEngine {
             model_dir,
             loaded_model_id: model_id,
             num_threads,
+            num_steps,
             provider,
             tts_instance: Mutex::new(None),
         }
@@ -339,6 +355,13 @@ impl TtsEngine for SherpaOnnxEngine {
                 provider: self.provider.clone(),
                 ..Default::default()
             },
+            "supertonic" => sherpa_onnx::OfflineTtsModelConfig {
+                supertonic: build_supertonic_config(&model_dir),
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
             // VITS, MMS (Facebook Massively Multilingual Speech), and unknown
             // model types all use the VITS config family.
             "vits" | "mms" | "unknown" | "" => sherpa_onnx::OfflineTtsModelConfig {
@@ -376,10 +399,27 @@ impl TtsEngine for SherpaOnnxEngine {
         let tts = tts_guard.as_ref().expect("tts was just initialised");
 
         let sid = voice.and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
-        let gen_config = sherpa_onnx::GenerationConfig {
-            sid,
-            speed: rate.max(0.1),
-            ..Default::default()
+        // Supertonic needs both a speaker id and a language; the language is
+        // delivered through GenerationConfig.extra. We encode both in the
+        // voice id as "sid:lang" (produced by get_voices), and fall back to a
+        // bare integer + default "en" for backwards compatibility.
+        let gen_config = if model_info.model_type == "supertonic" {
+            let (sid, lang) = parse_supertonic_voice(voice);
+            let mut extra = HashMap::new();
+            extra.insert("lang".to_string(), serde_json::Value::String(lang));
+            sherpa_onnx::GenerationConfig {
+                sid,
+                speed: rate.max(0.1),
+                num_steps: self.num_steps,
+                extra: Some(extra),
+                ..Default::default()
+            }
+        } else {
+            sherpa_onnx::GenerationConfig {
+                sid,
+                speed: rate.max(0.1),
+                ..Default::default()
+            }
         };
 
         let volume_factor = volume.clamp(0.0, 4.0);
@@ -464,6 +504,17 @@ impl TtsEngine for SherpaOnnxEngine {
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         let model_info = self.models.get(&self.loaded_model_id);
+
+        // Supertonic is addressed by (speaker, language) rather than a bare
+        // speaker id. Emit one voice per speaker × language pair, encoding
+        // both in the id as "sid:lang" so speak() can route the language
+        // through GenerationConfig.extra.
+        if let Some(info) = model_info {
+            if info.model_type == "supertonic" {
+                return Ok(supertonic_voices(info));
+            }
+        }
+
         let num_speakers = model_info.map_or(1, |m| m.num_speakers);
         let lang = model_info
             .and_then(|m| m.language.first())
@@ -827,6 +878,83 @@ fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKo
         // length_scale left at default — rate is applied via GenerationConfig.speed.
         ..Default::default()
     }
+}
+
+/// Supertonic config: four ONNX sessions (`duration_predictor`,
+/// `text_encoder`, `vector_estimator`, `vocoder`) plus `tts.json`,
+/// `unicode_indexer.bin`, and `voice.bin`. The sherpa-onnx release ships
+/// int8-quantised onnx files (`<name>.int8.onnx`); fall back to the
+/// unquantised `<name>.onnx` if the int8 variant is absent. Missing files
+/// surface as `None` and sherpa-onnx will fail at `OfflineTts::create` with a
+/// clear message — matching how the Kokoro builder handles an absent
+/// `voices.bin`.
+fn build_supertonic_config(
+    model_dir: &std::path::Path,
+) -> sherpa_onnx::OfflineTtsSupertonicModelConfig {
+    sherpa_onnx::OfflineTtsSupertonicModelConfig {
+        duration_predictor: first_existing(
+            model_dir,
+            &["duration_predictor.int8.onnx", "duration_predictor.onnx"],
+        )
+        .map(|p| p.to_string_lossy().to_string()),
+        text_encoder: first_existing(model_dir, &["text_encoder.int8.onnx", "text_encoder.onnx"])
+            .map(|p| p.to_string_lossy().to_string()),
+        vector_estimator: first_existing(
+            model_dir,
+            &["vector_estimator.int8.onnx", "vector_estimator.onnx"],
+        )
+        .map(|p| p.to_string_lossy().to_string()),
+        vocoder: first_existing(model_dir, &["vocoder.int8.onnx", "vocoder.onnx"])
+            .map(|p| p.to_string_lossy().to_string()),
+        tts_json: existing_path(model_dir, "tts.json"),
+        unicode_indexer: existing_path(model_dir, "unicode_indexer.bin"),
+        voice_style: existing_path(model_dir, "voice.bin"),
+    }
+}
+
+/// Parse a Supertonic voice id of the form `"sid:lang"` (e.g. `"6:ja"`)
+/// into a `(speaker_id, language_code)` pair. A bare integer (`"6"`) is
+/// accepted for backwards compatibility and defaults the language to `"en"`;
+/// `None`/empty yields speaker 0 + `"en"`.
+fn parse_supertonic_voice(voice: Option<&str>) -> (i32, String) {
+    const DEFAULT_LANG: &str = "en";
+    match voice {
+        None | Some("") => (0, DEFAULT_LANG.to_string()),
+        Some(v) => match v.split_once(':') {
+            Some((sid_str, lang)) => {
+                let sid = sid_str.parse::<i32>().unwrap_or(0);
+                let lang = if lang.is_empty() { DEFAULT_LANG } else { lang };
+                (sid, lang.to_string())
+            }
+            None => (v.parse::<i32>().unwrap_or(0), DEFAULT_LANG.to_string()),
+        },
+    }
+}
+
+/// Build one [`Voice`] per `(speaker, language)` pair for a Supertonic model.
+/// Each voice id is `"sid:lang"` so [`SherpaOnnxEngine::speak`] can recover
+/// both. With 10 preset speakers × 31 languages this yields 310 voices; the
+/// list is deliberately exhaustive so callers can discover every combination.
+fn supertonic_voices(info: &SherpaModelInfo) -> Vec<Voice> {
+    let mut voices = Vec::new();
+    for lang in &info.language {
+        let iso639 = iso639_3(&lang.lang_code);
+        let display = crate::types::locale_display_name(&lang.lang_code);
+        for sid in 0..info.num_speakers {
+            voices.push(Voice {
+                id: format!("{sid}:{}", lang.lang_code),
+                name: format!("Speaker {sid} ({})", lang.language_name),
+                gender: Gender::Unknown,
+                provider: "sherpaonnx".to_string(),
+                language_codes: vec![LanguageCode {
+                    bcp47: lang.lang_code.clone(),
+                    iso639_3: iso639.clone(),
+                    display: display.clone(),
+                }],
+            });
+        }
+    }
+    voices
 }
 
 /// Matcha config: acoustic-model.onnx + vocoder.onnx + tokens.txt.
@@ -1234,6 +1362,213 @@ mod tests {
         fs::write(d.path().join("tokens.txt"), b"x").unwrap();
         let base = tempfile::tempdir().unwrap();
         assert!(build_matcha_config(d.path(), base.path()).is_err());
+    }
+
+    // ===== Supertonic builder / voice parsing tests =====
+
+    /// Build a temp directory resembling the extracted sherpa-onnx Supertonic
+    /// int8 bundle: four `<name>.int8.onnx` files + tts.json +
+    /// unicode_indexer.bin + voice.bin.
+    fn fake_supertonic_int8_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().expect("tmp");
+        for name in [
+            "duration_predictor.int8.onnx",
+            "text_encoder.int8.onnx",
+            "vector_estimator.int8.onnx",
+            "vocoder.int8.onnx",
+        ] {
+            fs::write(d.path().join(name), b"x").unwrap();
+        }
+        fs::write(d.path().join("tts.json"), b"{}").unwrap();
+        fs::write(d.path().join("unicode_indexer.bin"), b"x").unwrap();
+        fs::write(d.path().join("voice.bin"), b"x").unwrap();
+        d
+    }
+
+    #[test]
+    fn test_build_supertonic_config_resolves_all_int8_files() {
+        let d = fake_supertonic_int8_dir();
+        let cfg = build_supertonic_config(d.path());
+        // All seven fields must resolve — sherpa-onnx rejects the config if
+        // any required path is None.
+        for (field, val) in [
+            ("duration_predictor", cfg.duration_predictor.as_deref()),
+            ("text_encoder", cfg.text_encoder.as_deref()),
+            ("vector_estimator", cfg.vector_estimator.as_deref()),
+            ("vocoder", cfg.vocoder.as_deref()),
+        ] {
+            assert!(
+                val.is_some_and(|p| p.ends_with(&format!("{field}.int8.onnx"))),
+                "{field} should resolve to its int8 onnx, got {val:?}"
+            );
+        }
+        assert!(cfg.tts_json.is_some_and(|p| p.ends_with("tts.json")));
+        assert!(cfg
+            .unicode_indexer
+            .is_some_and(|p| p.ends_with("unicode_indexer.bin")));
+        assert!(cfg.voice_style.is_some_and(|p| p.ends_with("voice.bin")));
+    }
+
+    #[test]
+    fn test_build_supertonic_config_falls_back_to_plain_onnx() {
+        // When the int8 variants are absent, the builder must pick the plain
+        // `<name>.onnx` files (some custom Supertonic layouts ship unquantised).
+        let d = tempfile::tempdir().unwrap();
+        for name in [
+            "duration_predictor.onnx",
+            "text_encoder.onnx",
+            "vector_estimator.onnx",
+            "vocoder.onnx",
+        ] {
+            fs::write(d.path().join(name), b"x").unwrap();
+        }
+        let cfg = build_supertonic_config(d.path());
+        assert!(cfg
+            .duration_predictor
+            .as_deref()
+            .unwrap()
+            .ends_with("duration_predictor.onnx"));
+        assert!(cfg.vocoder.as_deref().unwrap().ends_with("vocoder.onnx"));
+    }
+
+    #[test]
+    fn test_build_supertonic_config_missing_files_are_none() {
+        // An empty dir must produce None for every field rather than a path
+        // to a nonexistent file (sherpa-onnx's create() handles the error).
+        let d = tempfile::tempdir().unwrap();
+        let cfg = build_supertonic_config(d.path());
+        assert!(cfg.duration_predictor.is_none());
+        assert!(cfg.text_encoder.is_none());
+        assert!(cfg.vector_estimator.is_none());
+        assert!(cfg.vocoder.is_none());
+        assert!(cfg.tts_json.is_none());
+        assert!(cfg.unicode_indexer.is_none());
+        assert!(cfg.voice_style.is_none());
+    }
+
+    #[test]
+    fn test_parse_supertonic_voice_sid_lang_form() {
+        assert_eq!(parse_supertonic_voice(Some("6:ja")), (6, "ja".to_string()));
+        assert_eq!(parse_supertonic_voice(Some("0:en")), (0, "en".to_string()));
+        assert_eq!(parse_supertonic_voice(Some("9:ko")), (9, "ko".to_string()));
+    }
+
+    #[test]
+    fn test_parse_supertonic_voice_bare_integer_defaults_en() {
+        // Backwards compatibility: a plain speaker id picks the default lang.
+        assert_eq!(parse_supertonic_voice(Some("6")), (6, "en".to_string()));
+        assert_eq!(parse_supertonic_voice(Some("0")), (0, "en".to_string()));
+    }
+
+    #[test]
+    fn test_parse_supertonic_voice_none_and_empty() {
+        assert_eq!(parse_supertonic_voice(None), (0, "en".to_string()));
+        assert_eq!(parse_supertonic_voice(Some("")), (0, "en".to_string()));
+    }
+
+    #[test]
+    fn test_parse_supertonic_voice_empty_lang_after_colon() {
+        // "6:" → sid 6, empty lang defaults to "en" rather than forwarding an
+        // empty string that sherpa-onnx would reject.
+        assert_eq!(parse_supertonic_voice(Some("6:")), (6, "en".to_string()));
+    }
+
+    #[test]
+    fn test_parse_supertonic_voice_non_numeric_sid_falls_back_to_zero() {
+        // A malformed sid must not panic — fall back to 0.
+        assert_eq!(
+            parse_supertonic_voice(Some("abc:ja")),
+            (0, "ja".to_string())
+        );
+    }
+
+    #[test]
+    fn test_supertonic_voices_one_per_speaker_language_pair() {
+        // 2 speakers × 3 languages = 6 voices, ids encoded as "sid:lang".
+        let info = SherpaModelInfo {
+            id: "test".into(),
+            model_type: "supertonic".into(),
+            name: "test".into(),
+            language: vec![
+                SherpaLanguage {
+                    lang_code: "en".into(),
+                    language_name: "English".into(),
+                    country: String::new(),
+                },
+                SherpaLanguage {
+                    lang_code: "ja".into(),
+                    language_name: "Japanese".into(),
+                    country: String::new(),
+                },
+                SherpaLanguage {
+                    lang_code: "ko".into(),
+                    language_name: "Korean".into(),
+                    country: String::new(),
+                },
+            ],
+            sample_rate: 24000,
+            num_speakers: 2,
+            url: String::new(),
+            compression: false,
+            filesize_mb: 0.0,
+        };
+        let voices = supertonic_voices(&info);
+        assert_eq!(voices.len(), 6);
+        // Each combination is present, and ids round-trip back to (sid, lang).
+        let ids: Vec<&str> = voices.iter().map(|v| v.id.as_str()).collect();
+        assert!(ids.contains(&"0:en"));
+        assert!(ids.contains(&"1:ko"));
+        assert!(ids.contains(&"0:ja"));
+        // Voice carries the matching language code.
+        let ja_voice = voices
+            .iter()
+            .find(|v| v.id == "1:ja")
+            .expect("1:ja voice exists");
+        assert_eq!(ja_voice.language_codes[0].bcp47, "ja");
+        assert_eq!(ja_voice.provider, "sherpaonnx");
+    }
+
+    #[test]
+    fn test_engine_get_voices_supertonic_enumerates_speakers_times_languages() {
+        // Integration: the real registry entry must produce 10 speakers ×
+        // 31 languages = 310 voices. This also verifies the JSON parses and
+        // model_type "supertonic" routes through the expansion branch.
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"supertonic-3-multilingual"}"#);
+        if !engine.models.contains_key("supertonic-3-multilingual") {
+            eprintln!(
+                "skipping: 'supertonic-3-multilingual' missing from registry; \
+                 check merged_models.json"
+            );
+            return;
+        }
+        let voices = engine.get_voices().expect("voices");
+        assert_eq!(voices.len(), 10 * 31);
+        // Spot-check a known pair and the id encoding.
+        assert!(voices.iter().any(|v| v.id == "6:ja"));
+        // Every voice carries the sherpaonnx provider tag.
+        assert!(voices.iter().all(|v| v.provider == "sherpaonnx"));
+    }
+
+    #[test]
+    fn test_engine_num_steps_default_and_valid_override() {
+        // No numSteps → default 8.
+        assert_eq!(SherpaOnnxEngine::new("{}").num_steps, 8);
+        // Valid in-range value passes through.
+        assert_eq!(SherpaOnnxEngine::new(r#"{"numSteps":"10"}"#).num_steps, 10);
+        assert_eq!(SherpaOnnxEngine::new(r#"{"numSteps":"5"}"#).num_steps, 5);
+        assert_eq!(SherpaOnnxEngine::new(r#"{"numSteps":"12"}"#).num_steps, 12);
+    }
+
+    #[test]
+    fn test_engine_num_steps_out_of_range_clamps_to_default() {
+        // Below 5 and above 12 are outside Supertonic's supported range.
+        assert_eq!(SherpaOnnxEngine::new(r#"{"numSteps":"3"}"#).num_steps, 8);
+        assert_eq!(SherpaOnnxEngine::new(r#"{"numSteps":"20"}"#).num_steps, 8);
+    }
+
+    #[test]
+    fn test_engine_num_steps_non_numeric_keeps_default() {
+        assert_eq!(SherpaOnnxEngine::new(r#"{"numSteps":"fast"}"#).num_steps, 8);
     }
 
     fn fake_piper_dir() -> tempfile::TempDir {

@@ -11,15 +11,17 @@
 //!   cargo test --test sherpaonnx_live --features sherpaonnx -- --ignored
 //!
 //! Models used (smallest available per family at the time of writing):
-//!   vits   — piper-uk-lada-low       (~25 MB)  Eastern European Piper voice
-//!   matcha — icefall-fs-ljspeech     (~73 MB)  Matcha-TTS English (LJSpeech)
-//!   kokoro — kokoro-zh_en-int8-multi (~140 MB) Kokoro multilingual
+//!   vits       — piper-uk-lada-low        (~25 MB)  Eastern European Piper voice
+//!   matcha     — icefall-fs-ljspeech      (~73 MB)  Matcha-TTS English (LJSpeech)
+//!   kokoro     — kokoro-zh_en-int8-multi  (~140 MB) Kokoro multilingual
+//!   supertonic — supertonic-3-multilingual (~123 MB) Supertonic 3 (31 langs)
 //!
 //! Matcha models need a separate vocoder (`hifigan_v2.onnx`) in the base
 //! model dir; the workflow downloads it. See `build_matcha_config` for the
 //! fallback search.
 //!
-//! Override with `SHERPA_VITS_MODEL`, `SHERPA_MATCHA_MODEL`, `SHERPA_KOKORO_MODEL`.
+//! Override with `SHERPA_VITS_MODEL`, `SHERPA_MATCHA_MODEL`, `SHERPA_KOKORO_MODEL`,
+//! `SHERPA_SUPERTONIC_MODEL`.
 
 #![allow(clippy::all, clippy::pedantic, clippy::float_cmp)]
 
@@ -393,6 +395,75 @@ fn kokoro_voices_bin_loaded_from_registry() {
     let voices = engine.get_voices().expect("voices");
     assert!(!voices.is_empty());
     assert!(voices.iter().all(|v| v.provider == "sherpaonnx"));
+}
+
+// ===== Supertonic family =====
+//
+// Supertonic 3 is the multilingual flow-matching model (31 languages, 10
+// preset speakers). Voices are addressed by "sid:lang" (e.g. "0:ja") and the
+// language is routed through GenerationConfig.extra. These tests verify the
+// full wiring: registry lookup → config build → lang passing → audio.
+
+#[test]
+#[ignore]
+fn supertonic_synthesises_nonempty_audio() {
+    let id = model_id("SHERPA_SUPERTONIC_MODEL", "supertonic-3-multilingual");
+    let engine = engine_for(&id);
+    let total = Arc::new(Mutex::new(0usize));
+    let t = total.clone();
+    let mut cb = move |c: &[u8]| {
+        *t.lock().unwrap() += c.len();
+    };
+    engine
+        .speak(
+            "Supertonic synthesis check.",
+            Some("0:en"),
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+        )
+        .expect("supertonic speak");
+    assert!(*total.lock().unwrap() > 0, "supertonic produced no audio");
+}
+
+#[test]
+#[ignore]
+fn supertonic_voices_cover_speakers_times_languages() {
+    // 10 preset speakers × 31 languages = 310 voices, each id "sid:lang".
+    let id = model_id("SHERPA_SUPERTONIC_MODEL", "supertonic-3-multilingual");
+    let engine = engine_for(&id);
+    let voices = engine.get_voices().expect("voices");
+    assert_eq!(voices.len(), 310);
+    assert!(voices.iter().any(|v| v.id == "0:en"));
+    assert!(voices.iter().any(|v| v.id == "6:ja"));
+}
+
+#[test]
+#[ignore]
+fn supertonic_switches_language_via_voice_id() {
+    // The "sid:lang" encoding must actually reach the model — synth in two
+    // languages and confirm neither errors and both emit audio.
+    let id = model_id("SHERPA_SUPERTONIC_MODEL", "supertonic-3-multilingual");
+    let engine = engine_for(&id);
+    for (voice, text) in [
+        ("0:en", "Switching languages."),
+        ("0:ja", "言語を切り替えます。"),
+    ] {
+        let total = Arc::new(Mutex::new(0usize));
+        let t = total.clone();
+        let mut cb = move |c: &[u8]| {
+            *t.lock().unwrap() += c.len();
+        };
+        engine
+            .speak(text, Some(voice), 1.0, 1.0, 1.0, Some(&mut cb), None)
+            .unwrap_or_else(|e| panic!("speak {voice} failed: {e}"));
+        assert!(
+            *total.lock().unwrap() > 0,
+            "voice {voice} produced no audio"
+        );
+    }
 }
 
 // ===== Cross-model: speechmarkdown preprocessing feeds through =====

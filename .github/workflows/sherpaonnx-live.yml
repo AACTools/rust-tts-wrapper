@@ -47,6 +47,7 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/piper-uk-lada-low
             ~/.rust-tts-wrapper/sherpaonnx/icefall-fs-ljspeech
             ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8-multi
+            ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/merged_models.json') }}
           restore-keys: |
@@ -133,6 +134,27 @@ jobs:
           mkdir -p kokoro-zh_en-int8-multi
           tar -xjf kokoro.tar.bz2 -C kokoro-zh_en-int8-multi --strip-components=1
           rm kokoro.tar.bz2
+
+      - name: Download Supertonic test model (supertonic-3-multilingual)
+        # Supertonic 3 (~123 MB, 31 languages). Linux-only like Kokoro to
+        # keep matrix minutes down; the unit tests cover config building on
+        # every platform, this just validates end-to-end synthesis.
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -d "supertonic-3-multilingual" ] && [ -n "$(ls -A supertonic-3-multilingual 2>/dev/null)" ]; then
+            echo "supertonic already present"
+            exit 0
+          fi
+          URL=$(get-model-url.py supertonic-3-multilingual)
+          echo "Downloading $URL"
+          wget -q -O supertonic.tar.bz2 "$URL"
+          mkdir -p supertonic-3-multilingual
+          tar -xjf supertonic.tar.bz2 -C supertonic-3-multilingual --strip-components=1
+          rm supertonic.tar.bz2
+          ls -la supertonic-3-multilingual/
 
       - name: Run live SherpaOnnx tests
         shell: bash
