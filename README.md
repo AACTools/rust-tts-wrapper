@@ -329,6 +329,29 @@ Cloud engines use provider-specific `CloudConfig`:
 
 1300+ models from the bundled `merged_models.json` registry. Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
 
+### Updating the registry
+
+The registry is maintained in its own repo,
+[`AACTools/sherpa-onnx-tts-models`](https://github.com/AACTools/sherpa-onnx-tts-models),
+which publishes **tagged, checksummed releases**. To sync a new version into
+this crate:
+
+```bash
+./scripts/sync-registry.sh v2026-08-10   # fetch a specific release
+./scripts/sync-registry.sh               # re-sync the currently-pinned tag
+```
+
+The script downloads `models.json` from the release, verifies its SHA-256,
+writes it to `src/merged_models.json`, and records the tag + checksum in
+`src/registry-version.txt`. Commit both files — the build then needs no
+network. CI (`lint.yml → registry-consistency`) asserts the two never drift
+apart.
+
+The registry's enriched fields (`license`, `sha256`, `voice_names`,
+`min_sherpa_onnx_version`, `deprecated`, …) are currently ignored by
+`parse_model` but carried through for future opt-in — the sync is
+backwards-compatible.
+
 ## License
 
 MIT
