@@ -138,9 +138,9 @@ impl SherpaOnnxEngine {
             {
                 let creds: HashMap<String, String> = creds
                     .into_iter()
-                    .filter_map(|(k, v)| match v {
-                        serde_json::Value::String(s) => Some((k, s)),
-                        other => Some((k, other.to_string())),
+                    .map(|(k, v)| match v {
+                        serde_json::Value::String(s) => (k, s),
+                        other => (k, other.to_string()),
                     })
                     .collect();
                 if let Some(dir) = creds.get("modelPath") {
