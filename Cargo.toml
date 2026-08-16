@@ -54,7 +54,12 @@ display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
-sherpa-onnx = { version = "1.13", optional = true }
+# Exact pin: the i686-windows publish job links a prebuilt static lib
+# downloaded from the k2-fsa release of THIS version (see publish.yml
+# "Download sherpa-onnx x86 prebuilt"). A minor drift (crate 1.13.4 with
+# sys 1.13.5 doesn't even compile, and a newer crate references C-API
+# symbols an older prebuilt lib lacks → LNK2019). Bump both together.
+sherpa-onnx = { version = "=1.13.5", optional = true }
 base64 = { version = "0.22", optional = true }
 speechmarkdown-rust = { version = "0.4.12", optional = true }
 anyhow = "1"
