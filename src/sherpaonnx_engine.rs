@@ -1,6 +1,7 @@
 //! Sherpa-ONNX offline TTS engine with model registry.
 
-use crate::engine::{estimate_word_boundaries, TtsEngine};
+use crate::boundaries::{EstimateFirer, EstimatePlan};
+use crate::engine::TtsEngine;
 use crate::types::{
     Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
 };
@@ -8,13 +9,29 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Embedded model registry compiled from `models.json`.
 static MODELS_JSON: &str = include_str!("models.json");
 
 /// Shared cancellation flag — set by `stop()`, read by the progress callback.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+// The sherpa-onnx generate callback must be 'static, but speak() holds the
+// caller's on_audio/on_boundary borrows only for the method body. The C++
+// runtime invokes the callback synchronously on the same thread inside the
+// generate call, so we stash the callback pointers here for the duration
+// (same technique as VISEME_CB in the cloud engine) and clear them after.
+// Synthesis per engine instance is serialised by the tts_instance mutex.
+type AudioCbPtr = *mut dyn FnMut(&[u8]);
+type BoundaryCbPtr = *mut dyn FnMut(&str, f32, f32, i32, i32);
+
+thread_local! {
+    static STREAM_AUDIO_CB: std::cell::RefCell<Option<AudioCbPtr>> =
+        const { std::cell::RefCell::new(None) };
+    static STREAM_BOUNDARY_CB: std::cell::RefCell<Option<BoundaryCbPtr>> =
+        const { std::cell::RefCell::new(None) };
+}
 
 /// PCM delivery chunk size. Sherpa-ONNX synthesises the whole clip up-front,
 /// so we slice the rendered PCM into 8 KB chunks before pushing them through
@@ -454,53 +471,156 @@ impl TtsEngine for SherpaOnnxEngine {
         // Reset cancellation flag before synthesis.
         CANCEL_REQUESTED.store(false, Ordering::SeqCst);
 
-        // Sherpa-ONNX synthesises the whole clip before its `generate` call
-        // returns (the progress callback reports cumulative samples, not a
-        // streamable pipe), so we generate once, apply volume/pitch, then
-        // deliver the PCM through `on_audio` in 8 KB chunks. This matches the
-        // delivery shape the cloud engines and the js-tts-wrapper / swift-
-        // tts-wrapper siblings use: callers receive multiple `on_audio`
-        // callbacks rather than one monolithic buffer.
-        let audio = tts
-            .generate_with_config(
-                text,
-                &gen_config,
-                Some(|_s: &[f32], _p: f32| -> bool { !CANCEL_REQUESTED.load(Ordering::SeqCst) }),
-            )
-            .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
-        let sample_rate = audio.sample_rate();
-        let processed = apply_volume_and_pitch(audio.samples(), volume_factor, pitch_factor);
+        // Streaming delivery: sherpa-onnx's generate callback fires after
+        // each sentence batch (max_num_sentences=1 above) with the batch's
+        // NEWLY generated samples — not cumulative — so audio is delivered
+        // through `on_audio` while later sentences are still synthesising.
+        // Volume/pitch are applied per batch (batches are sentence-aligned,
+        // so per-batch resampling for pitch doesn't seam mid-speech).
+        //
+        // Word-boundary estimates (150-wpm baseline) fire progressively,
+        // anchored to delivered samples and scaled by 1/speed so they track
+        // the audio actually emitted; the reported times stay on the
+        // rate-1.0 baseline (existing callers, e.g. VoiceGarden-SPD and the
+        // SAPI adapter, compensate for rate themselves).
+        //
+        // The generate callback must be `'static`, so it cannot capture the
+        // method-lifetime `on_audio`/`on_boundary` borrows directly. The C++
+        // runtime invokes the callback synchronously on this same thread
+        // while the borrows are live, so the pointers are stashed in
+        // thread-locals for the duration of the call (the same technique as
+        // VISEME_CB above) and cleared afterwards.
+        #[allow(clippy::cast_precision_loss)]
+        let time_scale = 1.0 / rate.max(0.1);
+        let sample_rate_out = model_info.sample_rate.max(1);
 
         if wants_callback {
-            if let Some(cb) = on_audio.as_mut() {
-                // Volume + pitch already baked into `processed` above.
-                deliver_pcm(*cb, &processed, 1.0);
+            let plan = on_boundary.is_some().then(|| EstimatePlan::build(text));
+
+            // SAFETY (stash): the raw pointers are only dereferenced inside
+            // the generate callback, which sherpa-onnx calls synchronously
+            // on this thread between the stash and the clear below, while
+            // `on_audio`/`on_boundary` are still borrowed. Synthesis on a
+            // given engine instance is serialised by the `tts_instance`
+            // mutex held for the whole call.
+            // ptr→ptr transmute + explicit borrow-to-pointer are the
+            // standard lifetime-erasure idioms for synchronous callback
+            // stashing; the safety argument is documented above.
+            #[allow(clippy::transmute_ptr_to_ptr)]
+            let audio_ptr: Option<AudioCbPtr> = on_audio.as_mut().map(|cb| {
+                // SAFETY: the fat pointer's layout is identical; only the
+                // lifetime is erased. See the thread-local docs for why
+                // use is confined to this call.
+                unsafe {
+                    std::mem::transmute::<*mut (dyn FnMut(&[u8]) + '_), AudioCbPtr>(
+                        std::ptr::from_mut(&mut **cb),
+                    )
+                }
+            });
+            #[allow(clippy::transmute_ptr_to_ptr)]
+            let boundary_ptr: Option<BoundaryCbPtr> = on_boundary.as_mut().map(|cb| {
+                // SAFETY: as above.
+                unsafe {
+                    std::mem::transmute::<
+                        *mut (dyn FnMut(&str, f32, f32, i32, i32) + '_),
+                        BoundaryCbPtr,
+                    >(std::ptr::from_mut(&mut **cb))
+                }
+            });
+            STREAM_AUDIO_CB.with(|c| *c.borrow_mut() = audio_ptr);
+            STREAM_BOUNDARY_CB.with(|c| *c.borrow_mut() = boundary_ptr);
+
+            // The firer owns the plan and is shared with the 'static
+            // callback via Arc<Mutex<..>>, so the outer scope can flush
+            // the remainder after generation ends.
+            let firer = plan.map(|p| Arc::new(Mutex::new(EstimateFirer::new(p, time_scale))));
+            let firer_for_cb = firer.clone();
+
+            // A `None` result means the engine rejected the config outright;
+            // cancellation mid-stream still returns Some(audio-so-far),
+            // which we ignore — every batch was already streamed.
+            let result = tts.generate_with_config(
+                text,
+                &gen_config,
+                Some(move |batch: &[f32], _progress: f32| -> bool {
+                    if CANCEL_REQUESTED.load(Ordering::SeqCst) {
+                        return false;
+                    }
+                    let processed = apply_volume_and_pitch(batch, volume_factor, pitch_factor);
+                    let pcm = samples_to_le_bytes(&processed);
+                    STREAM_AUDIO_CB.with(|c| {
+                        if let Some(ptr) = *c.borrow() {
+                            // SAFETY (stash): see the thread-local docs.
+                            unsafe { (*ptr)(&pcm) };
+                        }
+                    });
+                    if let Some(f) = firer_for_cb.as_ref() {
+                        if let Ok(mut guard) = f.lock() {
+                            guard.on_samples(
+                                batch.len() as u64,
+                                Some(sample_rate_out),
+                                &mut |ev| {
+                                    STREAM_BOUNDARY_CB.with(|c| {
+                                        if let Some(ptr) = *c.borrow() {
+                                            // SAFETY (stash): see above.
+                                            unsafe {
+                                                (*ptr)(
+                                                    &ev.word,
+                                                    ev.start_s,
+                                                    ev.end_s,
+                                                    ev.char_offset,
+                                                    ev.char_len,
+                                                );
+                                            }
+                                        }
+                                    });
+                                },
+                            );
+                        }
+                    }
+                    !CANCEL_REQUESTED.load(Ordering::SeqCst)
+                }),
+            );
+
+            STREAM_AUDIO_CB.with(|c| *c.borrow_mut() = None);
+            STREAM_BOUNDARY_CB.with(|c| *c.borrow_mut() = None);
+
+            if result.is_none() {
+                return Err(TtsError("SherpaOnnx synthesis returned no audio".into()));
+            }
+
+            // Fire any estimates whose audio never arrived (short audio,
+            // cancellation): the boundary set is now closed.
+            if let (Some(f), Some(cb)) = (firer.as_ref(), on_boundary.as_mut()) {
+                if let Ok(mut f) = f.lock() {
+                    f.flush(&mut |ev| {
+                        cb(&ev.word, ev.start_s, ev.end_s, ev.char_offset, ev.char_len);
+                    });
+                }
             }
         } else {
+            let audio = tts
+                .generate_with_config(
+                    text,
+                    &gen_config,
+                    Some(|_s: &[f32], _p: f32| -> bool {
+                        !CANCEL_REQUESTED.load(Ordering::SeqCst)
+                    }),
+                )
+                .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
+            let processed = apply_volume_and_pitch(audio.samples(), volume_factor, pitch_factor);
             let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
-            if write_wav(&filename, &processed, sample_rate) {
+            if write_wav(&filename, &processed, audio.sample_rate()) {
                 play_wav_file(&filename);
             }
-        }
 
-        if let Some(cb) = on_boundary.as_mut() {
-            let estimated = estimate_word_boundaries(text);
-            let mut search_from = 0usize;
-            for b in &estimated {
-                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                let char_offset = text[search_from..]
-                    .find(&b.text)
-                    .map_or(-1, |pos| (search_from + pos) as i32);
-
-                if char_offset >= 0 {
-                    search_from = char_offset as usize + b.text.len();
+            // No streaming took place; estimates fire as before.
+            if let Some(cb) = on_boundary.as_mut() {
+                let plan = EstimatePlan::build(text);
+                for i in 0..plan.len() {
+                    let ev = plan.event(i).expect("in range");
+                    cb(&ev.word, ev.start_s, ev.end_s, ev.char_offset, ev.char_len);
                 }
-                #[allow(clippy::cast_precision_loss)]
-                let start = b.offset as f32 / 1000.0;
-                #[allow(clippy::cast_precision_loss)]
-                let end = (b.offset + b.duration) as f32 / 1000.0;
-                let char_len = b.text.chars().count() as i32;
-                cb(&b.text, start, end, char_offset, char_len);
             }
         }
 
@@ -609,6 +729,17 @@ fn apply_volume_and_pitch(samples: &[f32], volume: f32, pitch: f32) -> Vec<f32> 
     } else {
         resampled
     }
+}
+
+/// Convert f32 samples to little-endian PCM16 bytes (one allocation).
+#[allow(clippy::cast_possible_truncation)]
+fn samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
+    let mut pcm = Vec::with_capacity(samples.len() * 2);
+    for &s in samples {
+        let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+        pcm.extend_from_slice(&s16.to_le_bytes());
+    }
+    pcm
 }
 
 /// Scale `samples` by `volume_factor`, convert to little-endian PCM16 bytes,

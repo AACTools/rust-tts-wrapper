@@ -19,6 +19,7 @@ pub fn set_viseme_callback(cb: Option<Box<dyn FnMut(i32, f32)>>) {
     VISEME_CB.with(|cell| *cell.borrow_mut() = cb);
 }
 
+use crate::boundaries::{EstimateFirer, EstimatePlan};
 use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
 use crate::types::{
     normalize_gender, Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary,
@@ -462,14 +463,15 @@ enum StreamEvt<'x> {
 /// callers interleaving marks with playback (e.g. the VoiceGarden-SPD
 /// speech-dispatcher module) can report them in sync.
 #[cfg(feature = "cloud")]
+#[allow(clippy::too_many_lines)]
 fn stream_body_to_on_audio(
     mut body: impl std::io::Read + Send + 'static,
     is_pcm: bool,
     pcm_rate: u32,
-    plan: Option<&EstimatePlan>,
+    plan: Option<EstimatePlan>,
     on_event: &mut dyn FnMut(StreamEvt<'_>),
 ) -> Result<usize, String> {
-    let mut firer = plan.map(EstimateFirer::new);
+    let mut firer = plan.map(|p| EstimateFirer::new(p, 1.0));
 
     if is_pcm {
         let mut buf = [0u8; STREAMING_CHUNK_SIZE];
@@ -485,13 +487,27 @@ fn stream_body_to_on_audio(
             total += n;
             if let Some(f) = firer.as_mut() {
                 // PCM16 mono: 2 bytes per sample.
-                f.on_samples((n / 2) as u64, Some(pcm_rate), &mut |w, s, e, o, l| {
-                    on_event(StreamEvt::Boundary(w, s, e, o, l));
+                f.on_samples((n / 2) as u64, Some(pcm_rate), &mut |ev| {
+                    on_event(StreamEvt::Boundary(
+                        &ev.word,
+                        ev.start_s,
+                        ev.end_s,
+                        ev.char_offset,
+                        ev.char_len,
+                    ));
                 });
             }
         }
         if let Some(f) = firer.as_mut() {
-            f.flush(&mut |w, s, e, o, l| on_event(StreamEvt::Boundary(w, s, e, o, l)));
+            f.flush(&mut |ev| {
+                on_event(StreamEvt::Boundary(
+                    &ev.word,
+                    ev.start_s,
+                    ev.end_s,
+                    ev.char_offset,
+                    ev.char_len,
+                ));
+            });
         }
         return Ok(total);
     }
@@ -528,11 +544,15 @@ fn stream_body_to_on_audio(
                 total += chunk.len();
                 if let Some(f) = firer.as_mut() {
                     // Decoded PCM16 mono: one i16 per sample.
-                    f.on_samples(
-                        chunk.len() as u64,
-                        dec.sample_rate(),
-                        &mut |w, s, e, o, l| on_event(StreamEvt::Boundary(w, s, e, o, l)),
-                    );
+                    f.on_samples(chunk.len() as u64, dec.sample_rate(), &mut |ev| {
+                        on_event(StreamEvt::Boundary(
+                            &ev.word,
+                            ev.start_s,
+                            ev.end_s,
+                            ev.char_offset,
+                            ev.char_len,
+                        ));
+                    });
                 }
             }
             Ok(None) => break,
@@ -546,7 +566,15 @@ fn stream_body_to_on_audio(
                 }
                 eprintln!("rust-tts-wrapper: streaming decode error after {total} bytes: {e}");
                 if let Some(f) = firer.as_mut() {
-                    f.flush(&mut |w, s, e, o, l| on_event(StreamEvt::Boundary(w, s, e, o, l)));
+                    f.flush(&mut |ev| {
+                        on_event(StreamEvt::Boundary(
+                            &ev.word,
+                            ev.start_s,
+                            ev.end_s,
+                            ev.char_offset,
+                            ev.char_len,
+                        ));
+                    });
                 }
                 return Ok(total);
             }
@@ -554,129 +582,19 @@ fn stream_body_to_on_audio(
     }
     let _ = reader.join();
     if let Some(f) = firer.as_mut() {
-        f.flush(&mut |w, s, e, o, l| on_event(StreamEvt::Boundary(w, s, e, o, l)));
+        f.flush(&mut |ev| {
+            on_event(StreamEvt::Boundary(
+                &ev.word,
+                ev.start_s,
+                ev.end_s,
+                ev.char_offset,
+                ev.char_len,
+            ));
+        });
     }
     Ok(total)
 }
 
-// ============================================================================
-// Progressive estimated word boundaries
-// ============================================================================
-
-/// One estimated boundary event with source-text position resolved.
-#[cfg(feature = "cloud")]
-struct EstimateEvent {
-    word: String,
-    start_s: f32,
-    end_s: f32,
-    char_offset: i32,
-    char_len: i32,
-}
-
-/// Pre-resolved estimated boundaries for an utterance, in firing order.
-#[cfg(feature = "cloud")]
-struct EstimatePlan {
-    events: Vec<EstimateEvent>,
-}
-
-impl EstimatePlan {
-    /// Build from the crate's 150-wpm estimator, resolving char offsets in
-    /// the spoken text. SSML input is stripped first so offsets and word
-    /// lists match what is actually spoken.
-    #[must_use]
-    fn build(text: &str) -> Self {
-        let plain = if text.trim_start().to_ascii_lowercase().starts_with("<speak") {
-            crate::engine::strip_ssml_to_text(text)
-        } else {
-            text.to_string()
-        };
-        let estimated = estimate_word_boundaries(&plain);
-        let mut events = Vec::with_capacity(estimated.len());
-        let mut search_from = 0usize;
-        for b in &estimated {
-            #[allow(clippy::cast_possible_truncation)]
-            let char_offset = plain[search_from..]
-                .find(&b.text)
-                .map_or(-1, |pos| (search_from + pos) as i32);
-            if char_offset >= 0 {
-                search_from = char_offset as usize + b.text.len();
-            }
-            #[allow(clippy::cast_precision_loss)]
-            let start = b.offset as f32 / 1000.0;
-            #[allow(clippy::cast_precision_loss)]
-            let end = (b.offset + b.duration) as f32 / 1000.0;
-            let char_len = b.text.chars().count() as i32;
-            events.push(EstimateEvent {
-                word: b.text.clone(),
-                start_s: start,
-                end_s: end,
-                char_offset,
-                char_len,
-            });
-        }
-        Self { events }
-    }
-}
-
-/// Fires [`EstimatePlan`] events as cumulative delivered audio crosses
-/// each estimate's start time. Anchors the text-based estimates onto the
-/// real audio clock: if the voice speaks slower than the 150-wpm
-/// baseline, marks still fire in sync with what the caller has actually
-/// emitted (late words clamp to the final flush).
-#[cfg(feature = "cloud")]
-struct EstimateFirer<'a> {
-    plan: &'a EstimatePlan,
-    next: usize,
-    samples: u64,
-    rate: Option<u32>,
-}
-
-#[cfg(feature = "cloud")]
-impl<'a> EstimateFirer<'a> {
-    fn new(plan: &'a EstimatePlan) -> Self {
-        Self {
-            plan,
-            next: 0,
-            samples: 0,
-            rate: None,
-        }
-    }
-
-    /// Record `samples` newly-emitted PCM16-mono samples and fire every
-    /// estimate whose start time has been reached.
-    fn on_samples(
-        &mut self,
-        samples: u64,
-        rate_now: Option<u32>,
-        fire: &mut dyn FnMut(&str, f32, f32, i32, i32),
-    ) {
-        self.samples += samples;
-        if let Some(r) = rate_now {
-            self.rate = Some(r);
-        }
-        let Some(rate) = self.rate else { return };
-        while self.next < self.plan.events.len() {
-            let e = &self.plan.events[self.next];
-            #[allow(clippy::cast_precision_loss)]
-            let threshold = (e.start_s * rate as f32) as u64;
-            if self.samples >= threshold {
-                fire(&e.word, e.start_s, e.end_s, e.char_offset, e.char_len);
-                self.next += 1;
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Fire every remaining estimate (stream ended before their times).
-    fn flush(&mut self, fire: &mut dyn FnMut(&str, f32, f32, i32, i32)) {
-        while self.next < self.plan.events.len() {
-            let e = &self.plan.events[self.next];
-            fire(&e.word, e.start_s, e.end_s, e.char_offset, e.char_len);
-            self.next += 1;
-        }
-    }
-}
 /// Sniff the first few bytes for an MP3 sync word or ID3 tag. Kept as a
 /// diagnostic helper but not used for delivery routing — raw PCM16 audio
 /// frequently contains 0xFF 0xE0+ byte pairs that false-positive, so format
@@ -2384,7 +2302,7 @@ impl TtsEngine for CloudEngine {
                 // Raw-PCM providers here (Azure, Cartesia) are pinned to
                 // 24 kHz in their CloudConfigs.
                 24_000,
-                plan.as_ref(),
+                plan,
                 &mut on_event,
             )
             .map_err(TtsError)?;
@@ -3263,7 +3181,8 @@ mod tests {
         // the flush path must cover audio shorter than the estimates.
         let mp3 = make_silent_mp3(80); // ≈ 2.1 s of audio
         let plan = EstimatePlan::build("one two three four five six seven");
-        assert!(!plan.events.is_empty());
+        let expected = plan.len();
+        assert!(expected > 0);
 
         let reader = DribbleReader {
             data: mp3,
@@ -3272,14 +3191,14 @@ mod tests {
         };
         let mut audio_chunks = 0usize;
         let mut boundaries: Vec<String> = Vec::new();
-        stream_body_to_on_audio(reader, false, 24_000, Some(&plan), &mut |ev| match ev {
+        stream_body_to_on_audio(reader, false, 24_000, Some(plan), &mut |ev| match ev {
             StreamEvt::Audio(_) => audio_chunks += 1,
             StreamEvt::Boundary(word, ..) => boundaries.push(word.to_string()),
         })
         .expect("stream");
         assert!(!boundaries.is_empty(), "no boundaries fired");
         // Every estimate eventually fired (flush covers short audio).
-        assert_eq!(boundaries.len(), plan.events.len());
+        assert_eq!(boundaries.len(), expected);
         assert!(audio_chunks > 1);
     }
 
@@ -3307,7 +3226,7 @@ mod tests {
             StreamEvt::Audio(..) => seq.push(AudioEvt),
             StreamEvt::Boundary(..) => seq.push(BoundaryEvt),
         };
-        stream_body_to_on_audio(reader, false, 24_000, Some(&plan), &mut record).expect("stream");
+        stream_body_to_on_audio(reader, false, 24_000, Some(plan), &mut record).expect("stream");
         // Find a Boundary that is followed by at least one more Audio →
         // it fired during streaming, not at the end flush.
         let interleaved = seq
@@ -3324,12 +3243,14 @@ mod tests {
     fn estimate_plan_strips_ssml_before_estimating() {
         let plain = EstimatePlan::build("hello world");
         let ssml = EstimatePlan::build("<speak>hello <break time=\"1s\"/> world</speak>");
-        assert_eq!(plain.events.len(), ssml.events.len());
-        let words: Vec<&str> = ssml.events.iter().map(|e| e.word.as_str()).collect();
+        assert_eq!(plain.len(), ssml.len());
+        let words: Vec<String> = (0..ssml.len())
+            .map(|i| ssml.event(i).expect("in range").word.clone())
+            .collect();
         assert_eq!(words, vec!["hello", "world"]);
         // Offsets resolved into the stripped text: "world" found at a
         // valid position (not -1).
-        assert!(ssml.events[1].char_offset > 0);
+        assert!(ssml.event(1).expect("in range").char_offset > 0);
     }
 
     #[test]

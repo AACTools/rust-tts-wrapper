@@ -32,6 +32,7 @@
 
 #[cfg(all(feature = "avsynth", target_os = "macos"))]
 mod avsynth_engine;
+pub mod boundaries;
 #[cfg(feature = "cloud")]
 mod cloud_engine;
 pub mod engine;
