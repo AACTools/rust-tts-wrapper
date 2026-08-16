@@ -258,6 +258,16 @@ fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
             .get("filesize_mb")
             .and_then(serde_json::Value::as_f64)
             .unwrap_or(0.0),
+        license: obj
+            .get("license")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        license_url: obj
+            .get("license_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
     })
 }
 
@@ -1512,6 +1522,8 @@ mod tests {
             url: String::new(),
             compression: false,
             filesize_mb: 0.0,
+            license: String::new(),
+            license_url: String::new(),
         };
         let voices = supertonic_voices(&info);
         assert_eq!(voices.len(), 6);
@@ -1767,6 +1779,27 @@ mod tests {
         let model = parse_model("test-kokoro", &json);
         assert!(model.is_some());
         assert_eq!(model.unwrap().model_type, "kokoro");
+    }
+
+    #[test]
+    fn test_parse_model_surfaces_licence_metadata() {
+        let json = serde_json::json!({
+            "name": "test",
+            "url": "https://example.com/test",
+            "license": "Apache-2.0",
+            "license_url": "https://example.com/LICENSE"
+        });
+        let model = parse_model("test-licensed", &json).unwrap();
+        assert_eq!(model.license, "Apache-2.0");
+        assert_eq!(model.license_url, "https://example.com/LICENSE");
+    }
+
+    #[test]
+    fn test_parse_model_licence_defaults_empty() {
+        let json = serde_json::json!({ "name": "test", "url": "https://example.com" });
+        let model = parse_model("test-unlicensed", &json).unwrap();
+        assert!(model.license.is_empty());
+        assert!(model.license_url.is_empty());
     }
 
     #[test]
