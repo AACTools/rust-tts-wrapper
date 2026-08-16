@@ -128,7 +128,21 @@ impl SherpaOnnxEngine {
         let mut provider: Option<String> = None;
 
         if !credentials_json.is_empty() {
-            if let Ok(creds) = serde_json::from_str::<HashMap<String, String>>(credentials_json) {
+            // Numeric values are coerced to strings so callers can write
+            // `{"numThreads": 2}` (JSON number) or `"2"` interchangeably —
+            // a strict HashMap<String, String> parse would silently drop
+            // the whole object on the first number and leave every option
+            // at its default with no error.
+            if let Ok(creds) =
+                serde_json::from_str::<HashMap<String, serde_json::Value>>(credentials_json)
+            {
+                let creds: HashMap<String, String> = creds
+                    .into_iter()
+                    .map(|(k, v)| match v {
+                        serde_json::Value::String(s) => (k, s),
+                        other => (k, other.to_string()),
+                    })
+                    .collect();
                 if let Some(dir) = creds.get("modelPath") {
                     model_dir = PathBuf::from(dir);
                 }
@@ -1737,6 +1751,18 @@ mod tests {
         // construction must succeed even when the model isn't downloaded.
         let engine = SherpaOnnxEngine::new(r#"{"modelId":"piper-en_US-amy-low"}"#);
         assert_eq!(engine.loaded_model_id, "piper-en_US-amy-low");
+    }
+
+    #[test]
+    fn test_engine_construction_accepts_numeric_credential_values() {
+        // JSON numbers must be coerced to strings, not silently dropped
+        // (a strict HashMap<String, String> parse rejects the whole object).
+        let engine = SherpaOnnxEngine::new(
+            r#"{"modelId":"piper-en_US-amy-low","numThreads":4,"numSteps":10}"#,
+        );
+        assert_eq!(engine.loaded_model_id, "piper-en_US-amy-low");
+        assert_eq!(engine.num_threads, 4);
+        assert_eq!(engine.num_steps, 10);
     }
 
     #[test]
