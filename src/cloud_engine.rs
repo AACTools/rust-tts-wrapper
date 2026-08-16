@@ -1102,7 +1102,10 @@ fn build_google_request(
     let mut body = serde_json::json!({
         "input": input,
         "voice": voice_obj,
-        "audioConfig": { "audioEncoding": "MP3" }
+        // sampleRateHertz is pinned so the decoded PCM rate is knowable by
+        // callers that receive bare bytes via on_audio (Google otherwise
+        // returns each voice's natural rate: 22050/24000/32000).
+        "audioConfig": { "audioEncoding": "MP3", "sampleRateHertz": 24000 }
     });
 
     if add_marks {
