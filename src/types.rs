@@ -276,6 +276,11 @@ pub struct SherpaModelInfo {
     pub compression: bool,
     /// Approximate download size in megabytes.
     pub filesize_mb: f64,
+    /// SPDX licence identifier for the model (e.g. `"MIT"`, `"Apache-2.0"`).
+    /// Empty string when the registry entry omits it.
+    pub license: String,
+    /// Human-readable URL for the full licence text. Empty when omitted.
+    pub license_url: String,
 }
 
 /// A language entry within a Sherpa-ONNX model.
