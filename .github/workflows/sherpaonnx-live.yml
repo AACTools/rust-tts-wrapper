@@ -44,7 +44,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.rust-tts-wrapper/sherpaonnx/piper-uk-lada-low
+            ~/.rust-tts-wrapper/sherpaonnx/piper-nl-rdh-low
             ~/.rust-tts-wrapper/sherpaonnx/icefall-fs-ljspeech
             ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8
             ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
@@ -65,23 +65,23 @@ jobs:
           echo "MODEL_DIR=$HOME/.rust-tts-wrapper/sherpaonnx" >> $GITHUB_ENV
           echo "$GITHUB_WORKSPACE/scripts" >> $GITHUB_PATH
 
-      - name: Download VITS test model (piper-uk-lada-low)
+      - name: Download VITS test model (piper-nl-rdh-low)
         shell: bash
         run: |
           set -e
           mkdir -p "$MODEL_DIR"
           cd "$MODEL_DIR"
-          if [ -d "piper-uk-lada-low" ] && [ -n "$(ls -A piper-uk-lada-low 2>/dev/null)" ]; then
-            echo "piper-uk-lada-low already present, skipping download"
+          if [ -d "piper-nl-rdh-low" ] && [ -n "$(ls -A piper-nl-rdh-low 2>/dev/null)" ]; then
+            echo "piper-nl-rdh-low already present, skipping download"
             exit 0
           fi
-          URL=$(get-model-url.py piper-uk-lada-low)
+          URL=$(get-model-url.py piper-nl-rdh-low)
           echo "Downloading $URL"
           curl -fsSL -o piper.tar.bz2 "$URL"
-          mkdir -p piper-uk-lada-low
-          tar -xjf piper.tar.bz2 -C piper-uk-lada-low --strip-components=1
+          mkdir -p piper-nl-rdh-low
+          tar -xjf piper.tar.bz2 -C piper-nl-rdh-low --strip-components=1
           rm piper.tar.bz2
-          ls -la piper-uk-lada-low/
+          ls -la piper-nl-rdh-low/
 
       - name: Download Matcha test model (icefall-fs-ljspeech)
         shell: bash
