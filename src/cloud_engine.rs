@@ -49,7 +49,6 @@ use {
 /// MP3 bytes that a SAPI site would have to decode itself.
 #[cfg(feature = "cloud")]
 fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
-    use symphonia::core::audio::AudioBufferRef;
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
@@ -88,39 +87,7 @@ fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
         let Ok(decoded_buf) = decoder.decode(&packet) else {
             continue;
         };
-        let frames = decoded_buf.frames();
-        #[allow(clippy::cast_precision_loss)]
-        let nch = decoded_buf.spec().channels.count().max(1) as f32;
-        // symphonia's MP3 decoder emits F32; handle S16 too as a defensive
-        // fallback. Other sample formats are skipped (MP3 won't produce them).
-        match decoded_buf {
-            AudioBufferRef::F32(buf) => {
-                let channel_planes = buf.planes();
-                let slices = channel_planes.planes();
-                for f in 0..frames {
-                    let sum: f32 = slices
-                        .iter()
-                        .map(|s| s.get(f).copied().unwrap_or(0.0))
-                        .sum();
-                    push_mono_f32(&mut pcm, sum / nch);
-                }
-            }
-            AudioBufferRef::S16(buf) => {
-                let channel_planes = buf.planes();
-                let slices = channel_planes.planes();
-                for f in 0..frames {
-                    let sum: i32 = slices
-                        .iter()
-                        .map(|s| s.get(f).copied().unwrap_or(0))
-                        .map(i32::from)
-                        .sum();
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-                    let avg = (sum as f32 / nch) as i16;
-                    pcm.extend_from_slice(&avg.to_le_bytes());
-                }
-            }
-            _ => {}
-        }
+        mix_packet_to_mono_pcm16(&decoded_buf, &mut pcm);
     }
     pcm
 }
@@ -132,6 +99,411 @@ fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
 fn push_mono_f32(out: &mut Vec<u8>, s: f32) {
     let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
     out.extend_from_slice(&s16.to_le_bytes());
+}
+
+// ============================================================================
+// Incremental streaming decode
+//
+// The original delivery path buffered the entire HTTP response
+// (`resp.bytes()`) before decoding, so `on_audio` only fired once synthesis
+// had fully completed. The helpers below decode compressed audio as it
+// arrives over the network: a reader pushes bytes into a shared pipe while
+// a symphonia pipeline pulls packets off it, so PCM16 chunks reach the
+// caller's `on_audio` callback while the body is still downloading.
+// ============================================================================
+
+/// A thread-safe byte pipe: a network reader pushes bytes, the symphonia
+/// `MediaSourceStream` pulls them. `finish()` marks end-of-stream; `fail()`
+/// propagates a network error to the reading side.
+#[cfg(feature = "cloud")]
+struct SharedPipe {
+    state: std::sync::Mutex<PipeState>,
+    ready: std::sync::Condvar,
+}
+
+#[cfg(feature = "cloud")]
+struct PipeState {
+    buf: std::collections::VecDeque<u8>,
+    eof: bool,
+    error: Option<String>,
+}
+
+#[cfg(feature = "cloud")]
+impl SharedPipe {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(PipeState {
+                buf: std::collections::VecDeque::new(),
+                eof: false,
+                error: None,
+            }),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Push downloaded bytes for the reader side.
+    fn push(&self, bytes: &[u8]) {
+        let mut st = self.state.lock().unwrap();
+        st.buf.extend(bytes.iter().copied());
+        drop(st);
+        self.ready.notify_all();
+    }
+
+    /// Signal that no more bytes will arrive.
+    fn finish(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.eof = true;
+        drop(st);
+        self.ready.notify_all();
+    }
+
+    /// Signal a network failure.
+    fn fail(&self, msg: String) {
+        let mut st = self.state.lock().unwrap();
+        st.error = Some(msg);
+        st.eof = true;
+        drop(st);
+        self.ready.notify_all();
+    }
+
+    /// Blocking pull of up to `out.len()` bytes.
+    fn pull(&self, out: &mut [u8]) -> std::io::Result<usize> {
+        let mut st = self.state.lock().unwrap();
+        loop {
+            if !st.buf.is_empty() {
+                let n = out.len().min(st.buf.len());
+                for slot in out.iter_mut().take(n) {
+                    *slot = st.buf.pop_front().expect("buf non-empty checked");
+                }
+                return Ok(n);
+            }
+            if let Some(err) = st.error.take() {
+                return Err(std::io::Error::other(err));
+            }
+            if st.eof {
+                return Ok(0);
+            }
+            st = self.ready.wait(st).unwrap();
+        }
+    }
+}
+
+#[cfg(feature = "cloud")]
+impl std::io::Read for SharedPipe {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        SharedPipe::pull(self, out)
+    }
+}
+
+#[cfg(feature = "cloud")]
+impl std::io::Seek for SharedPipe {
+    fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "network stream is not seekable",
+        ))
+    }
+}
+
+#[cfg(feature = "cloud")]
+impl symphonia::core::io::MediaSource for SharedPipe {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+    fn byte_len(&self) -> Option<u64> {
+        None // unknown while streaming
+    }
+}
+
+/// Mix one decoded packet down to mono PCM16 LE bytes, appending to `out`.
+/// Shared by the whole-buffer decoder and the incremental one so their
+/// output stays byte-identical.
+#[cfg(feature = "cloud")]
+fn mix_packet_to_mono_pcm16(decoded: &symphonia::core::audio::AudioBufferRef, out: &mut Vec<u8>) {
+    use symphonia::core::audio::AudioBufferRef;
+
+    let frames = decoded.frames();
+    #[allow(clippy::cast_precision_loss)]
+    let nch = decoded.spec().channels.count().max(1) as f32;
+    match decoded {
+        AudioBufferRef::F32(buf) => {
+            let planes = buf.planes();
+            let slices = planes.planes();
+            for f in 0..frames {
+                let sum: f32 = slices
+                    .iter()
+                    .map(|s| s.get(f).copied().unwrap_or(0.0))
+                    .sum();
+                push_mono_f32(out, sum / nch);
+            }
+        }
+        AudioBufferRef::S16(buf) => {
+            let planes = buf.planes();
+            let slices = planes.planes();
+            for f in 0..frames {
+                let sum: i32 = slices
+                    .iter()
+                    .map(|s| s.get(f).copied().unwrap_or(0))
+                    .map(i32::from)
+                    .sum();
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let avg = (sum as f32 / nch) as i16;
+                out.extend_from_slice(&avg.to_le_bytes());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Incremental pull-decoder over a [`SharedPipe`]. Lazily probes the format
+/// once enough bytes are buffered, then yields mono PCM16 bytes packet by
+/// packet via `next_chunk`.
+#[cfg(feature = "cloud")]
+struct IncrementalDecoder {
+    pipe: Arc<SharedPipe>,
+    format: Option<Box<dyn symphonia::core::formats::FormatReader>>,
+    decoder: Option<Box<dyn symphonia::core::codecs::Decoder>>,
+    track_id: u32,
+    sample_buf: Option<symphonia::core::audio::SampleBuffer<i16>>,
+}
+
+#[cfg(feature = "cloud")]
+impl IncrementalDecoder {
+    fn new(pipe: Arc<SharedPipe>) -> Self {
+        Self {
+            pipe,
+            format: None,
+            decoder: None,
+            track_id: 0,
+            sample_buf: None,
+        }
+    }
+
+    /// Hand the pipe to symphonia and set up the demuxer + decoder. The
+    /// probe blocks through the pipe until enough header bytes arrive, so
+    /// this returns only once the format is known (or genuinely undecodable).
+    fn ensure_probed(&mut self) -> Result<(), String> {
+        if self.format.is_some() {
+            return Ok(());
+        }
+        let mss = symphonia::core::io::MediaSourceStream::new(
+            Box::new(SharedPipeReader {
+                pipe: Arc::clone(&self.pipe),
+            }),
+            symphonia::core::io::MediaSourceStreamOptions::default(),
+        );
+        let mut hint = symphonia::core::probe::Hint::new();
+        hint.with_extension("mp3");
+        let probed = symphonia::default::get_probe()
+            .format(
+                &hint,
+                mss,
+                &symphonia::core::formats::FormatOptions::default(),
+                &symphonia::core::meta::MetadataOptions::default(),
+            )
+            .map_err(|e| format!("probe failed: {e}"))?;
+        let format = probed.format;
+        let track = format
+            .default_track()
+            .cloned()
+            .ok_or_else(|| "no decodable track".to_string())?;
+        self.track_id = track.id;
+        let decoder = symphonia::default::get_codecs()
+            .make(
+                &track.codec_params,
+                &symphonia::core::codecs::DecoderOptions::default(),
+            )
+            .map_err(|e| format!("decoder init failed: {e}"))?;
+        self.decoder = Some(decoder);
+        self.format = Some(format);
+        Ok(())
+    }
+
+    /// Decode the next available packet. `Ok(None)` = stream complete.
+    fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.ensure_probed()?;
+        let format = self.format.as_mut().expect("ensure_probed guarantees Some");
+        let decoder = self
+            .decoder
+            .as_mut()
+            .expect("ensure_probed guarantees Some");
+        loop {
+            let packet = match format.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::IoError(ref e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(None); // clean EOF
+                }
+                Err(symphonia::core::errors::Error::IoError(ref e))
+                    if e.kind() == std::io::ErrorKind::Other =>
+                {
+                    // Network failure surfaced through the pipe.
+                    return Err(format!("network read failed: {e}"));
+                }
+                Err(symphonia::core::errors::Error::ResetRequired) => {
+                    let track = format
+                        .tracks()
+                        .iter()
+                        .find(|t| t.id == self.track_id)
+                        .ok_or("track disappeared")?;
+                    *decoder = symphonia::default::get_codecs()
+                        .make(
+                            &track.codec_params,
+                            &symphonia::core::codecs::DecoderOptions::default(),
+                        )
+                        .map_err(|e| format!("decoder re-init failed: {e}"))?;
+                    self.sample_buf = None;
+                    continue;
+                }
+                Err(e) => return Err(format!("demux error: {e}")),
+            };
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            let decoded_pkt = match decoder.decode(&packet) {
+                Ok(d) => d,
+                Err(symphonia::core::errors::Error::DecodeError(_)) => continue,
+                Err(e) => return Err(format!("decode error: {e}")),
+            };
+            let spec = *decoded_pkt.spec();
+            let capacity = decoded_pkt.capacity() as u64;
+            let buf = self.sample_buf.get_or_insert_with(|| {
+                symphonia::core::audio::SampleBuffer::<i16>::new(capacity, spec)
+            });
+            buf.copy_interleaved_ref(decoded_pkt);
+            let samples = buf.samples();
+            // Interleaved → mono mix (channels are averaged).
+            let nch = spec.channels.count().max(1);
+            let mut out = Vec::with_capacity(samples.len() / nch * 2);
+            if nch == 1 {
+                for s in samples {
+                    out.extend_from_slice(&s.to_le_bytes());
+                }
+            } else {
+                for frame in samples.chunks(nch) {
+                    let sum: i32 = frame.iter().copied().map(i32::from).sum();
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                    let avg = (sum as f32 / nch as f32) as i16;
+                    out.extend_from_slice(&avg.to_le_bytes());
+                }
+            }
+            return Ok(Some(out));
+        }
+    }
+}
+
+/// `Read` adapter handing the pipe to symphonia while the decoder keeps
+/// the `Arc` alive.
+#[cfg(feature = "cloud")]
+struct SharedPipeReader {
+    pipe: Arc<SharedPipe>,
+}
+
+#[cfg(feature = "cloud")]
+impl std::io::Read for SharedPipeReader {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        self.pipe.pull(out)
+    }
+}
+
+#[cfg(feature = "cloud")]
+impl std::io::Seek for SharedPipeReader {
+    fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "network stream is not seekable",
+        ))
+    }
+}
+
+#[cfg(feature = "cloud")]
+impl symphonia::core::io::MediaSource for SharedPipeReader {
+    fn is_seekable(&self) -> bool {
+        false
+    }
+    fn byte_len(&self) -> Option<u64> {
+        None
+    }
+}
+
+/// Stream an HTTP response body to `on_audio` as mono PCM16, decoding
+/// incrementally so audio reaches the caller while the body downloads.
+///
+/// * `is_pcm` — the body is already raw PCM16 mono; chunk it straight
+///   through without spawning a decode thread.
+///
+/// Returns the total bytes delivered. Empty delivery (probe failure on a
+/// zero-byte or undecodable body) is not an error, matching the buffered
+/// path's behaviour.
+#[cfg(feature = "cloud")]
+fn stream_body_to_on_audio(
+    mut body: impl std::io::Read + Send + 'static,
+    is_pcm: bool,
+    on_audio: &mut dyn FnMut(&[u8]),
+) -> Result<usize, String> {
+    if is_pcm {
+        let mut buf = [0u8; STREAMING_CHUNK_SIZE];
+        let mut total = 0usize;
+        loop {
+            let n = body
+                .read(&mut buf)
+                .map_err(|e| format!("network read failed: {e}"))?;
+            if n == 0 {
+                return Ok(total);
+            }
+            on_audio(&buf[..n]);
+            total += n;
+        }
+    }
+
+    let pipe = Arc::new(SharedPipe::new());
+    let reader_pipe = Arc::clone(&pipe);
+    let reader = std::thread::Builder::new()
+        .name("cloud-audio-reader".into())
+        .spawn(move || {
+            let mut buf = [0u8; STREAMING_CHUNK_SIZE];
+            loop {
+                match body.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => reader_pipe.push(&buf[..n]),
+                    Err(e) => {
+                        reader_pipe.fail(format!("network read failed: {e}"));
+                        return;
+                    }
+                }
+            }
+            reader_pipe.finish();
+        })
+        .map_err(|e| format!("failed to spawn reader thread: {e}"))?;
+
+    let mut dec = IncrementalDecoder::new(Arc::clone(&pipe));
+    let mut total = 0usize;
+    loop {
+        match dec.next_chunk() {
+            Ok(Some(chunk)) => {
+                if chunk.is_empty() {
+                    continue;
+                }
+                on_audio(&chunk);
+                total += chunk.len();
+            }
+            Ok(None) => break,
+            Err(e) => {
+                // Drain the reader thread, then surface the error — but
+                // only if nothing was delivered (a decode hiccup after
+                // valid audio matches the buffered path's tolerance).
+                let _ = reader.join();
+                if total == 0 {
+                    return Err(e);
+                }
+                eprintln!("rust-tts-wrapper: streaming decode error after {total} bytes: {e}");
+                return Ok(total);
+            }
+        }
+    }
+    let _ = reader.join();
+    Ok(total)
 }
 /// Sniff the first few bytes for an MP3 sync word or ID3 tag. Kept as a
 /// diagnostic helper but not used for delivery routing — raw PCM16 audio
@@ -1417,9 +1789,23 @@ impl TtsEngine for CloudEngine {
             let ws_deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
 
             // Edge returns MP3 frames (raw PCM isn't supported on its free
-            // endpoint). Accumulate them here and decode once the session ends;
-            // Azure (response_is_pcm) streams PCM frames straight through.
-            let mut mp3_buf: Vec<u8> = Vec::new();
+            // endpoint). A dedicated decode thread pulls frames off a pipe
+            // and hands PCM chunks back over a channel, so the WS loop below
+            // never blocks on decoding (it must keep reading messages to
+            // feed the pipe). Azure (response_is_pcm) streams PCM frames
+            // straight through with no decode step.
+            let mut edge_pipe: Option<Arc<SharedPipe>> = None;
+            let mut edge_handle: Option<std::thread::JoinHandle<()>> = None;
+            let mut edge_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>> = None;
+            let deliver_edge_audio =
+                |rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+                 cb: &mut crate::engine::OnAudioCallback| {
+                    while let Ok(chunk) = rx.try_recv() {
+                        if !chunk.is_empty() {
+                            cb(&chunk);
+                        }
+                    }
+                };
 
             // Tracks the cumulative character offset within the source text as
             // Azure WS word-boundary events arrive. When Azure doesn't provide
@@ -1544,9 +1930,48 @@ impl TtsEngine for CloudEngine {
                                 if let Some(cb) = on_audio.as_mut() {
                                     cb(audio);
                                 }
-                            } else {
-                                // Edge MP3 frames — accumulate, decode after the loop.
-                                mp3_buf.extend_from_slice(audio);
+                            } else if let Some(cb) = on_audio.as_mut() {
+                                // Edge MP3 frames — start the decode thread on
+                                // first audio, push the frames, and deliver
+                                // whatever PCM has come back so far.
+                                if edge_pipe.is_none() {
+                                    let pipe = Arc::new(SharedPipe::new());
+                                    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                                    let dec_pipe = Arc::clone(&pipe);
+                                    edge_handle = Some(
+                                        std::thread::Builder::new()
+                                            .name("edge-mp3-decode".into())
+                                            .spawn(move || {
+                                                let mut dec = IncrementalDecoder::new(dec_pipe);
+                                                loop {
+                                                    match dec.next_chunk() {
+                                                        Ok(Some(chunk)) => {
+                                                            if tx.send(chunk).is_err() {
+                                                                break;
+                                                            }
+                                                        }
+                                                        Ok(None) => break,
+                                                        Err(e) => {
+                                                            eprintln!(
+                                                                "rust-tts-wrapper: \
+                                                                 edge decode error: {e}"
+                                                            );
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            })
+                                            .expect("spawn edge decode thread"),
+                                    );
+                                    edge_rx = Some(rx);
+                                    edge_pipe = Some(pipe);
+                                }
+                                if let Some(pipe) = edge_pipe.as_ref() {
+                                    pipe.push(audio);
+                                }
+                                if let Some(rx) = edge_rx.as_ref() {
+                                    deliver_edge_audio(rx, cb);
+                                }
                             }
                         }
                     }
@@ -1554,16 +1979,16 @@ impl TtsEngine for CloudEngine {
                 }
             }
 
-            // Edge (and any future MP3-over-WS provider): decode the accumulated
-            // MP3 frames to PCM16 mono now and deliver them in chunks, so every
-            // WS engine hands the caller the same PCM contract as the REST ones.
-            if !self.config.response_is_pcm && !mp3_buf.is_empty() {
-                let pcm = decode_mp3_to_pcm16_mono(&mp3_buf);
-                if let Some(cb) = on_audio.as_mut() {
-                    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
-                        cb(chunk);
-                    }
-                }
+            // Edge: signal EOF so the decode thread releases its tail, join
+            // it, then deliver whatever PCM is still queued.
+            if let Some(pipe) = edge_pipe.as_ref() {
+                pipe.finish();
+            }
+            if let Some(handle) = edge_handle.take() {
+                let _ = handle.join();
+            }
+            if let (Some(rx), Some(cb)) = (edge_rx.as_ref(), on_audio.as_mut()) {
+                deliver_edge_audio(rx, cb);
             }
 
             // Clean turn.end → return the still-open socket to the pool for the
@@ -1763,20 +2188,10 @@ impl TtsEngine for CloudEngine {
         } else if let Some(cb) = on_audio.as_mut() {
             // Most providers respond with an MP3 body (OpenAI, ElevenLabs,
             // Deepgram, Watson, …); a few return raw PCM natively (Azure via
-            // X-Microsoft-OutputFormat, Cartesia). Read the whole body, decode
-            // MP3 → PCM16 mono when needed so every cloud engine delivers the
-            // same PCM contract as the local engines, then chunk it out.
-            let body = resp
-                .bytes()
-                .map_err(|e| TtsError(format!("Read error: {e}")))?;
-            let pcm = if self.config.response_is_pcm {
-                body.to_vec()
-            } else {
-                decode_mp3_to_pcm16_mono(&body)
-            };
-            for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
-                cb(chunk);
-            }
+            // X-Microsoft-OutputFormat, Cartesia). Stream the body as it
+            // downloads, decoding MP3 → PCM16 mono incrementally so audio
+            // reaches on_audio before the response completes.
+            stream_body_to_on_audio(resp, self.config.response_is_pcm, cb).map_err(TtsError)?;
 
             if let Some(cb) = on_boundary.as_mut() {
                 let estimated = estimate_word_boundaries(&text);
@@ -2586,6 +3001,96 @@ pub fn create_cloud_engine(id: &str, credentials_json: &str) -> Option<Arc<dyn T
 #[cfg(test)]
 mod tests {
     use super::*;
+    // ===== streaming delivery =================================================
+
+    /// Build a silent MP3 stream: N MPEG-1 Layer III 44.1 kHz mono frames
+    /// (128 kbps → 417 bytes each) with zeroed payloads. Zeroed granule
+    /// data decodes deterministically to silence, which makes it usable as
+    /// a byte-stable fixture (symphonia is compiled mp3-only, so WAV
+    /// fixtures can't be decoded by the reference path).
+    fn make_silent_mp3(frames: usize) -> Vec<u8> {
+        let frame_len = 417; // 144 * 128000 / 44100, no padding
+        let mut mp3 = Vec::with_capacity(frames * frame_len);
+        for _ in 0..frames {
+            // FF FB 90 C0: sync, MPEG1 L3, 128kbps, 44.1kHz, mono
+            mp3.extend_from_slice(&[0xFF, 0xFB, 0x90, 0xC0]);
+            mp3.extend(std::iter::repeat_n(0u8, frame_len - 4));
+        }
+        mp3
+    }
+
+    /// A reader that hands out data in small dribbles with tiny pauses,
+    /// simulating a slow network body.
+    struct DribbleReader {
+        data: Vec<u8>,
+        pos: usize,
+        piece: usize,
+    }
+    impl std::io::Read for DribbleReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.data.len() {
+                return Ok(0);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            let n = out.len().min(self.piece).min(self.data.len() - self.pos);
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn streaming_decode_matches_buffered_decode() {
+        let mp3 = make_silent_mp3(20);
+        // Reference: whole-buffer mono decode.
+        let expected = decode_mp3_to_pcm16_mono(&mp3);
+        assert!(!expected.is_empty(), "reference decode produced audio");
+
+        let reader = DribbleReader {
+            data: mp3,
+            pos: 0,
+            piece: 97, // awkward non-aligned size on purpose
+        };
+        let mut collected: Vec<u8> = Vec::new();
+        let mut deliveries = 0usize;
+        let total = stream_body_to_on_audio(reader, false, &mut |chunk| {
+            collected.extend_from_slice(chunk);
+            deliveries += 1;
+        })
+        .expect("stream");
+        assert_eq!(total, collected.len());
+        assert_eq!(collected, expected, "byte-identical to buffered decode");
+        assert!(deliveries > 1, "expected incremental delivery");
+    }
+
+    #[test]
+    fn streaming_pcm_passthrough_preserves_bytes() {
+        let pcm: Vec<u8> = (0..10_000u16).flat_map(u16::to_le_bytes).collect();
+        let reader = DribbleReader {
+            data: pcm.clone(),
+            pos: 0,
+            piece: 4096,
+        };
+        let mut collected: Vec<u8> = Vec::new();
+        let total = stream_body_to_on_audio(reader, true, &mut |chunk| {
+            collected.extend_from_slice(chunk);
+        })
+        .expect("stream");
+        assert_eq!(total, pcm.len());
+        assert_eq!(collected, pcm);
+    }
+
+    #[test]
+    fn streaming_undecodable_body_reports_error() {
+        let garbage = b"this is definitely not audio".to_vec();
+        let reader = DribbleReader {
+            data: garbage,
+            pos: 0,
+            piece: 4096,
+        };
+        let result = stream_body_to_on_audio(reader, false, &mut |_| {});
+        assert!(result.is_err(), "garbage body should surface probe failure");
+    }
 
     #[test]
     fn test_build_azure_ssml() {
