@@ -44,9 +44,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.rust-tts-wrapper/sherpaonnx/piper-uk-lada-low
+            ~/.rust-tts-wrapper/sherpaonnx/piper-nl-rdh-low
             ~/.rust-tts-wrapper/sherpaonnx/icefall-fs-ljspeech
-            ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8-multi
+            ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8
             ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/models.json') }}
@@ -65,23 +65,23 @@ jobs:
           echo "MODEL_DIR=$HOME/.rust-tts-wrapper/sherpaonnx" >> $GITHUB_ENV
           echo "$GITHUB_WORKSPACE/scripts" >> $GITHUB_PATH
 
-      - name: Download VITS test model (piper-uk-lada-low)
+      - name: Download VITS test model (piper-nl-rdh-low)
         shell: bash
         run: |
           set -e
           mkdir -p "$MODEL_DIR"
           cd "$MODEL_DIR"
-          if [ -d "piper-uk-lada-low" ] && [ -n "$(ls -A piper-uk-lada-low 2>/dev/null)" ]; then
-            echo "piper-uk-lada-low already present, skipping download"
+          if [ -d "piper-nl-rdh-low" ] && [ -n "$(ls -A piper-nl-rdh-low 2>/dev/null)" ]; then
+            echo "piper-nl-rdh-low already present, skipping download"
             exit 0
           fi
-          URL=$(get-model-url.py piper-uk-lada-low)
+          URL=$(get-model-url.py piper-nl-rdh-low)
           echo "Downloading $URL"
-          wget -q -O piper.tar.bz2 "$URL"
-          mkdir -p piper-uk-lada-low
-          tar -xjf piper.tar.bz2 -C piper-uk-lada-low --strip-components=1
+          curl -fsSL -o piper.tar.bz2 "$URL"
+          mkdir -p piper-nl-rdh-low
+          tar -xjf piper.tar.bz2 -C piper-nl-rdh-low --strip-components=1
           rm piper.tar.bz2
-          ls -la piper-uk-lada-low/
+          ls -la piper-nl-rdh-low/
 
       - name: Download Matcha test model (icefall-fs-ljspeech)
         shell: bash
@@ -94,7 +94,7 @@ jobs:
           fi
           URL=$(get-model-url.py icefall-fs-ljspeech)
           echo "Downloading $URL"
-          wget -q -O matcha.tar.bz2 "$URL"
+          curl -fsSL -o matcha.tar.bz2 "$URL"
           mkdir -p icefall-fs-ljspeech
           tar -xjf matcha.tar.bz2 -C icefall-fs-ljspeech --strip-components=1
           rm matcha.tar.bz2
@@ -112,11 +112,11 @@ jobs:
             exit 0
           fi
           echo "Downloading hifigan_v2.onnx"
-          wget -q -O hifigan_v2.onnx \
+          curl -fsSL -o hifigan_v2.onnx \
             https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/hifigan_v2.onnx
           ls -la hifigan_v2.onnx
 
-      - name: Download Kokoro test model (kokoro-zh_en-int8-multi)
+      - name: Download Kokoro test model (kokoro-zh_en-int8)
         # Kokoro is large (~140 MB); only fetch on Linux to keep matrix minutes
         # in check. macOS/Windows still cover VITS + Matcha.
         if: matrix.os == 'ubuntu-latest'
@@ -124,15 +124,15 @@ jobs:
         run: |
           set -e
           cd "$MODEL_DIR"
-          if [ -d "kokoro-zh_en-int8-multi" ] && [ -n "$(ls -A kokoro-zh_en-int8-multi 2>/dev/null)" ]; then
+          if [ -d "kokoro-zh_en-int8" ] && [ -n "$(ls -A kokoro-zh_en-int8 2>/dev/null)" ]; then
             echo "kokoro already present"
             exit 0
           fi
-          URL=$(get-model-url.py kokoro-zh_en-int8-multi)
+          URL=$(get-model-url.py kokoro-zh_en-int8)
           echo "Downloading $URL"
-          wget -q -O kokoro.tar.bz2 "$URL"
-          mkdir -p kokoro-zh_en-int8-multi
-          tar -xjf kokoro.tar.bz2 -C kokoro-zh_en-int8-multi --strip-components=1
+          curl -fsSL -o kokoro.tar.bz2 "$URL"
+          mkdir -p kokoro-zh_en-int8
+          tar -xjf kokoro.tar.bz2 -C kokoro-zh_en-int8 --strip-components=1
           rm kokoro.tar.bz2
 
       - name: Download Supertonic test model (supertonic-3-multilingual)
@@ -150,7 +150,7 @@ jobs:
           fi
           URL=$(get-model-url.py supertonic-3-multilingual)
           echo "Downloading $URL"
-          wget -q -O supertonic.tar.bz2 "$URL"
+          curl -fsSL -o supertonic.tar.bz2 "$URL"
           mkdir -p supertonic-3-multilingual
           tar -xjf supertonic.tar.bz2 -C supertonic-3-multilingual --strip-components=1
           rm supertonic.tar.bz2

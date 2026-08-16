@@ -39,7 +39,7 @@ pub mod factory;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
-mod sherpaonnx_engine;
+pub mod sherpaonnx_engine;
 #[cfg(all(feature = "system", target_os = "linux"))]
 mod system_engine;
 pub mod types;
@@ -47,6 +47,8 @@ pub mod types;
 // Re-exports for user-friendly API
 pub use engine::TtsEngine;
 pub use factory::create_engine;
+#[cfg(feature = "sherpaonnx")]
+pub use sherpaonnx_engine::SherpaOnnxEngine;
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
