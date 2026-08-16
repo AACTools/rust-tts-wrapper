@@ -235,6 +235,75 @@ fn vits_piper_volume_changes_amplitude() {
 
 #[test]
 #[ignore]
+fn sherpa_streams_audio_per_sentence_batch() {
+    // The generate progress callback delivers each sentence batch as it is
+    // synthesised (max_num_sentences=1). With on_audio + on_boundary set,
+    // boundary events must interleave with audio chunks — i.e. at least one
+    // boundary fires BEFORE the final audio chunk, proving delivery is
+    // incremental rather than one end-batched buffer. Additionally, the
+    // first audio chunk must arrive before synthesis completes.
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let engine = engine_for(&id);
+    let text = "First sentence arrives early. Second sentence synthesises later. Third one closes the stream.";
+
+    #[derive(PartialEq, Debug, Clone, Copy)]
+    enum Ev {
+        Audio,
+        Boundary,
+    }
+    use Ev::{Audio as A, Boundary as B};
+
+    let seq = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Ev>::new()));
+    let t_start = std::time::Instant::now();
+    let first_audio_at = std::sync::Arc::new(std::sync::Mutex::new(None::<std::time::Duration>));
+    let last_audio_at = std::sync::Arc::new(std::sync::Mutex::new(t_start.elapsed()));
+
+    let seq_a = seq.clone();
+    let first_a = first_audio_at.clone();
+    let last_a = last_audio_at.clone();
+    let seq_b = seq.clone();
+    engine
+        .speak(
+            text,
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut move |_chunk: &[u8]| {
+                let mut f = first_a.lock().unwrap();
+                if f.is_none() {
+                    *f = Some(t_start.elapsed());
+                }
+                *last_a.lock().unwrap() = t_start.elapsed();
+                seq_a.lock().unwrap().push(A);
+            }),
+            Some(&mut move |_w, _s, _e, _o, _l| seq_b.lock().unwrap().push(B)),
+        )
+        .expect("speak");
+
+    let seq = seq.lock().unwrap().clone();
+    let total = t_start.elapsed();
+    assert!(seq.contains(&A), "no audio delivered");
+    assert!(seq.contains(&B), "no boundaries delivered");
+    let interleaved = seq
+        .iter()
+        .enumerate()
+        .any(|(i, e)| *e == B && seq[i + 1..].contains(&A));
+    assert!(
+        interleaved,
+        "no boundary fired before the final audio chunk; seq = {seq:?}"
+    );
+    let first = first_audio_at.lock().unwrap().expect("audio delivered");
+    let last = *last_audio_at.lock().unwrap();
+    assert!(
+        first < last,
+        "all audio arrived in one batch (first {first:?} == last {last:?})"
+    );
+    let _ = total;
+}
+
+#[test]
+#[ignore]
 fn vits_piper_word_boundaries_fire_per_word() {
     let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
     let engine = engine_for(&id);
