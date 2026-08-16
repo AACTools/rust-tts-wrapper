@@ -141,13 +141,20 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
       - name: Download sherpa-onnx x86 prebuilt (32-bit Windows only)
-        # sherpa-onnx-sys doesn't auto-detect win-x86 yet, but the prebuilt
-        # static libs exist at v1.13.4. Download them and point the build at
-        # the extracted directory via SHERPA_ONNX_LIB_DIR.
+        # sherpa-onnx-sys doesn't auto-detect win-x86, so download the
+        # prebuilt static libs for the pinned crate version and point the
+        # build at them via SHERPA_ONNX_LIB_DIR.
+        #
+        # KEEP IN SYNC with the exact `sherpa-onnx` pin in Cargo.toml:
+        # builds resolve fresh (Cargo.lock is gitignored and the version
+        # job rewrites Cargo.toml), so a version mismatch means either a
+        # compile error (crate/sys pair drift) or LNK2019 (crate newer
+        # than the lib, e.g. 1.13.5's SherpaOnnxGetOnnxruntimeVersionStr
+        # missing from the 1.13.4 lib).
         if: matrix.target == 'i686-pc-windows-msvc'
         shell: pwsh
         run: |
-          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.4/sherpa-onnx-v1.13.4-win-x86-static-MD-Release-lib.tar.bz2"
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/sherpa-onnx-v1.13.5-win-x86-static-MD-Release-lib.tar.bz2"
           Invoke-WebRequest -Uri $url -OutFile sherpa-x86.tar.bz2
           mkdir sherpa-x86-libs | Out-Null
           tar -xjf sherpa-x86.tar.bz2 -C sherpa-x86-libs --strip-components=1
