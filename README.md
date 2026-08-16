@@ -6,30 +6,30 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
-| System (speech-dispatcher) | Local | None | — | — | Estimated | — |
-| Sherpa-ONNX | Local (1300+ models) | None | Chunked | Speakers | Estimated | — |
-| Azure | Cloud | Key + Region | Chunked | API | **Real** (WS) | Platform-aware |
-| Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Chunked | API | **Real** (WS) | Platform-aware |
-| Google Cloud | Cloud | API Key | Chunked | API | **Real** (v1beta1 timepoints) | Platform-aware |
-| OpenAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| ElevenLabs | Cloud | API Key | Chunked | API | Estimated | Platform-aware |
-| Cartesia | Cloud | API Key | Chunked | API | Estimated | Platform-aware |
-| Deepgram | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| PlayHT | Cloud | API Key + User ID | Chunked | — | Estimated | Platform-aware |
-| Fish Audio | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| Hume AI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| Mistral | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| Murf | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| Resemble AI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| Unreal Speech | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| UpliftAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| Amazon Polly | Cloud | Key + Secret + Region | Chunked | — | Estimated | Platform-aware |
+| System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
+| Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
+| Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
+| Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
+| Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
+| OpenAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| ElevenLabs | Cloud | API Key | Streamed (JSON w/ timestamps) | API | Estimated | Platform-aware |
+| Cartesia | Cloud | API Key | Streamed | API | Estimated | Platform-aware |
+| Deepgram | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| PlayHT | Cloud | API Key + User ID | Streamed | — | Estimated | Platform-aware |
+| Fish Audio | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Hume AI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Mistral | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Murf | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Resemble AI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Unreal Speech | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| UpliftAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Amazon Polly | Cloud | Key + Secret + Region | Streamed | — | Estimated | Platform-aware |
 | IBM Watson | Cloud | Key + Region + Instance | Chunked | — | Estimated | Platform-aware |
 | Wit.ai | Cloud | Token | Chunked | — | Estimated | Platform-aware |
 | xAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 | ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 
-- **Streaming**: Audio is delivered through the `on_audio` callback in chunks. REST engines and Edge stream as bytes arrive over the network (MP3 is decoded to PCM16 mono incrementally, on a background reader thread); Azure's WebSocket delivers PCM frames per message. Engines whose APIs return a single JSON document with base64 audio (Google, ElevenLabs `with-timestamps`) deliver only once the response completes — an API limitation. Sherpa-ONNX delivers each sentence batch as it is synthesised (sentence-level streaming via the generate progress callback; single-sentence utterances still complete before delivery). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes. Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
+- **Streaming**: Audio is delivered through the `on_audio` callback in chunks, as it becomes available. REST engines stream the response body as bytes arrive over the network (MP3 decoded to PCM16 mono incrementally on a background reader thread; raw-PCM providers pass straight through); Azure and Edge deliver real-time over WebSockets; Sherpa-ONNX delivers each sentence batch as it is synthesised (via the generate progress callback — a single-sentence utterance still completes before delivery). Exceptions: Google and ElevenLabs `with-timestamps` return one JSON document with base64 audio, so they can only deliver after the response completes (an API limitation, not buffering). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
 - **Native engine varies by platform**: the table shows `system` (Linux speech-dispatcher); macOS uses `avsynth` (AVSpeechSynthesizer) and Windows uses `sapi`. "22 total" counts one native engine + Sherpa-ONNX + the 20 cloud engines, per platform.
 
 ## Formatting & Testing

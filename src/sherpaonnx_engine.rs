@@ -33,10 +33,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// PCM delivery chunk size. Sherpa-ONNX synthesises the whole clip up-front,
-/// so we slice the rendered PCM into 8 KB chunks before pushing them through
-/// `on_audio` — matching the cloud engines' streamed-chunk shape so callers
-/// see the same multi-callback delivery instead of one giant buffer.
+/// PCM delivery chunk size. Sentence batches arrive whole from the
+/// generate progress callback and larger ones are sliced into 8 KB chunks
+/// before pushing them through `on_audio` — matching the cloud engines'
+/// streamed-chunk shape so callers see the same multi-callback delivery
+/// instead of one giant buffer.
 const STREAMING_CHUNK_SIZE: usize = 8 * 1024;
 
 /// Maps a 2-letter ISO 639-1 code to its 3-letter ISO 639-3 equivalent for the
@@ -551,7 +552,11 @@ impl TtsEngine for SherpaOnnxEngine {
                     STREAM_AUDIO_CB.with(|c| {
                         if let Some(ptr) = *c.borrow() {
                             // SAFETY (stash): see the thread-local docs.
-                            unsafe { (*ptr)(&pcm) };
+                            // Chunk to keep the documented 8 KB multi-
+                            // callback delivery shape.
+                            for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+                                unsafe { (*ptr)(chunk) };
+                            }
                         }
                     });
                     if let Some(f) = firer_for_cb.as_ref() {
@@ -740,23 +745,6 @@ fn samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
         pcm.extend_from_slice(&s16.to_le_bytes());
     }
     pcm
-}
-
-/// Scale `samples` by `volume_factor`, convert to little-endian PCM16 bytes,
-/// and push them through `cb` in `STREAMING_CHUNK_SIZE`-byte chunks. Volume
-/// and pitch are applied to the full buffer by `apply_volume_and_pitch`
-/// before this runs, so callers pass `1.0` here.
-#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn deliver_pcm(cb: &mut dyn FnMut(&[u8]), samples: &[f32], volume_factor: f32) {
-    let mut pcm = Vec::with_capacity(samples.len() * 2);
-    for &s in samples {
-        let scaled = (s * volume_factor).clamp(-1.0, 1.0);
-        let s16 = (scaled * 32767.0) as i16;
-        pcm.extend_from_slice(&s16.to_le_bytes());
-    }
-    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
-        cb(chunk);
-    }
 }
 
 /// Write a 16-bit PCM mono WAV file. Returns `false` on I/O error.
