@@ -277,6 +277,11 @@ fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
             .get("num_speakers")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(1) as u32,
+        quality: obj
+            .get("quality")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         url: obj
             .get("url")
             .and_then(|v| v.as_str())
@@ -1652,6 +1657,7 @@ mod tests {
             ],
             sample_rate: 24000,
             num_speakers: 2,
+            quality: String::new(),
             url: String::new(),
             compression: false,
             filesize_mb: 0.0,
@@ -1945,6 +1951,22 @@ mod tests {
         let model = parse_model("test-unlicensed", &json).unwrap();
         assert!(model.license.is_empty());
         assert!(model.license_url.is_empty());
+    }
+
+    #[test]
+    fn test_parse_model_surfaces_quality() {
+        let json = serde_json::json!({
+            "name": "test", "url": "https://example.com", "quality": "high"
+        });
+        let model = parse_model("test-quality", &json).unwrap();
+        assert_eq!(model.quality, "high");
+    }
+
+    #[test]
+    fn test_parse_model_quality_defaults_empty() {
+        let json = serde_json::json!({ "name": "test", "url": "https://example.com" });
+        let model = parse_model("test-noquality", &json).unwrap();
+        assert!(model.quality.is_empty());
     }
 
     #[test]

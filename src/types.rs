@@ -270,6 +270,10 @@ pub struct SherpaModelInfo {
     pub sample_rate: u32,
     /// Number of speakers (for multi-speaker models).
     pub num_speakers: u32,
+    /// Quality/variant tier from the registry (e.g. `"x_low"`, `"low"`,
+    /// `"medium"`, `"high"`; some entries carry variant markers like
+    /// `"int8"` or `"fp16"` instead). Empty when the entry omits it.
+    pub quality: String,
     /// Download URL for the model archive.
     pub url: String,
     /// Whether the archive is compressed.
