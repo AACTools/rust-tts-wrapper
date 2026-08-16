@@ -119,6 +119,7 @@ impl SherpaOnnxEngine {
     /// - `numSteps`: Supertonic denoising steps, 5–12 (default 8). Out-of-range
     ///   values fall back to 8. Ignored by non-Supertonic models.
     /// - `provider`: `cpu` (default), `coreml`, `cuda`, `directml`, etc.
+    #[must_use]
     pub fn new(credentials_json: &str) -> Self {
         let mut model_dir = default_model_dir();
         let mut model_id = String::new();
