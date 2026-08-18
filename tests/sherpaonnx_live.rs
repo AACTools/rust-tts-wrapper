@@ -11,12 +11,12 @@
 //!   cargo test --test sherpaonnx_live --features sherpaonnx -- --ignored
 //!
 //! Models used (smallest available per family at the time of writing):
-//!   vits       — piper-nl-rdh-low          (~25 MB)  Dutch Piper voice
+//!   vits       — piper-nl_BE-rdh-low          (~25 MB)  Dutch Piper voice
 //!                                          (int8/fp16-free: the fp16
 //!                                          variants abort in the CPU-only
 //!                                          ONNX runtime with an uncatchable
 //!                                          Ort::Exception)
-//!   matcha     — icefall-fs-ljspeech      (~73 MB)  Matcha-TTS English (LJSpeech)
+//!   matcha     — icefall-en-ljspeech      (~73 MB)  Matcha-TTS English (LJSpeech)
 //!   kokoro     — kokoro-zh_en-int8  (~140 MB) Kokoro multilingual (Linux CI only)
 //!   supertonic — supertonic-3-multilingual (~123 MB) Supertonic 3 (31 langs, Linux CI only)
 //!
@@ -121,7 +121,7 @@ impl BoundarySink {
 #[test]
 #[ignore]
 fn vits_piper_synthesises_nonempty_audio() {
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     let sink = Arc::new(Mutex::new(AudioSink::new()));
     let sink_for_cb = sink.clone();
@@ -152,7 +152,7 @@ fn vits_piper_synthesises_nonempty_audio() {
 fn vits_piper_rate_changes_audio_size() {
     // Faster speech → fewer samples; slower speech → more samples.
     // SherpaOnnx applies rate via GenerationConfig.speed.
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
 
     let text = "The quick brown fox jumps over the lazy dog.";
@@ -189,7 +189,7 @@ fn vits_piper_volume_changes_amplitude() {
     // Volume is applied by apply_volume_and_pitch — verify by checking that
     // the peak sample amplitude scales. We compute peak on the f32 samples
     // reconstructed from the delivered PCM16 bytes.
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
 
     fn synth_and_peak(engine: &Arc<dyn TtsEngine>, volume: f32) -> f32 {
@@ -242,7 +242,7 @@ fn sherpa_streams_audio_per_sentence_batch() {
     // boundary fires BEFORE the final audio chunk, proving delivery is
     // incremental rather than one end-batched buffer. Additionally, the
     // first audio chunk must arrive before synthesis completes.
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     let text = "First sentence arrives early. Second sentence synthesises later. Third one closes the stream.";
 
@@ -305,7 +305,7 @@ fn sherpa_streams_audio_per_sentence_batch() {
 #[test]
 #[ignore]
 fn vits_piper_word_boundaries_fire_per_word() {
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let sink_cb = sink.clone();
@@ -346,7 +346,7 @@ fn vits_piper_streaming_vs_buffered_match() {
     // same text legitimately differ by a few percent of samples (the
     // generator noise makes exact byte equality unattainable), so assert
     // a tolerance instead of equality.
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     let text = "Same input both ways.";
 
@@ -417,7 +417,7 @@ fn vits_piper_multi_speaker_voice_id_selectable() {
 #[test]
 #[ignore]
 fn matcha_synthesises_nonempty_audio() {
-    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-fs-ljspeech");
+    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-en-ljspeech");
     let engine = engine_for(&id);
     let total = Arc::new(Mutex::new(0usize));
     let t = total.clone();
@@ -441,7 +441,7 @@ fn matcha_synthesises_nonempty_audio() {
 #[test]
 #[ignore]
 fn matcha_word_boundaries_fire() {
-    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-fs-ljspeech");
+    let id = model_id("SHERPA_MATCHA_MODEL", "icefall-en-ljspeech");
     let engine = engine_for(&id);
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();
@@ -575,7 +575,7 @@ fn speechmarkdown_input_does_not_break_synthesis() {
     // speechmarkdown-rust isn't wired into sherpaonnx (it has no SSML
     // surface), so SpeechMarkdown input must be passed through untouched
     // and synthesis must complete.
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     let total = Arc::new(Mutex::new(0usize));
     let t = total.clone();
@@ -601,7 +601,7 @@ fn speechmarkdown_input_does_not_break_synthesis() {
 #[test]
 #[ignore]
 fn stop_without_active_synthesis_is_safe() {
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     engine.stop().expect("stop should not error");
 }
@@ -613,7 +613,7 @@ fn stop_without_active_synthesis_is_safe() {
 fn pitch_shift_changes_sample_count() {
     // apply_volume_and_pitch uses linear-interpolation resampling for pitch,
     // so pitch != 1.0 must change the output sample count.
-    let id = model_id("SHERPA_VITS_MODEL", "piper-nl-rdh-low");
+    let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
     let text = "Pitch shift measurement.";
 

@@ -103,7 +103,7 @@ mod sherpaonnx_tests {
         for id in &[
             "kokoro-en-v0_19",
             "coqui-en-ljspeech",
-            "cantonese-fs-xiaomaiiwn",
+            "cantonese-yue-xiaomaiiwn",
         ] {
             assert!(
                 models.contains_key(*id),

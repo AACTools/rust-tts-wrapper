@@ -1274,7 +1274,7 @@ mod tests {
         assert!(is_piper_or_github_model("vctk-en"));
         assert!(is_piper_or_github_model("zh-cantonese"));
         assert!(is_piper_or_github_model("ljs-en"));
-        assert!(is_piper_or_github_model("cantonese-fs-xiaomaiiwn"));
+        assert!(is_piper_or_github_model("cantonese-yue-xiaomaiiwn"));
         assert!(is_piper_or_github_model("kokoro-en-v0_19"));
     }
 
@@ -2010,7 +2010,9 @@ mod tests {
 
     #[test]
     fn test_engine_get_voices_single_speaker_returns_one() {
-        let engine = SherpaOnnxEngine::new(r#"{"modelId":"kokoro-en-v0_19"}"#);
+        // kokoro-en-v0_19 is actually an 11-speaker model (the registry now
+        // carries the real count), so use a genuinely single-speaker voice.
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"piper-en_US-amy-low"}"#);
         let voices = engine.get_voices().expect("voices");
         assert_eq!(voices.len(), 1);
         assert_eq!(voices[0].id, "0");
