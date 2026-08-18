@@ -1094,6 +1094,142 @@ fn inject_voice_if_missing(ssml: &str, voice: &str) -> String {
     ssml.to_string()
 }
 
+/// The SSML 1.0 synthesis namespace (`<speak xmlns=…>`).
+const SSML_XMLNS: &str = "http://www.w3.org/2001/10/synthesis";
+
+/// Derive a BCP-47 language tag from an Azure/Edge voice name
+/// (`en-GB-SoniaNeural` → `en-GB`), defaulting to `en-US` when the name
+/// doesn't look like a locale.
+fn voice_lang(voice: &str) -> String {
+    let head: String = voice.chars().take(5).collect();
+    let chars: Vec<char> = head.chars().collect();
+    let locale_like = chars.len() == 5
+        && chars[2] == '-'
+        && [0, 1, 3, 4].iter().all(|&i| chars[i].is_ascii_alphabetic());
+    if locale_like {
+        head
+    } else {
+        "en-US".to_string()
+    }
+}
+
+/// Complete an SSML document's `<speak>` envelope with the attributes
+/// Azure/Edge require: `version`, `xmlns` and `xml:lang`.
+///
+/// A bare `<speak>` — exactly what speech-dispatcher's index-marking
+/// wrapper produces, and common from other SSML emitters — is *accepted*
+/// by the service: the turn completes with `turn.end` and no error, but
+/// **zero audio is synthesised**. Filling in the missing attributes
+/// before the request goes out makes such documents speak. Present
+/// attributes and the rest of the document are passed through verbatim;
+/// plain text (no `<speak` envelope) is returned unchanged.
+#[cfg(feature = "cloud")]
+fn normalize_ssml_envelope(ssml: &str, voice: &str) -> String {
+    let trimmed = ssml.trim_start();
+    if !trimmed.to_ascii_lowercase().starts_with("<speak") {
+        return ssml.to_string();
+    }
+    let Some(tag_end) = trimmed.find('>') else {
+        return ssml.to_string(); // unterminated tag — leave alone
+    };
+    let inner = trimmed[..=tag_end]
+        .strip_prefix('<')
+        .and_then(|t| t.strip_suffix('>'))
+        .unwrap_or("");
+    // Attribute names present in the tag (name only, up to `=`).
+    let mut has_version = false;
+    let mut has_xmlns = false;
+    let mut has_lang = false;
+    for attr in inner.split_whitespace().skip(1) {
+        match attr
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "version" => has_version = true,
+            "xmlns" | "xmlns:xmlns" => has_xmlns = true,
+            "xml:lang" => has_lang = true,
+            _ => {}
+        }
+    }
+    if has_version && has_xmlns && has_lang {
+        return ssml.to_string(); // nothing to do
+    }
+    let mut words = inner.split_whitespace();
+    // XML tag names are case-sensitive: keep the original spelling so the
+    // opening tag still matches a `</SPEAK>` close.
+    let first = words.next().unwrap_or("speak");
+    let self_closing = first.ends_with('/');
+    let name = first.trim_end_matches('/');
+    let mut open = format!("<{name}");
+    // Keep custom attributes, dropping a trailing self-closing slash.
+    let attrs = words.collect::<Vec<_>>().join(" ");
+    let self_closing = self_closing || attrs.ends_with('/');
+    let attrs = attrs.trim_end_matches('/');
+    if !attrs.is_empty() {
+        open.push(' ');
+        open.push_str(attrs);
+    }
+    if !has_version {
+        open.push_str(" version=\"1.0\"");
+    }
+    if !has_xmlns {
+        open.push_str(" xmlns=\"");
+        open.push_str(SSML_XMLNS);
+        open.push('"');
+    }
+    if !has_lang {
+        open.push_str(" xml:lang=\"");
+        open.push_str(&voice_lang(voice));
+        open.push('"');
+    }
+    if self_closing {
+        open.push('/');
+    }
+    open.push('>');
+    let lead = &ssml[..ssml.len() - trimmed.len()];
+    format!("{lead}{open}{}", &trimmed[tag_end + 1..])
+}
+
+/// Remove `<mark>` elements from an SSML document for Azure/Edge.
+///
+/// Azure/Edge do not support the SSML `<mark>` element — an utterance
+/// containing one synthesises **zero audio**, again with no error from
+/// the service. `<mark>` is an empty element (it only names a position),
+/// so dropping it changes no spoken content; consumers that need the
+/// positions should use word-boundary events. speech-dispatcher's
+/// wrapper injects `<mark name="__spd_N"/>` around every pause, so
+/// pass-through SSML from SSIP clients hits this constantly.
+#[cfg(feature = "cloud")]
+fn strip_unsupported_marks(ssml: &str) -> String {
+    if !ssml.contains("<mark") && !ssml.contains("</mark") {
+        return ssml.to_string();
+    }
+    let mut out = String::with_capacity(ssml.len());
+    let mut rest = ssml;
+    while let Some(pos) = rest.find('<') {
+        let after = &rest[pos..];
+        // Tag-name boundary check so `<market>` stays untouched.
+        let name_done = |s: &str, prefix: &str| {
+            s.strip_prefix(prefix)
+                .is_some_and(|tail| tail.starts_with([' ', '\t', '\r', '\n', '/', '>']))
+        };
+        if name_done(after, "<mark") || name_done(after, "</mark") {
+            if let Some(end) = after.find('>') {
+                out.push_str(&rest[..pos]);
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        out.push_str(&rest[..=pos]);
+        rest = &rest[pos + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Build SSML for Azure TTS.
 fn build_azure_ssml(text: &str, voice: &str, rate: f32, pitch: f32, volume: f32) -> String {
     let lang = voice.chars().take(5).collect::<String>();
@@ -1781,6 +1917,12 @@ impl TtsEngine for CloudEngine {
             // tracks whether the session ended on `turn.end` (socket reusable →
             // check back in) so a broken connection is never pooled.
             let mut clean_finish = false;
+            // Total synthesis audio received on the wire. A turn that ends
+            // cleanly (turn.end, no error) with zero audio means the request
+            // was malformed in a way the service doesn't report — the classic
+            // case being a bare <speak> envelope — and must surface as an
+            // error, not a silent success.
+            let mut ws_audio_bytes = 0usize;
             let mut socket = match ws_checkout(&ws_url_str) {
                 Some(pooled) => pooled,
                 None => {
@@ -1860,9 +2002,14 @@ impl TtsEngine for CloudEngine {
             // send it directly without build_azure_ssml wrapping (which would
             // XML-escape the tags). If the SSML lacks a <voice> tag but the
             // caller set one via tts_set_voice, inject it so the voice takes
-            // effect.
+            // effect. The envelope is completed first (a bare <speak> is
+            // accepted but synthesises zero audio) and unsupported <mark>
+            // elements are dropped (same silent zero-audio failure).
             let ssml = if is_ssml {
-                inject_voice_if_missing(&text, &voice_to_use)
+                inject_voice_if_missing(
+                    &strip_unsupported_marks(&normalize_ssml_envelope(&text, &voice_to_use)),
+                    &voice_to_use,
+                )
             } else {
                 build_azure_ssml(&text, &voice_to_use, rate, pitch, volume)
             };
@@ -2018,6 +2165,7 @@ impl TtsEngine for CloudEngine {
                         let header_length = ((b[0] as usize) << 8) | (b[1] as usize);
                         if b.len() > 2 + header_length {
                             let audio = &b[2 + header_length..];
+                            ws_audio_bytes += audio.len();
                             if self.config.response_is_pcm {
                                 // Azure raw-PCM frames — deliver straight through.
                                 if let Some(cb) = on_audio.as_mut() {
@@ -2090,6 +2238,12 @@ impl TtsEngine for CloudEngine {
             if clean_finish {
                 ws_checkin(ws_url_str, socket);
             }
+            if ws_audio_bytes == 0 {
+                return Err(TtsError(format!(
+                    "{} synthesis completed with no audio (malformed SSML envelope?)",
+                    self.config.provider_id
+                )));
+            }
             return Ok(());
         }
 
@@ -2114,9 +2268,14 @@ impl TtsEngine for CloudEngine {
         let resp = if self.config.body_is_ssml {
             // Azure: send SSML XML body. When is_ssml=true, the text is
             // already SSML — send it directly (don't escape/wrap with
-            // build_azure_ssml). Inject voice if the SSML lacks a <voice> tag.
+            // build_azure_ssml). Inject voice if the SSML lacks a <voice>
+            // tag, after completing the envelope and dropping unsupported
+            // <mark> elements (both make Azure synthesise zero audio).
             let ssml = if is_ssml {
-                inject_voice_if_missing(&text, &voice_to_use)
+                inject_voice_if_missing(
+                    &strip_unsupported_marks(&normalize_ssml_envelope(&text, &voice_to_use)),
+                    &voice_to_use,
+                )
             } else {
                 build_azure_ssml(&text, &voice_to_use, rate, pitch, volume)
             };
@@ -2175,6 +2334,12 @@ impl TtsEngine for CloudEngine {
             return Err(TtsError(format!("API error {status}: {body_text}")));
         }
 
+        // Total audio delivered for this utterance. A 2xx response with no
+        // audio at all is a failure (malformed request the service didn't
+        // reject, empty synthesis, …) — reported as an error rather than a
+        // silent success.
+        let mut audio_total = 0usize;
+
         if self.config.provider_id == "elevenlabs" && on_boundary.is_some() {
             let resp_text = resp
                 .text()
@@ -2188,6 +2353,7 @@ impl TtsEngine for CloudEngine {
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
                 let pcm = decode_mp3_to_pcm16_mono(&mp3_bytes);
+                audio_total += pcm.len();
                 if let Some(cb) = on_audio.as_mut() {
                     for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
                         cb(chunk);
@@ -2228,6 +2394,7 @@ impl TtsEngine for CloudEngine {
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
                 let pcm = decode_mp3_to_pcm16_mono(&mp3_bytes);
+                audio_total += pcm.len();
                 if let Some(cb) = on_audio.as_mut() {
                     for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
                         cb(chunk);
@@ -2289,7 +2456,10 @@ impl TtsEngine for CloudEngine {
             // delivered audio, instead of all-at-once afterwards.
             let plan = on_boundary.is_some().then(|| EstimatePlan::build(&text));
             let mut on_event = |ev: StreamEvt<'_>| match ev {
-                StreamEvt::Audio(bytes) => cb(bytes),
+                StreamEvt::Audio(bytes) => {
+                    audio_total += bytes.len();
+                    cb(bytes);
+                }
                 StreamEvt::Boundary(word, start, end, offset, len) => {
                     if let Some(bcb) = on_boundary.as_mut() {
                         bcb(word, start, end, offset, len);
@@ -2307,9 +2477,16 @@ impl TtsEngine for CloudEngine {
             )
             .map_err(TtsError)?;
         } else {
-            let _audio_bytes = resp
+            let audio_bytes = resp
                 .bytes()
                 .map_err(|e| TtsError(format!("Read error: {e}")))?;
+            audio_total += audio_bytes.len();
+        }
+        if audio_total == 0 {
+            return Err(TtsError(format!(
+                "{} synthesis returned no audio",
+                self.config.provider_id
+            )));
         }
         Ok(())
     }
@@ -3282,6 +3459,128 @@ mod tests {
         assert!(ssml.contains("rate=\"+50%\""));
         assert!(ssml.contains("pitch=\"-10%\""));
         assert!(ssml.contains("volume=\"+40%\""));
+    }
+
+    // ===== normalize_ssml_envelope =====
+
+    #[test]
+    fn test_normalize_envelope_fills_missing_attributes() {
+        // Exactly what speech-dispatcher's index-marking wrapper sends:
+        // a bare <speak>. Azure/Edge accept it but synthesise no audio.
+        let result = normalize_ssml_envelope(
+            "<speak>Repeat <mark name=\"m1\"/> test</speak>",
+            "en-GB-SoniaNeural",
+        );
+        let expected_prefix =
+            format!("<speak version=\"1.0\" xmlns=\"{SSML_XMLNS}\" xml:lang=\"en-GB\">");
+        assert!(
+            result.starts_with(&expected_prefix),
+            "envelope attributes must be added in order: {result}"
+        );
+        assert!(result.ends_with("Repeat <mark name=\"m1\"/> test</speak>"));
+    }
+
+    #[test]
+    fn test_normalize_envelope_keeps_present_attributes() {
+        let ssml = "<speak version=\"1.1\" xmlns=\"urn:custom\" xml:lang=\"de-DE\">Hallo</speak>";
+        assert_eq!(normalize_ssml_envelope(ssml, "en-US-AriaNeural"), ssml);
+    }
+
+    #[test]
+    fn test_normalize_envelope_fills_only_gaps() {
+        let result = normalize_ssml_envelope(
+            "<speak xml:lang='fr-FR'>Bonjour</speak>",
+            "en-US-AriaNeural",
+        );
+        assert!(result.contains("xml:lang='fr-FR'"), "existing lang kept");
+        assert!(result.contains("version=\"1.0\""), "version added");
+        assert!(result.contains("xmlns="), "xmlns added");
+        // The added xml:lang must not duplicate the existing one.
+        assert_eq!(result.matches("xml:lang").count(), 1);
+    }
+
+    #[test]
+    fn test_normalize_envelope_leaves_plain_text_and_fragments_alone() {
+        assert_eq!(
+            normalize_ssml_envelope("Angle < bracket", "en-US-AriaNeural"),
+            "Angle < bracket"
+        );
+        // Envelope-less SSML fragment (no <speak tag) is untouched.
+        assert_eq!(
+            normalize_ssml_envelope("<prosody rate='slow'>hi</prosody>", "en-US-AriaNeural"),
+            "<prosody rate='slow'>hi</prosody>"
+        );
+        // Unterminated tag — left alone rather than mangled.
+        assert_eq!(
+            normalize_ssml_envelope("<speak version=", "en-US-AriaNeural"),
+            "<speak version="
+        );
+    }
+
+    #[test]
+    fn test_normalize_envelope_preserves_tag_case_and_self_closing() {
+        let result = normalize_ssml_envelope("<SPEAK>Hi</SPEAK>", "en-US-AriaNeural");
+        assert!(result.starts_with("<SPEAK version="), "tag name case kept");
+        assert!(result.ends_with("Hi</SPEAK>"));
+
+        let result = normalize_ssml_envelope("<speak/>", "en-US-AriaNeural");
+        let expected =
+            format!("<speak version=\"1.0\" xmlns=\"{SSML_XMLNS}\" xml:lang=\"en-US\"/>");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_normalize_envelope_composes_with_voice_injection() {
+        // The WS/REST send path normalizes first, then injects <voice>.
+        let result = inject_voice_if_missing(
+            &normalize_ssml_envelope("<speak>hello</speak>", "en-GB-SoniaNeural"),
+            "en-GB-SoniaNeural",
+        );
+        assert!(result.contains("version=\"1.0\""));
+        assert!(result.contains("xml:lang=\"en-GB\""));
+        assert!(result.contains("<voice name='en-GB-SoniaNeural'>"));
+    }
+
+    #[test]
+    fn test_voice_lang_from_voice_name() {
+        assert_eq!(voice_lang("en-GB-SoniaNeural"), "en-GB");
+        assert_eq!(voice_lang("en-US-AvaMultilingualNeural"), "en-US");
+        assert_eq!(voice_lang("alloy"), "en-US"); // not a locale
+        assert_eq!(voice_lang(""), "en-US");
+    }
+
+    // ===== strip_unsupported_marks =====
+
+    #[test]
+    fn test_strip_marks_removes_self_closing_and_paired() {
+        // The exact shape speech-dispatcher wraps around pauses.
+        assert_eq!(
+            strip_unsupported_marks("A <mark name=\"__spd_0\"/> B"),
+            "A  B"
+        );
+        assert_eq!(
+            strip_unsupported_marks("A <mark name='x'></mark> B"),
+            "A  B"
+        );
+    }
+
+    #[test]
+    fn test_strip_marks_leaves_similar_names_and_text_alone() {
+        assert_eq!(
+            strip_unsupported_marks("<market price='3'>"),
+            "<market price='3'>"
+        );
+        assert_eq!(strip_unsupported_marks("a < b"), "a < b");
+        assert_eq!(strip_unsupported_marks("<mark"), "<mark"); // unterminated
+        assert_eq!(strip_unsupported_marks("no marks here"), "no marks here");
+    }
+
+    #[test]
+    fn test_strip_marks_full_speechd_document() {
+        let ssml = "<speak>Hello <mark name=\"__spd_0\"/> world</speak>";
+        let stripped = strip_unsupported_marks(ssml);
+        assert!(!stripped.contains("mark"));
+        assert_eq!(stripped, "<speak>Hello  world</speak>");
     }
 
     // ===== inject_voice_if_missing =====
