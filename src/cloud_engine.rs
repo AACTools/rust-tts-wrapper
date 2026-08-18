@@ -1193,25 +1193,30 @@ fn normalize_ssml_envelope(ssml: &str, voice: &str) -> String {
     format!("{lead}{open}{}", &trimmed[tag_end + 1..])
 }
 
-/// Remove unsupported position-marking elements from an SSML document
-/// for Azure/Edge.
+/// Remove elements the target endpoint silently refuses, from an SSML
+/// document bound for Azure/Edge.
 ///
-/// Neither service supports the W3C SSML `<mark>` element — an utterance
-/// containing one synthesises **zero audio**, again with no error from
-/// the service. Azure proper documents its own `<bookmark mark=…>`
+/// Both services lack the W3C SSML `<mark>` element — an utterance
+/// containing one synthesises **zero audio**, with no error from the
+/// service. Azure proper documents its own `<bookmark mark=…>`
 /// replacement element, but the **free Edge endpoint zero-audios on
-/// `<bookmark>` too** (verified live), so Edge strips both while Azure
-/// keeps bookmarks. Both are empty elements (they only name a position),
-/// so dropping them changes no spoken content; consumers that need the
-/// positions should use word-boundary events. speech-dispatcher's
-/// wrapper injects `<mark name="__spd_N"/>` around every pause, so
-/// pass-through SSML from SSIP clients hits this constantly.
+/// `<bookmark>` and on `<mstts:express-as …>` style sections too**
+/// (verified live), so in Edge mode (`is_edge`) those tags are dropped
+/// as well. `<mark>`/`<bookmark>` are empty elements, and for the
+/// paired `mstts:express-as` wrapper only the tags are removed — the
+/// spoken content inside survives. Consumers that need positions should
+/// use word-boundary events. speech-dispatcher's wrapper injects
+/// `<mark name="__spd_N"/>` around every pause, so pass-through SSML
+/// from SSIP clients hits this constantly.
 #[cfg(feature = "cloud")]
-fn strip_unsupported_marks(ssml: &str, strip_bookmark: bool) -> String {
+fn strip_unsupported_marks(ssml: &str, is_edge: bool) -> String {
     let has_marks = ssml.contains("<mark") || ssml.contains("</mark");
-    let has_bookmarks =
-        strip_bookmark && (ssml.contains("<bookmark") || ssml.contains("</bookmark"));
-    if !has_marks && !has_bookmarks {
+    let has_edge_extras = is_edge
+        && (ssml.contains("<bookmark")
+            || ssml.contains("</bookmark")
+            || ssml.contains("<mstts:express-as")
+            || ssml.contains("</mstts:express-as"));
+    if !has_marks && !has_edge_extras {
         return ssml.to_string();
     }
     let mut out = String::with_capacity(ssml.len());
@@ -1225,8 +1230,11 @@ fn strip_unsupported_marks(ssml: &str, strip_bookmark: bool) -> String {
         };
         let drop = name_done(after, "<mark")
             || name_done(after, "</mark")
-            || (strip_bookmark
-                && (name_done(after, "<bookmark") || name_done(after, "</bookmark")));
+            || (is_edge
+                && (name_done(after, "<bookmark")
+                    || name_done(after, "</bookmark")
+                    || name_done(after, "<mstts:express-as")
+                    || name_done(after, "</mstts:express-as")));
         if drop {
             if let Some(end) = after.find('>') {
                 out.push_str(&rest[..pos]);
@@ -3615,6 +3623,20 @@ mod tests {
         assert_eq!(
             strip_unsupported_marks("roses <bookmark mark='f1'/> and", true),
             "roses  and"
+        );
+    }
+
+    #[test]
+    fn test_express_as_kept_for_azure_tags_dropped_for_edge() {
+        // SpeechMarkdown #[style] sections become mstts:express-as wrappers.
+        let styled = "<mstts:express-as style=\"angry\">I am angry!</mstts:express-as>";
+        assert_eq!(strip_unsupported_marks(styled, false), styled);
+        // Edge zero-audios on express-as; the tags go, the spoken text stays.
+        assert_eq!(strip_unsupported_marks(styled, true), "I am angry!");
+        // Sibling mstts elements are not touched.
+        assert_eq!(
+            strip_unsupported_marks("<mstts:backgroundaudio src='x'/>", true),
+            "<mstts:backgroundaudio src='x'/>"
         );
     }
 
