@@ -1275,6 +1275,7 @@ fn bundled_reference_wav(model_dir: &std::path::Path) -> Option<std::path::PathB
 /// Minimal RIFF/PCM wav reader for reference clips: 16-bit PCM mono only
 /// (the sherpa-onnx test wavs and typical cloning references are 16-bit
 /// mono; anything else errors clearly rather than being silently mangled).
+#[allow(clippy::cast_precision_loss)] // stereo downmix averages samples
 fn read_wav_mono_16bit(path: &std::path::Path) -> TtsResult<(Vec<f32>, i32)> {
     let bytes = std::fs::read(path)
         .map_err(|e| TtsError(format!("cannot read reference wav {}: {e}", path.display())))?;
@@ -1324,7 +1325,6 @@ fn read_wav_mono_16bit(path: &std::path::Path) -> TtsResult<(Vec<f32>, i32)> {
         // Downmix to mono by averaging channels (cloning references are
         // effectively mono anyway; sherpa-onnx expects a single channel).
         let frame_len = channels as usize;
-        #[allow(clippy::cast_precision_loss)] // averaging N mono samples
         samples = samples
             .chunks_exact(frame_len)
             .map(|fr| fr.iter().sum::<f32>() / frame_len as f32)
