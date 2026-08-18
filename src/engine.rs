@@ -48,7 +48,10 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
     }
 
     let platform = match platform {
-        "azure" => Platform::MicrosoftAzure,
+        // Edge speaks the Azure SSML dialect (same Speech platform; it is
+        // not an Alexa-family endpoint) — its free endpoint just lacks a
+        // few elements, which the engine boundary strips.
+        "azure" | "edge" => Platform::MicrosoftAzure,
         "google" => Platform::GoogleAssistant,
         _ => Platform::AmazonAlexa,
     };
