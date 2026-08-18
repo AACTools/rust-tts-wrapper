@@ -261,7 +261,11 @@ impl SherpaOnnxEngine {
             .reference_audio
             .clone()
             .or_else(|| bundled_reference_wav(model_dir));
-        if let Some(name) = wav.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+        if let Some(name) = wav
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
             if let Some((_, text)) = ZIPVOICE_TEST_WAV_TRANSCRIPTS
                 .iter()
                 .find(|(known, _)| *known == name)
@@ -1192,13 +1196,15 @@ fn build_zipvoice_config(
     base_dir: &std::path::Path,
 ) -> TtsResult<sherpa_onnx::OfflineTtsZipvoiceModelConfig> {
     let quant_onnx = |stem: &str| {
-        first_existing(model_dir, &[&format!("{stem}.int8.onnx"), &format!("{stem}.onnx")])
-            .map(|p| p.to_string_lossy().to_string())
+        first_existing(
+            model_dir,
+            &[&format!("{stem}.int8.onnx"), &format!("{stem}.onnx")],
+        )
+        .map(|p| p.to_string_lossy().to_string())
     };
 
-    let vocoder = first_existing(model_dir, &["vocos_24khz.onnx", "vocoder.onnx"]).or_else(|| {
-        first_existing(base_dir, &["vocos_24khz.onnx", "vocoder.onnx"])
-    });
+    let vocoder = first_existing(model_dir, &["vocos_24khz.onnx", "vocoder.onnx"])
+        .or_else(|| first_existing(base_dir, &["vocos_24khz.onnx", "vocoder.onnx"]));
     let vocoder = vocoder.ok_or_else(|| {
         TtsError(
             "Zipvoice requires the vocos_24khz.onnx vocoder, which is not bundled \
@@ -1280,7 +1286,9 @@ fn read_wav_mono_16bit(path: &std::path::Path) -> TtsResult<(Vec<f32>, i32)> {
     let bytes = std::fs::read(path)
         .map_err(|e| TtsError(format!("cannot read reference wav {}: {e}", path.display())))?;
     let rd = |off: usize| -> Option<u32> {
-        bytes.get(off..off + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+        bytes
+            .get(off..off + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
     };
     if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(TtsError(format!(
@@ -1912,8 +1920,14 @@ mod tests {
             .vocoder
             .as_deref()
             .is_some_and(|p| p.starts_with(base.path().to_str().unwrap())));
-        assert!(cfg.tokens.as_deref().is_some_and(|p| p.ends_with("tokens.txt")));
-        assert!(cfg.lexicon.as_deref().is_some_and(|p| p.ends_with("lexicon.txt")));
+        assert!(cfg
+            .tokens
+            .as_deref()
+            .is_some_and(|p| p.ends_with("tokens.txt")));
+        assert!(cfg
+            .lexicon
+            .as_deref()
+            .is_some_and(|p| p.ends_with("lexicon.txt")));
         assert!(cfg
             .data_dir
             .as_deref()
@@ -1992,7 +2006,10 @@ mod tests {
             .text_conditioner
             .as_deref()
             .is_some_and(|p| p.ends_with("text_conditioner.onnx")));
-        assert!(cfg.vocab_json.as_deref().is_some_and(|p| p.ends_with("vocab.json")));
+        assert!(cfg
+            .vocab_json
+            .as_deref()
+            .is_some_and(|p| p.ends_with("vocab.json")));
         assert!(cfg
             .token_scores_json
             .as_deref()
@@ -2012,8 +2029,14 @@ mod tests {
             std::fs::write(d.path().join(name), b"x").unwrap();
         }
         let cfg = build_pocket_config(d.path());
-        assert!(cfg.lm_flow.as_deref().is_some_and(|p| p.ends_with("lm_flow.onnx")));
-        assert!(cfg.decoder.as_deref().is_some_and(|p| p.ends_with("decoder.onnx")));
+        assert!(cfg
+            .lm_flow
+            .as_deref()
+            .is_some_and(|p| p.ends_with("lm_flow.onnx")));
+        assert!(cfg
+            .decoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("decoder.onnx")));
     }
 
     // ===== Reference-audio / wav reader =====
@@ -2082,9 +2105,7 @@ mod tests {
         assert!(text.contains("武汉大学"));
 
         // User transcript wins.
-        let engine = SherpaOnnxEngine::new(
-            r#"{"modelId":"x","referenceText":"custom words"}"#,
-        );
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"x","referenceText":"custom words"}"#);
         assert_eq!(
             engine.resolve_reference_text(d.path()).expect("override"),
             "custom words"
