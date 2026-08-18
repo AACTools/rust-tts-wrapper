@@ -1193,18 +1193,25 @@ fn normalize_ssml_envelope(ssml: &str, voice: &str) -> String {
     format!("{lead}{open}{}", &trimmed[tag_end + 1..])
 }
 
-/// Remove `<mark>` elements from an SSML document for Azure/Edge.
+/// Remove unsupported position-marking elements from an SSML document
+/// for Azure/Edge.
 ///
-/// Azure/Edge do not support the SSML `<mark>` element — an utterance
+/// Neither service supports the W3C SSML `<mark>` element — an utterance
 /// containing one synthesises **zero audio**, again with no error from
-/// the service. `<mark>` is an empty element (it only names a position),
-/// so dropping it changes no spoken content; consumers that need the
+/// the service. Azure proper documents its own `<bookmark mark=…>`
+/// replacement element, but the **free Edge endpoint zero-audios on
+/// `<bookmark>` too** (verified live), so Edge strips both while Azure
+/// keeps bookmarks. Both are empty elements (they only name a position),
+/// so dropping them changes no spoken content; consumers that need the
 /// positions should use word-boundary events. speech-dispatcher's
 /// wrapper injects `<mark name="__spd_N"/>` around every pause, so
 /// pass-through SSML from SSIP clients hits this constantly.
 #[cfg(feature = "cloud")]
-fn strip_unsupported_marks(ssml: &str) -> String {
-    if !ssml.contains("<mark") && !ssml.contains("</mark") {
+fn strip_unsupported_marks(ssml: &str, strip_bookmark: bool) -> String {
+    let has_marks = ssml.contains("<mark") || ssml.contains("</mark");
+    let has_bookmarks =
+        strip_bookmark && (ssml.contains("<bookmark") || ssml.contains("</bookmark"));
+    if !has_marks && !has_bookmarks {
         return ssml.to_string();
     }
     let mut out = String::with_capacity(ssml.len());
@@ -1216,7 +1223,11 @@ fn strip_unsupported_marks(ssml: &str) -> String {
             s.strip_prefix(prefix)
                 .is_some_and(|tail| tail.starts_with([' ', '\t', '\r', '\n', '/', '>']))
         };
-        if name_done(after, "<mark") || name_done(after, "</mark") {
+        let drop = name_done(after, "<mark")
+            || name_done(after, "</mark")
+            || (strip_bookmark
+                && (name_done(after, "<bookmark") || name_done(after, "</bookmark")));
+        if drop {
             if let Some(end) = after.find('>') {
                 out.push_str(&rest[..pos]);
                 rest = &after[end + 1..];
@@ -2003,11 +2014,16 @@ impl TtsEngine for CloudEngine {
             // XML-escape the tags). If the SSML lacks a <voice> tag but the
             // caller set one via tts_set_voice, inject it so the voice takes
             // effect. The envelope is completed first (a bare <speak> is
-            // accepted but synthesises zero audio) and unsupported <mark>
-            // elements are dropped (same silent zero-audio failure).
+            // accepted but synthesises zero audio) and unsupported position
+            // elements are dropped (<mark> on both; <bookmark> — Azure's own
+            // documented element — on Edge only, where it also zeroes audio).
+            let is_edge = self.config.provider_id == "edge";
             let ssml = if is_ssml {
                 inject_voice_if_missing(
-                    &strip_unsupported_marks(&normalize_ssml_envelope(&text, &voice_to_use)),
+                    &strip_unsupported_marks(
+                        &normalize_ssml_envelope(&text, &voice_to_use),
+                        is_edge,
+                    ),
                     &voice_to_use,
                 )
             } else {
@@ -2270,10 +2286,11 @@ impl TtsEngine for CloudEngine {
             // already SSML — send it directly (don't escape/wrap with
             // build_azure_ssml). Inject voice if the SSML lacks a <voice>
             // tag, after completing the envelope and dropping unsupported
-            // <mark> elements (both make Azure synthesise zero audio).
+            // <mark> elements (Azure accepts its documented <bookmark>
+            // here, so bookmarks are kept on this path).
             let ssml = if is_ssml {
                 inject_voice_if_missing(
-                    &strip_unsupported_marks(&normalize_ssml_envelope(&text, &voice_to_use)),
+                    &strip_unsupported_marks(&normalize_ssml_envelope(&text, &voice_to_use), false),
                     &voice_to_use,
                 )
             } else {
@@ -3555,11 +3572,11 @@ mod tests {
     fn test_strip_marks_removes_self_closing_and_paired() {
         // The exact shape speech-dispatcher wraps around pauses.
         assert_eq!(
-            strip_unsupported_marks("A <mark name=\"__spd_0\"/> B"),
+            strip_unsupported_marks("A <mark name=\"__spd_0\"/> B", false),
             "A  B"
         );
         assert_eq!(
-            strip_unsupported_marks("A <mark name='x'></mark> B"),
+            strip_unsupported_marks("A <mark name='x'></mark> B", false),
             "A  B"
         );
     }
@@ -3567,20 +3584,38 @@ mod tests {
     #[test]
     fn test_strip_marks_leaves_similar_names_and_text_alone() {
         assert_eq!(
-            strip_unsupported_marks("<market price='3'>"),
+            strip_unsupported_marks("<market price='3'>", false),
             "<market price='3'>"
         );
-        assert_eq!(strip_unsupported_marks("a < b"), "a < b");
-        assert_eq!(strip_unsupported_marks("<mark"), "<mark"); // unterminated
-        assert_eq!(strip_unsupported_marks("no marks here"), "no marks here");
+        assert_eq!(strip_unsupported_marks("a < b", false), "a < b");
+        assert_eq!(strip_unsupported_marks("<mark", false), "<mark"); // unterminated
+        assert_eq!(
+            strip_unsupported_marks("no marks here", false),
+            "no marks here"
+        );
     }
 
     #[test]
     fn test_strip_marks_full_speechd_document() {
         let ssml = "<speak>Hello <mark name=\"__spd_0\"/> world</speak>";
-        let stripped = strip_unsupported_marks(ssml);
+        let stripped = strip_unsupported_marks(ssml, false);
         assert!(!stripped.contains("mark"));
         assert_eq!(stripped, "<speak>Hello  world</speak>");
+    }
+
+    #[test]
+    fn test_bookmark_kept_for_azure_stripped_for_edge() {
+        // Azure documents <bookmark mark=…> and accepts it …
+        assert_eq!(
+            strip_unsupported_marks("roses <bookmark mark='f1'/> and", false),
+            "roses <bookmark mark='f1'/> and"
+        );
+        // … but the free Edge endpoint synthesises zero audio for it, so
+        // the Edge path strips it too (verified live).
+        assert_eq!(
+            strip_unsupported_marks("roses <bookmark mark='f1'/> and", true),
+            "roses  and"
+        );
     }
 
     // ===== inject_voice_if_missing =====
