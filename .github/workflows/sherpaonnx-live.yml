@@ -48,7 +48,10 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/icefall-en-ljspeech
             ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8
             ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
+            ~/.rust-tts-wrapper/sherpaonnx/zipvoice-zh_en-emilia-distill-int8
+            ~/.rust-tts-wrapper/sherpaonnx/kyutai-en-pocket-tts-int8
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
+            ~/.rust-tts-wrapper/sherpaonnx/vocos_24khz.onnx
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/models.json') }}
           restore-keys: |
             sherpa-models-${{ matrix.os }}-
@@ -155,6 +158,61 @@ jobs:
           tar -xjf supertonic.tar.bz2 -C supertonic-3-multilingual --strip-components=1
           rm supertonic.tar.bz2
           ls -la supertonic-3-multilingual/
+
+      - name: Download vocos vocoder (vocos_24khz.onnx)
+        # Zipvoice needs the vocos vocoder in the base model dir; it is not
+        # bundled with the model (same shared-vocoder pattern as Matcha).
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -f "vocos_24khz.onnx" ]; then
+            echo "vocos_24khz.onnx already present"
+            exit 0
+          fi
+          echo "Downloading vocos_24khz.onnx"
+          curl -fsSL -o vocos_24khz.onnx \
+            https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx
+          ls -la vocos_24khz.onnx
+
+      - name: Download Zipvoice test model (zipvoice-zh_en-emilia-distill-int8)
+        # Zero-shot zh+en cloning (~104 MB). Linux-only like Supertonic.
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -d "zipvoice-zh_en-emilia-distill-int8" ] && [ -n "$(ls -A zipvoice-zh_en-emilia-distill-int8 2>/dev/null)" ]; then
+            echo "zipvoice already present"
+            exit 0
+          fi
+          URL=$(get-model-url.py zipvoice-zh_en-emilia-distill-int8)
+          echo "Downloading $URL"
+          curl -fsSL -o zipvoice.tar.bz2 "$URL"
+          mkdir -p zipvoice-zh_en-emilia-distill-int8
+          tar -xjf zipvoice.tar.bz2 -C zipvoice-zh_en-emilia-distill-int8 --strip-components=1
+          rm zipvoice.tar.bz2
+          ls -la zipvoice-zh_en-emilia-distill-int8/ | head -5
+
+      - name: Download Pocket test model (kyutai-en-pocket-tts-int8)
+        # Zero-shot en cloning (~94 MB). Linux-only like Supertonic.
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ -d "kyutai-en-pocket-tts-int8" ] && [ -n "$(ls -A kyutai-en-pocket-tts-int8 2>/dev/null)" ]; then
+            echo "pocket already present"
+            exit 0
+          fi
+          URL=$(get-model-url.py kyutai-en-pocket-tts-int8)
+          echo "Downloading $URL"
+          curl -fsSL -o pocket.tar.bz2 "$URL"
+          mkdir -p kyutai-en-pocket-tts-int8
+          tar -xjf pocket.tar.bz2 -C kyutai-en-pocket-tts-int8 --strip-components=1
+          rm pocket.tar.bz2
+          ls -la kyutai-en-pocket-tts-int8/ | head -5
 
       - name: Run live SherpaOnnx tests
         shell: bash

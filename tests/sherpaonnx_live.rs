@@ -19,13 +19,17 @@
 //!   matcha     — icefall-en-ljspeech      (~73 MB)  Matcha-TTS English (LJSpeech)
 //!   kokoro     — kokoro-zh_en-int8  (~140 MB) Kokoro multilingual (Linux CI only)
 //!   supertonic — supertonic-3-multilingual (~123 MB) Supertonic 3 (31 langs, Linux CI only)
+//!   zipvoice   — zipvoice-zh_en-emilia-distill-int8 (~104 MB) zero-shot cloning
+//!                (zh+en, Linux CI only; needs vocos_24khz.onnx in the base dir)
+//!   pocket     — kyutai-en-pocket-tts-int8 (~94 MB) zero-shot cloning (en,
+//!                Linux CI only)
 //!
 //! Matcha models need a separate vocoder (`hifigan_v2.onnx`) in the base
 //! model dir; the workflow downloads it. See `build_matcha_config` for the
-//! fallback search.
+//! fallback search. Zipvoice likewise needs `vocos_24khz.onnx`.
 //!
 //! Override with `SHERPA_VITS_MODEL`, `SHERPA_MATCHA_MODEL`, `SHERPA_KOKORO_MODEL`,
-//! `SHERPA_SUPERTONIC_MODEL`.
+//! `SHERPA_SUPERTONIC_MODEL`, `SHERPA_ZIPVOICE_MODEL`, `SHERPA_POCKET_MODEL`.
 
 #![allow(clippy::all, clippy::pedantic, clippy::float_cmp)]
 
@@ -647,4 +651,97 @@ fn pitch_shift_changes_sample_count() {
         normal, shifted,
         "pitch=2.0 ({shifted} bytes) must differ from pitch=1.0 ({normal} bytes)"
     );
+}
+
+// ===== Zero-shot voice cloning — Zipvoice / PocketTTS =====
+//
+// Both model families clone a voice from a reference clip bundled under
+// test_wavs/ (no credentials needed); zipvoice additionally needs the clip's
+// exact transcript, which the engine resolves from a known-transcript table.
+
+#[test]
+#[ignore]
+fn zipvoice_clones_bundled_reference_voice() {
+    let id = model_id(
+        "SHERPA_ZIPVOICE_MODEL",
+        "zipvoice-zh_en-emilia-distill-int8",
+    );
+    skip_if_missing!(id);
+    let engine = engine_for(&id);
+    let total = Arc::new(Mutex::new(0usize));
+    let t = total.clone();
+    let mut cb = move |c: &[u8]| {
+        *t.lock().unwrap() += c.len();
+    };
+    engine
+        .speak(
+            "Zipvoice zero-shot cloning check.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+        )
+        .expect("zipvoice speak");
+    assert!(*total.lock().unwrap() > 0, "zipvoice produced no audio");
+}
+
+#[test]
+#[ignore]
+fn zipvoice_reference_transcript_override() {
+    // An explicit referenceText credential must reach the model: synthesise
+    // with the bundled clip + a user transcript and confirm audio still
+    // flows (the transcript changes the clone, not the ability to speak).
+    let id = model_id(
+        "SHERPA_ZIPVOICE_MODEL",
+        "zipvoice-zh_en-emilia-distill-int8",
+    );
+    skip_if_missing!(id);
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let model_dir = std::path::PathBuf::from(&home)
+        .join(".rust-tts-wrapper")
+        .join("sherpaonnx")
+        .join(&id)
+        .join("test_wavs")
+        .join("leijun-1.wav");
+    let creds = format!(
+        r#"{{"modelId":"{id}","referenceAudio":"{}","referenceText":"那还是三十六年前, 一九八七年."}}"#,
+        model_dir.display()
+    );
+    let engine = create_engine("sherpaonnx", &creds).expect("engine");
+    let total = Arc::new(Mutex::new(0usize));
+    let t = total.clone();
+    let mut cb = move |c: &[u8]| {
+        *t.lock().unwrap() += c.len();
+    };
+    engine
+        .speak("Override check.", None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .expect("zipvoice speak with overridden reference");
+    assert!(*total.lock().unwrap() > 0);
+}
+
+#[test]
+#[ignore]
+fn pocket_synthesises_with_bundled_reference() {
+    let id = model_id("SHERPA_POCKET_MODEL", "kyutai-en-pocket-tts-int8");
+    skip_if_missing!(id);
+    let engine = engine_for(&id);
+    let total = Arc::new(Mutex::new(0usize));
+    let t = total.clone();
+    let mut cb = move |c: &[u8]| {
+        *t.lock().unwrap() += c.len();
+    };
+    engine
+        .speak(
+            "PocketTTS zero-shot cloning check.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+        )
+        .expect("pocket speak");
+    assert!(*total.lock().unwrap() > 0, "pocket produced no audio");
 }

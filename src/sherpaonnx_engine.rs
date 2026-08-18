@@ -102,6 +102,14 @@ pub struct SherpaOnnxEngine {
     /// Supertonic denoising step count (quality knob: 5 low → 12 high,
     /// default 8). Ignored by other model types.
     num_steps: i32,
+    /// Optional user-supplied reference clip (path to a 16-bit PCM wav) for
+    /// zero-shot voice-cloning models (zipvoice, pocket). When absent the
+    /// first bundled `test_wavs/*.wav` is used.
+    reference_audio: Option<PathBuf>,
+    /// Transcript matching [`Self::reference_audio`] — required by zipvoice
+    /// (its bundled test wavs have known transcripts). Ignored by pocket,
+    /// which clones from audio alone.
+    reference_text: Option<String>,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -136,6 +144,11 @@ impl SherpaOnnxEngine {
     /// - `numThreads`: ONNX runtime intra-op thread count (default 2).
     /// - `numSteps`: Supertonic denoising steps, 5–12 (default 8). Out-of-range
     ///   values fall back to 8. Ignored by non-Supertonic models.
+    /// - `referenceAudio`: path to a 16-bit PCM wav used as the cloning
+    ///   reference for zero-shot models (zipvoice, pocket). Defaults to the
+    ///   model's bundled `test_wavs/` clip.
+    /// - `referenceText`: transcript of `referenceAudio` (zipvoice requires
+    ///   it to match the audio exactly; pocket ignores it).
     /// - `provider`: `cpu` (default), `coreml`, `cuda`, `directml`, etc.
     #[must_use]
     pub fn new(credentials_json: &str) -> Self {
@@ -144,6 +157,8 @@ impl SherpaOnnxEngine {
         let mut num_threads = 2;
         let mut num_steps = 8;
         let mut provider: Option<String> = None;
+        let mut reference_audio: Option<PathBuf> = None;
+        let mut reference_text: Option<String> = None;
 
         if !credentials_json.is_empty() {
             // Numeric values are coerced to strings so callers can write
@@ -185,6 +200,16 @@ impl SherpaOnnxEngine {
                         provider = Some(p.clone());
                     }
                 }
+                if let Some(r) = creds.get("referenceAudio") {
+                    if !r.is_empty() {
+                        reference_audio = Some(PathBuf::from(r));
+                    }
+                }
+                if let Some(t) = creds.get("referenceText") {
+                    if !t.is_empty() {
+                        reference_text = Some(t.clone());
+                    }
+                }
             }
         }
 
@@ -197,6 +222,8 @@ impl SherpaOnnxEngine {
             num_threads,
             num_steps,
             provider,
+            reference_audio,
+            reference_text,
             tts_instance: Mutex::new(None),
         }
     }
@@ -204,6 +231,54 @@ impl SherpaOnnxEngine {
     /// Return the map of available models from the registry.
     pub fn available_models(&self) -> &HashMap<String, SherpaModelInfo> {
         &self.models
+    }
+
+    /// Resolve the reference clip for zero-shot cloning models: the
+    /// user-supplied `referenceAudio` credentials path wins, else the first
+    /// wav bundled under the model's `test_wavs/`.
+    fn resolve_reference_audio(&self, model_dir: &std::path::Path) -> TtsResult<(Vec<f32>, i32)> {
+        let wav = match &self.reference_audio {
+            Some(p) => p.clone(),
+            None => bundled_reference_wav(model_dir).ok_or_else(|| {
+                TtsError(format!(
+                    "no reference audio for zero-shot cloning: pass a 'referenceAudio' \
+                     path in credentials, or bundle a wav under {}/test_wavs/",
+                    model_dir.display()
+                ))
+            })?,
+        };
+        read_wav_mono_16bit(&wav)
+    }
+
+    /// Resolve the reference transcript (zipvoice only): the
+    /// user-supplied `referenceText` credential wins, else the known
+    /// transcript for a bundled sherpa-onnx test wav.
+    fn resolve_reference_text(&self, model_dir: &std::path::Path) -> TtsResult<String> {
+        if let Some(t) = &self.reference_text {
+            return Ok(t.clone());
+        }
+        let wav = self
+            .reference_audio
+            .clone()
+            .or_else(|| bundled_reference_wav(model_dir));
+        if let Some(name) = wav
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+        {
+            if let Some((_, text)) = ZIPVOICE_TEST_WAV_TRANSCRIPTS
+                .iter()
+                .find(|(known, _)| *known == name)
+            {
+                return Ok(text.to_string());
+            }
+        }
+        Err(TtsError(
+            "zipvoice requires the reference clip's exact transcript: pass \
+             'referenceText' in credentials (it must match 'referenceAudio' \
+             verbatim — a mismatch audibly degrades the clone)"
+                .into(),
+        ))
     }
 }
 
@@ -356,6 +431,13 @@ impl TtsEngine for SherpaOnnxEngine {
         //             Piper / GitHub models prefer espeak-ng-data and ignore
         //             dict_dir; Chinese models want a dict/ directory for
         //             jieba segmentation.
+        //   zipvoice→ encoder/decoder .onnx (int8 variants preferred) +
+        //             tokens.txt + lexicon.txt + espeak-ng-data/ + a shared
+        //             vocos_24khz.onnx vocoder (base dir). Zero-shot cloning:
+        //             speak() needs a reference clip + its transcript.
+        //   pocket  → lm_flow/lm_main/encoder/decoder/text_conditioner .onnx
+        //             (int8 where shipped) + vocab.json + token_scores.json.
+        //             Zero-shot cloning from a reference clip alone.
         //   mms /   → MMS models use the VITS config but typically have no
         //   unknown   espeak-ng-data; they ship just model.onnx + tokens.txt
         //             + lexicon.txt.
@@ -410,6 +492,20 @@ impl TtsEngine for SherpaOnnxEngine {
                 provider: self.provider.clone(),
                 ..Default::default()
             },
+            "zipvoice" => sherpa_onnx::OfflineTtsModelConfig {
+                zipvoice: build_zipvoice_config(&model_dir, &self.model_dir)?,
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
+            "pocket" => sherpa_onnx::OfflineTtsModelConfig {
+                pocket: build_pocket_config(&model_dir),
+                num_threads: self.num_threads,
+                debug: false,
+                provider: self.provider.clone(),
+                ..Default::default()
+            },
             // VITS, MMS (Facebook Massively Multilingual Speech), and unknown
             // model types all use the VITS config family.
             "vits" | "mms" | "unknown" | "" => sherpa_onnx::OfflineTtsModelConfig {
@@ -451,6 +547,10 @@ impl TtsEngine for SherpaOnnxEngine {
         // delivered through GenerationConfig.extra. We encode both in the
         // voice id as "sid:lang" (produced by get_voices), and fall back to a
         // bare integer + default "en" for backwards compatibility.
+        //
+        // Zipvoice / pocket are zero-shot cloning models: instead of a preset
+        // speaker they need a reference clip (and, for zipvoice, its exact
+        // transcript) delivered through GenerationConfig.
         let gen_config = if model_info.model_type == "supertonic" {
             let (sid, lang) = parse_supertonic_voice(voice);
             let mut extra = HashMap::new();
@@ -460,6 +560,28 @@ impl TtsEngine for SherpaOnnxEngine {
                 speed: rate.max(0.1),
                 num_steps: self.num_steps,
                 extra: Some(extra),
+                ..Default::default()
+            }
+        } else if model_info.model_type == "zipvoice" || model_info.model_type == "pocket" {
+            let (ref_samples, ref_rate) = self.resolve_reference_audio(&model_dir)?;
+            let reference_text = if model_info.model_type == "zipvoice" {
+                Some(self.resolve_reference_text(&model_dir)?)
+            } else {
+                None
+            };
+            // Flow-matching step counts from the sherpa-onnx docs: zipvoice
+            // defaults to 4, pocket to 2 (higher = better quality, slower).
+            let num_steps = if model_info.model_type == "zipvoice" {
+                4
+            } else {
+                2
+            };
+            sherpa_onnx::GenerationConfig {
+                speed: rate.max(0.1),
+                num_steps,
+                reference_audio: Some(ref_samples),
+                reference_sample_rate: ref_rate,
+                reference_text,
                 ..Default::default()
             }
         } else {
@@ -1061,6 +1183,171 @@ fn build_supertonic_config(
     }
 }
 
+/// Zipvoice config: encoder + decoder (int8 variants preferred) + tokens +
+/// lexicon + espeak-ng-data, plus the shared `vocos_24khz.onnx` vocoder.
+///
+/// The vocoder is *not* bundled in the zipvoice archive — it lives in the
+/// separate `vocoder-models` release, so it's resolved from the model dir
+/// first (custom layouts) then the user's base model dir (the same
+/// shared-vocoder convention as Matcha). A missing vocoder is a hard error
+/// with the download URL rather than a sherpa-onnx create() panic.
+fn build_zipvoice_config(
+    model_dir: &std::path::Path,
+    base_dir: &std::path::Path,
+) -> TtsResult<sherpa_onnx::OfflineTtsZipvoiceModelConfig> {
+    let quant_onnx = |stem: &str| {
+        first_existing(
+            model_dir,
+            &[&format!("{stem}.int8.onnx"), &format!("{stem}.onnx")],
+        )
+        .map(|p| p.to_string_lossy().to_string())
+    };
+
+    let vocoder = first_existing(model_dir, &["vocos_24khz.onnx", "vocoder.onnx"])
+        .or_else(|| first_existing(base_dir, &["vocos_24khz.onnx", "vocoder.onnx"]));
+    let vocoder = vocoder.ok_or_else(|| {
+        TtsError(
+            "Zipvoice requires the vocos_24khz.onnx vocoder, which is not bundled \
+             with the model. Download it into {} from:\n  \
+             https://github.com/k2-fsa/sherpa-onnx/releases/download/vocoder-models/vocos_24khz.onnx"
+                .replace("{}", &base_dir.display().to_string()),
+        )
+    })?;
+
+    Ok(sherpa_onnx::OfflineTtsZipvoiceModelConfig {
+        tokens: existing_path(model_dir, "tokens.txt"),
+        encoder: quant_onnx("encoder"),
+        decoder: quant_onnx("decoder"),
+        vocoder: Some(vocoder.to_string_lossy().to_string()),
+        data_dir: existing_path(model_dir, "espeak-ng-data"),
+        lexicon: existing_path(model_dir, "lexicon.txt"),
+        // feat_scale / t_shift / target_rms / guidance_scale: 0.0 makes the
+        // C API fall back to the model's trained defaults (same behaviour as
+        // the sherpa-onnx CLI, which leaves them unset).
+        ..Default::default()
+    })
+}
+
+/// Pocket config: five ONNX components + two JSON sidecars. Only `decoder`,
+/// `lm_flow`, and `lm_main` ship int8 variants in the quantised build —
+/// `encoder` and `text_conditioner` are always plain `.onnx`.
+fn build_pocket_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsPocketModelConfig {
+    let component = |stems: &[&str]| {
+        stems
+            .iter()
+            .find_map(|s| first_existing(model_dir, &[s]))
+            .map(|p| p.to_string_lossy().to_string())
+    };
+    sherpa_onnx::OfflineTtsPocketModelConfig {
+        lm_flow: component(&["lm_flow.int8.onnx", "lm_flow.onnx"]),
+        lm_main: component(&["lm_main.int8.onnx", "lm_main.onnx"]),
+        encoder: component(&["encoder.int8.onnx", "encoder.onnx"]),
+        decoder: component(&["decoder.int8.onnx", "decoder.onnx"]),
+        text_conditioner: component(&["text_conditioner.int8.onnx", "text_conditioner.onnx"]),
+        vocab_json: existing_path(model_dir, "vocab.json"),
+        token_scores_json: existing_path(model_dir, "token_scores.json"),
+        ..Default::default()
+    }
+}
+
+/// Exact transcripts for the reference wavs bundled in the sherpa-onnx
+/// zero-shot archives (from the sherpa-onnx docs — zipvoice requires the
+/// transcript to match the audio, a mismatch audibly degrades the clone).
+const ZIPVOICE_TEST_WAV_TRANSCRIPTS: &[(&str, &str)] = &[(
+    "leijun-1.wav",
+    "那还是三十六年前, 一九八七年. 我呢考上了武汉大学的计算机系.",
+)];
+
+fn bundled_reference_wav(model_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    for sub in ["test_wavs", "."] {
+        let dir = model_dir.join(sub);
+        if dir.is_dir() {
+            let mut wavs: Vec<_> = std::fs::read_dir(&dir)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")))
+                .collect();
+            wavs.sort();
+            if let Some(first) = wavs.first() {
+                return Some(first.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Minimal RIFF/PCM wav reader for reference clips: 16-bit PCM mono only
+/// (the sherpa-onnx test wavs and typical cloning references are 16-bit
+/// mono; anything else errors clearly rather than being silently mangled).
+#[allow(clippy::cast_precision_loss)] // stereo downmix averages samples
+fn read_wav_mono_16bit(path: &std::path::Path) -> TtsResult<(Vec<f32>, i32)> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| TtsError(format!("cannot read reference wav {}: {e}", path.display())))?;
+    let rd = |off: usize| -> Option<u32> {
+        bytes
+            .get(off..off + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+    };
+    if bytes.len() < 44 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(TtsError(format!(
+            "{} is not a RIFF/WAVE file",
+            path.display()
+        )));
+    }
+    // Walk chunks for fmt (format + rate) and data (samples).
+    let (mut format, mut channels, mut rate, mut bits) = (0u16, 0u16, 0i32, 0u16);
+    let mut samples: Vec<f32> = Vec::new();
+    let mut off = 12;
+    while off + 8 <= bytes.len() {
+        let id = &bytes[off..off + 4];
+        let len = rd(off + 4).unwrap_or(0) as usize;
+        let body = off + 8;
+        match id {
+            b"fmt " if len >= 16 => {
+                format = u16::from_le_bytes(bytes[body..body + 2].try_into().unwrap());
+                channels = u16::from_le_bytes(bytes[body + 2..body + 4].try_into().unwrap());
+                rate = rd(body + 4).unwrap_or(0) as i32;
+                bits = u16::from_le_bytes(bytes[body + 14..body + 16].try_into().unwrap());
+            }
+            b"data" => {
+                let end = (body + len).min(bytes.len());
+                samples = bytes[body..end]
+                    .chunks_exact(2)
+                    .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+                    .collect();
+            }
+            _ => {}
+        }
+        off = body + len + (len & 1); // chunks are word-aligned
+    }
+    if format != 1 || bits != 16 {
+        return Err(TtsError(format!(
+            "{}: only 16-bit PCM reference wavs are supported (got format {format}, {bits}-bit). \
+             Convert with e.g. `ffmpeg -i in.mp3 -ac 1 -ar 24000 -c:a pcm_s16le out.wav`.",
+            path.display()
+        )));
+    }
+    if channels > 1 {
+        // Downmix to mono by averaging channels (cloning references are
+        // effectively mono anyway; sherpa-onnx expects a single channel).
+        let frame_len = channels as usize;
+        samples = samples
+            .chunks_exact(frame_len)
+            .map(|fr| fr.iter().sum::<f32>() / frame_len as f32)
+            .collect();
+    }
+    if samples.is_empty() || rate == 0 {
+        return Err(TtsError(format!(
+            "{}: wav has no usable samples (rate {rate}, {} samples)",
+            path.display(),
+            samples.len()
+        )));
+    }
+    Ok((samples, rate))
+}
+
 /// Parse a Supertonic voice id of the form `"sid:lang"` (e.g. `"6:ja"`)
 /// into a `(speaker_id, language_code)` pair. A bare integer (`"6"`) is
 /// accepted for backwards compatibility and defaults the language to `"en"`;
@@ -1593,6 +1880,243 @@ mod tests {
         assert!(cfg.tts_json.is_none());
         assert!(cfg.unicode_indexer.is_none());
         assert!(cfg.voice_style.is_none());
+    }
+
+    // ===== Zipvoice / pocket config builders =====
+
+    /// Temp dir resembling the extracted zipvoice distill-int8 archive,
+    /// plus a base dir holding the shared vocos vocoder.
+    fn fake_zipvoice_dirs() -> (tempfile::TempDir, tempfile::TempDir) {
+        let model = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        for name in [
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "encoder.onnx",
+            "decoder.onnx",
+            "tokens.txt",
+            "lexicon.txt",
+        ] {
+            std::fs::write(model.path().join(name), b"x").unwrap();
+        }
+        std::fs::create_dir(model.path().join("espeak-ng-data")).unwrap();
+        std::fs::write(base.path().join("vocos_24khz.onnx"), b"x").unwrap();
+        (model, base)
+    }
+
+    #[test]
+    fn test_build_zipvoice_config_prefers_int8_and_shared_vocoder() {
+        let (model, base) = fake_zipvoice_dirs();
+        let cfg = build_zipvoice_config(model.path(), base.path()).expect("config");
+        assert!(cfg
+            .encoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("encoder.int8.onnx")));
+        assert!(cfg
+            .decoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("decoder.int8.onnx")));
+        assert!(cfg
+            .vocoder
+            .as_deref()
+            .is_some_and(|p| p.starts_with(base.path().to_str().unwrap())));
+        assert!(cfg
+            .tokens
+            .as_deref()
+            .is_some_and(|p| p.ends_with("tokens.txt")));
+        assert!(cfg
+            .lexicon
+            .as_deref()
+            .is_some_and(|p| p.ends_with("lexicon.txt")));
+        assert!(cfg
+            .data_dir
+            .as_deref()
+            .is_some_and(|p| p.ends_with("espeak-ng-data")));
+    }
+
+    #[test]
+    fn test_build_zipvoice_config_falls_back_to_plain_onnx() {
+        // Unquantised archive (fp32 build): plain encoder/decoder must win.
+        let (model, base) = fake_zipvoice_dirs();
+        std::fs::remove_file(model.path().join("encoder.int8.onnx")).unwrap();
+        std::fs::remove_file(model.path().join("decoder.int8.onnx")).unwrap();
+        let cfg = build_zipvoice_config(model.path(), base.path()).expect("config");
+        assert!(cfg
+            .encoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("encoder.onnx")));
+        assert!(cfg
+            .decoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("decoder.onnx")));
+    }
+
+    #[test]
+    fn test_build_zipvoice_config_missing_vocoder_errors_with_url() {
+        // The vocos vocoder is never bundled — a clear error beats a
+        // sherpa-onnx create() failure deep in the C++ runtime.
+        let (model, base) = fake_zipvoice_dirs();
+        std::fs::remove_file(base.path().join("vocos_24khz.onnx")).unwrap();
+        let err = build_zipvoice_config(model.path(), base.path()).unwrap_err();
+        assert!(err.0.contains("vocos_24khz.onnx"));
+        assert!(err.0.contains("vocoder-models"));
+    }
+
+    /// Temp dir resembling the pocket-tts int8 archive: only decoder,
+    /// lm_flow, and lm_main are quantised; encoder + text_conditioner are
+    /// plain .onnx even in the int8 build.
+    fn fake_pocket_int8_dir() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        for name in [
+            "lm_flow.int8.onnx",
+            "lm_main.int8.onnx",
+            "encoder.onnx",
+            "decoder.int8.onnx",
+            "text_conditioner.onnx",
+            "vocab.json",
+            "token_scores.json",
+        ] {
+            std::fs::write(d.path().join(name), b"x").unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn test_build_pocket_config_int8_layout() {
+        let d = fake_pocket_int8_dir();
+        let cfg = build_pocket_config(d.path());
+        assert!(cfg
+            .lm_flow
+            .as_deref()
+            .is_some_and(|p| p.ends_with("lm_flow.int8.onnx")));
+        assert!(cfg
+            .lm_main
+            .as_deref()
+            .is_some_and(|p| p.ends_with("lm_main.int8.onnx")));
+        assert!(cfg
+            .decoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("decoder.int8.onnx")));
+        // Never quantised upstream — the plain files must be picked.
+        assert!(cfg
+            .encoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("encoder.onnx") && !p.contains("int8")));
+        assert!(cfg
+            .text_conditioner
+            .as_deref()
+            .is_some_and(|p| p.ends_with("text_conditioner.onnx")));
+        assert!(cfg
+            .vocab_json
+            .as_deref()
+            .is_some_and(|p| p.ends_with("vocab.json")));
+        assert!(cfg
+            .token_scores_json
+            .as_deref()
+            .is_some_and(|p| p.ends_with("token_scores.json")));
+    }
+
+    #[test]
+    fn test_build_pocket_config_fp32_layout() {
+        let d = tempfile::tempdir().unwrap();
+        for name in [
+            "lm_flow.onnx",
+            "lm_main.onnx",
+            "encoder.onnx",
+            "decoder.onnx",
+            "text_conditioner.onnx",
+        ] {
+            std::fs::write(d.path().join(name), b"x").unwrap();
+        }
+        let cfg = build_pocket_config(d.path());
+        assert!(cfg
+            .lm_flow
+            .as_deref()
+            .is_some_and(|p| p.ends_with("lm_flow.onnx")));
+        assert!(cfg
+            .decoder
+            .as_deref()
+            .is_some_and(|p| p.ends_with("decoder.onnx")));
+    }
+
+    // ===== Reference-audio / wav reader =====
+
+    #[test]
+    fn test_read_wav_mono_16bit_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("ref.wav");
+        let samples = vec![0.0_f32, 0.25, -0.25, 0.5, -0.5];
+        write_wav(&p, &samples, 24000);
+        let (read, rate) = read_wav_mono_16bit(&p).expect("reads back");
+        assert_eq!(rate, 24000);
+        assert_eq!(read.len(), samples.len());
+        for (a, b) in read.iter().zip(samples.iter()) {
+            assert!((a - b).abs() < 0.001, "sample drifted: {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn test_read_wav_rejects_non_pcm16() {
+        // Hand-roll a fmt chunk claiming 32-bit float (format 3).
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&36u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&3u16.to_le_bytes()); // IEEE float
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // mono
+        bytes.extend_from_slice(&24000u32.to_le_bytes());
+        bytes.extend_from_slice(&48000u32.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&32u16.to_le_bytes()); // 32-bit
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("f32.wav");
+        std::fs::write(&p, bytes).unwrap();
+        let err = read_wav_mono_16bit(&p).unwrap_err();
+        assert!(err.0.contains("16-bit PCM"));
+    }
+
+    #[test]
+    fn test_bundled_reference_wav_prefers_test_wavs_sorted() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(bundled_reference_wav(d.path()).is_none());
+        std::fs::create_dir(d.path().join("test_wavs")).unwrap();
+        std::fs::write(d.path().join("test_wavs/b.wav"), b"x").unwrap();
+        std::fs::write(d.path().join("test_wavs/a.wav"), b"x").unwrap();
+        std::fs::write(d.path().join("loose.wav"), b"x").unwrap();
+        let wav = bundled_reference_wav(d.path()).expect("found");
+        // Sorted order: a.wav before b.wav, and test_wavs/ wins over loose.
+        assert!(wav.ends_with("test_wavs/a.wav"));
+    }
+
+    #[test]
+    fn test_resolve_reference_text_bundled_transcript_and_overrides() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("test_wavs")).unwrap();
+        std::fs::write(d.path().join("test_wavs/leijun-1.wav"), b"x").unwrap();
+
+        // Known bundled wav → known transcript, no credentials needed.
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"zipvoice-zh_en-emilia-distill-int8"}"#);
+        let text = engine.resolve_reference_text(d.path()).expect("transcript");
+        assert!(text.contains("武汉大学"));
+
+        // User transcript wins.
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"x","referenceText":"custom words"}"#);
+        assert_eq!(
+            engine.resolve_reference_text(d.path()).expect("override"),
+            "custom words"
+        );
+
+        // Unknown wav + no override → actionable error.
+        std::fs::write(d.path().join("test_wavs/mystery.wav"), b"x").unwrap();
+        std::fs::remove_file(d.path().join("test_wavs/leijun-1.wav")).unwrap();
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"x"}"#);
+        let err = engine.resolve_reference_text(d.path()).unwrap_err();
+        assert!(err.0.contains("referenceText"));
     }
 
     #[test]
