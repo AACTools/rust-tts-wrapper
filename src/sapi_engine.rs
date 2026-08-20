@@ -466,6 +466,7 @@ impl TtsEngine for SapiEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         self.speak(
             text,
@@ -475,7 +476,7 @@ impl TtsEngine for SapiEngine {
             volume,
             on_audio,
             on_boundary,
-            _on_mark,
+            on_mark,
         )
     }
 
