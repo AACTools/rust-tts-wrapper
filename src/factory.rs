@@ -24,6 +24,7 @@ use crate::system_engine::SystemEngine;
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
 #[must_use]
 #[allow(unused_variables)]
+#[allow(clippy::too_many_lines)]
 pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
     // Detect engines that exist in the full catalogue but were compiled out
     // by disabled features, so callers get a useful error rather than a

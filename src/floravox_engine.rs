@@ -21,9 +21,9 @@
 
 use crate::engine::TtsEngine;
 use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
-use floravox_core::synth::{StreamingSynthesis, Synthesizer};
-use floravox_core::VoiceBackend;
+use floravox_core::synth::{CharFrontend, MisakiPrePass, StreamingSynthesis, Synthesizer};
 use floravox_core::SynthesisEvent;
+use floravox_core::VoiceBackend;
 use floravox_g2p::{
     Byt5G2p, CachedPhonemizer, ChainedFallback, FstLexicon, LexiconPhonemizer, OovFallback,
     PhonetisaurusG2p, RuleFallback,
@@ -52,6 +52,15 @@ struct Config {
     phonetisaurus: Option<PathBuf>,
     byt5_encoder: Option<PathBuf>,
     byt5_decoder: Option<PathBuf>,
+    /// "us" | "gb": document-level misaki pre-pass (English).
+    misaki: Option<String>,
+    /// Character-level frontend for MMS-style voices, with optional
+    /// uroman romanization ("true" | an ISO 639-3 code).
+    chars: Option<String>,
+    /// ISO language code: with the floravox-lexicons feature, resolves
+    /// the published lexicon bundle for the voice's language when no
+    /// explicit lexicon is configured.
+    lang: Option<String>,
 }
 
 impl Config {
@@ -74,6 +83,18 @@ impl Config {
             phonetisaurus: get("phonetisaurus"),
             byt5_encoder: get("byt5Encoder"),
             byt5_decoder: get("byt5Decoder"),
+            misaki: v
+                .get("misaki")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            chars: v
+                .get("chars")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            lang: v
+                .get("lang")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         }
     }
 }
@@ -97,6 +118,15 @@ pub struct FloravoxEngine {
     phonetisaurus: Option<PathBuf>,
     byt5_encoder: Option<PathBuf>,
     byt5_decoder: Option<PathBuf>,
+    /// "us" | "gb" — document-level misaki pre-pass (English voices).
+    misaki: Option<String>,
+    /// Character-level frontend (MMS voices); the string is an optional
+    /// ISO 639-3 code for uroman language-specific rules, "" for plain
+    /// romanization, or the value "true" for plain lowercasing only.
+    chars: Option<String>,
+    /// Voice language (BCP-47 or ISO code); with `floravox-lexicons`,
+    /// resolves the published bundle when no explicit lexicon is set.
+    lang: Option<String>,
     /// Set by `stop()`; the streaming pump drops its channels in response,
     /// which cancels the synthesis worker within one poll interval.
     cancel: Arc<AtomicBool>,
@@ -124,11 +154,21 @@ impl FloravoxEngine {
     ///   pair) holding `X.onnx` + `X.onnx.json`.
     /// - `modelId`: voice to load (directory or file stem). Voices are also
     ///   selectable per-call via `speak(voice = Some(...))`.
-    /// - `lexicon`: compiled FST lexicon stem (`stem.fst` + `stem.pho`,
-    ///   from `floravox-fst-compile`).
+    /// - `lexicon`: compiled FST lexicon stem (`stem.fst` + `stem.pho`;
+    ///   from `floravox-fst-compile` or a voicegarden-lexicons bundle).
     /// - `phonetisaurus`: Phonetisaurus WFST model path (`.fst`, tables
     ///   embedded or beside).
     /// - `byt5Encoder` / `byt5Decoder`: ByT5 ONNX pair for OOV words.
+    /// - `lang`: language code; with the `floravox-lexicons` feature,
+    ///   fetches the published bundle for that language (lexicon +
+    ///   trained OOV WFST) when `lexicon`/`phonetisaurus` are not set.
+    /// - `misaki`: `"us"` or `"gb"` — document-level English pre-pass
+    ///   (the phonemizer Kokoro was trained with; heteronyms and
+    ///   numbers come out right).
+    /// - `chars`: character-level frontend for MMS-style voices.
+    ///   `"true"` lowercases and feeds characters through the voice's
+    ///   own table; any other string is an ISO 639-3 code and input is
+    ///   romanized (uroman) first, e.g. `"hin"`.
     ///
     /// OOV chain order: lexicon → Phonetisaurus → ByT5 → letter spelling.
     pub fn new(credentials_json: &str) -> Self {
@@ -140,6 +180,9 @@ impl FloravoxEngine {
             phonetisaurus: cfg.phonetisaurus,
             byt5_encoder: cfg.byt5_encoder,
             byt5_decoder: cfg.byt5_decoder,
+            misaki: cfg.misaki,
+            chars: cfg.chars,
+            lang: cfg.lang,
             cancel: Arc::new(AtomicBool::new(false)),
             synth: Mutex::new(None),
         }
@@ -190,12 +233,15 @@ impl FloravoxEngine {
     fn synthesizer(&self, voice: Option<&str>) -> TtsResult<Arc<Synthesizer<Phon>>> {
         let onnx = self.resolve_model(voice)?;
         let key = format!(
-            "{}|{:?}|{:?}|{:?}|{:?}",
+            "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
             onnx.display(),
             self.lexicon,
             self.phonetisaurus,
             self.byt5_encoder,
-            self.byt5_decoder
+            self.byt5_decoder,
+            self.misaki,
+            self.chars,
+            self.lang,
         );
         let mut guard = self
             .synth
@@ -208,7 +254,27 @@ impl FloravoxEngine {
         }
         let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
-        let synth = Arc::new(Synthesizer::new(model, build_phonemizer(self)));
+        let mut synth = Synthesizer::new(model, build_phonemizer(self));
+
+        // Document-level pre-passes, in order of specificity:
+        //   chars (MMS-style character voices) > misaki (English)
+        if let Some(spec) = self.chars.as_deref() {
+            let rom: Option<&'static str> = match spec {
+                "" | "true" => None,
+                code => Some(code.to_string().leak()),
+            };
+            synth = synth.with_document_phonemizer(Box::new(CharFrontend {
+                lowercase: true,
+                romanize: rom,
+            }));
+        } else if let Some(dialect) = self.misaki.as_deref() {
+            let british = dialect.eq_ignore_ascii_case("gb");
+            synth = synth.with_document_phonemizer(Box::new(MisakiPrePass(
+                floravox_g2p::MisakiG2p::new(british),
+            )));
+        }
+
+        let synth = Arc::new(synth);
         *guard = Some((key, Arc::clone(&synth)));
         Ok(synth)
     }
@@ -290,19 +356,51 @@ fn default_models_dir() -> PathBuf {
 /// Build the phonemizer stack from the engine's g2p options.
 /// OOV chain: Phonetisaurus → ByT5 → letter spelling (first hit wins).
 fn build_phonemizer(engine: &FloravoxEngine) -> Phon {
+    // Resolve the lexicon stem: explicit `lexicon` config wins; with the
+    // floravox-lexicons feature, the published bundle for the voice's
+    // language (which also carries a trained Phonetisaurus WFST) is
+    // fetched and cached on first use.
+    let lexicon_stem = engine.lexicon.clone();
+    #[allow(unused_mut)]
+    let mut phonetisaurus = engine.phonetisaurus.clone();
+    #[allow(unused_mut)]
+    let mut lexicon_stem = lexicon_stem;
+    #[cfg(feature = "floravox-lexicons")]
+    if let Some(lang) = &engine.lang {
+        if lexicon_stem.is_none() && phonetisaurus.is_none() {
+            match voicegarden_lexicons::LexiconArchive::default_archive()
+                .and_then(|a| a.fetch(lang))
+            {
+                Ok(bundle) => {
+                    let dir = bundle.dir.clone();
+                    let lang_id = bundle.entry.lang.clone();
+                    let has_wfst = bundle.phonetisaurus.is_some();
+                    drop(bundle);
+                    lexicon_stem = Some(dir.join(&lang_id));
+                    if has_wfst {
+                        phonetisaurus = Some(dir.join("phonetisaurus.fst"));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("floravox: lexicon bundle for {lang:?} unavailable: {e:#}");
+                }
+            }
+        }
+    }
+
+    // OOV chain: Phonetisaurus -> ByT5 -> letter spelling.
     let mut fallback: Box<dyn OovFallback + Send> = Box::new(RuleFallback::default());
     if let (Some(enc), Some(dec)) = (&engine.byt5_encoder, &engine.byt5_decoder) {
         if let Ok(byt5) = Byt5G2p::load(enc, dec) {
             fallback = Box::new(ChainedFallback(byt5, fallback));
         }
     }
-    if let Some(model) = &engine.phonetisaurus {
+    if let Some(model) = &phonetisaurus {
         if let Ok(ph) = PhonetisaurusG2p::open(model) {
             fallback = Box::new(ChainedFallback(ph, fallback));
         }
     }
-    let lexicon = engine
-        .lexicon
+    let lexicon = lexicon_stem
         .as_deref()
         .and_then(|stem| floravox_g2p::MmapLexicon::open(stem).ok())
         .map_or_else(
