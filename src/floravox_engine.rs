@@ -1,5 +1,5 @@
 //! floravox offline TTS engine: event-driven SSML synthesis for
-//! piper-family ONNX voices.
+//! piper/MMS VITS and Matcha (+vocoder) ONNX voices.
 //!
 //! What this adds over the sherpa-onnx engine for piper voices:
 //!
@@ -21,7 +21,8 @@
 
 use crate::engine::TtsEngine;
 use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
-use floravox_core::synth::{StreamingSynthesis, Synthesizer, VoiceModel};
+use floravox_core::synth::{StreamingSynthesis, Synthesizer};
+use floravox_core::VoiceBackend;
 use floravox_core::SynthesisEvent;
 use floravox_g2p::{
     Byt5G2p, CachedPhonemizer, ChainedFallback, FstLexicon, LexiconPhonemizer, OovFallback,
@@ -103,7 +104,6 @@ pub struct FloravoxEngine {
     /// with (rebuilding reloads the ONNX session, so it is worth caching).
     synth: Mutex<Option<(String, Arc<Synthesizer<Phon>>)>>,
 }
-
 impl fmt::Debug for FloravoxEngine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("FloravoxEngine")
@@ -206,7 +206,7 @@ impl FloravoxEngine {
                 return Ok(Arc::clone(s));
             }
         }
-        let model = VoiceModel::load(&onnx)
+        let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
         let synth = Arc::new(Synthesizer::new(model, build_phonemizer(self)));
         *guard = Some((key, Arc::clone(&synth)));
@@ -334,10 +334,22 @@ fn samples_to_le_bytes(samples: &[f32]) -> Vec<u8> {
     out
 }
 
-/// Find the `.onnx` file for a candidate path: the path itself when it is
-/// one, or the single `*.onnx` inside a directory.
+/// True for vocoder-style file names (excluded when picking the acoustic
+/// model out of a voice directory — matcha voices pair the two).
+fn is_vocoder_name(p: &Path) -> bool {
+    p.file_name().is_some_and(|n| {
+        let n = n.to_string_lossy().to_ascii_lowercase();
+        n.contains("hifigan") || n.contains("vocoder") || n.contains("vocos")
+    })
+}
+
+/// Find the acoustic `.onnx` file for a candidate path: the path itself
+/// when it is one, or the single non-vocoder `*.onnx` inside a directory.
 fn find_onnx(cand: &Path) -> Option<PathBuf> {
-    if cand.extension().and_then(|e| e.to_str()) == Some("onnx") && cand.is_file() {
+    if cand.extension().and_then(|e| e.to_str()) == Some("onnx")
+        && cand.is_file()
+        && !is_vocoder_name(cand)
+    {
         return Some(cand.to_path_buf());
     }
     if cand.is_dir() {
@@ -346,7 +358,9 @@ fn find_onnx(cand: &Path) -> Option<PathBuf> {
             .flatten()
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("onnx"))
+            .filter(|p| {
+                p.extension().and_then(|e| e.to_str()) == Some("onnx") && !is_vocoder_name(p)
+            })
             .collect();
         if onnx.len() == 1 {
             return onnx.pop();
