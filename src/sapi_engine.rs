@@ -404,6 +404,7 @@ impl TtsEngine for SapiEngine {
         volume: f32,
         _on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         let mut guard = self.voice.lock().unwrap();
         let sp_voice = guard
@@ -466,7 +467,16 @@ impl TtsEngine for SapiEngine {
         on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
+        self.speak(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            on_audio,
+            on_boundary,
+            _on_mark,
+        )
     }
 
     /// Render speech to a WAV byte buffer instead of playing it.

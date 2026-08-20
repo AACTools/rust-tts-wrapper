@@ -921,7 +921,7 @@ fn resolve_model_scan_dir(dir: &std::path::Path) -> std::path::PathBuf {
         || dir.join("model.onnx").exists()
         || dir.join("voices.bin").exists()
         || dir.join("espeak-ng-data").exists()
-        || std::fs::read_dir(dir).ok().is_some_and(|entries| {
+        || std::fs::read_dir(dir).is_ok_and(|entries| {
             entries
                 .filter_map(Result::ok)
                 .any(|e| e.path().extension().is_some_and(|ext| ext == "onnx"))
@@ -1269,8 +1269,10 @@ fn read_wav_mono_16bit(path: &std::path::Path) -> TtsResult<(Vec<f32>, i32)> {
             b"data" => {
                 let end = (body + len).min(bytes.len());
                 samples = bytes[body..end]
-                    .chunks_exact(2)
-                    .map(|c| f32::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|c| f32::from(i16::from_le_bytes(*c)) / 32768.0)
                     .collect();
             }
             _ => {}
