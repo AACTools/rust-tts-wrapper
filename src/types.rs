@@ -240,6 +240,10 @@ pub struct WordBoundary {
     pub offset: u64,
     /// Duration of the word in milliseconds.
     pub duration: u64,
+    /// True when the timings are proportional estimates (unpatched
+    /// voices, sherpa-onnx's 150-wpm model); false when measured (floravox
+    /// duration tensor, cloud provider timings that track the audio).
+    pub estimated: bool,
 }
 
 /// Describes a registered engine for introspection.

@@ -117,32 +117,33 @@ fn demonstrate_word_boundaries(
     println!("🎵 Starting speech synthesis with word boundary events...\n");
 
     // Set up word boundary callback
-    let mut boundary_callback = move |word: &str, start: f32, end: f32, _offset: i32, _len: i32| {
-        let mut word_list = words_clone.lock().unwrap();
-        word_list.push((word.to_string(), start, end));
+    let mut boundary_callback =
+        move |word: &str, start: f32, end: f32, _offset: i32, _len: i32, _estimated: bool| {
+            let mut word_list = words_clone.lock().unwrap();
+            word_list.push((word.to_string(), start, end));
 
-        // Simulate word highlighting in a UI
-        let current_word = word;
-        let highlighted = word_list
-            .iter()
-            .map(|(w, _, _)| {
-                if w.to_lowercase() == current_word.to_lowercase() {
-                    format!("[{}]", w)
-                } else {
-                    w.clone()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
+            // Simulate word highlighting in a UI
+            let current_word = word;
+            let highlighted = word_list
+                .iter()
+                .map(|(w, _, _)| {
+                    if w.to_lowercase() == current_word.to_lowercase() {
+                        format!("[{}]", w)
+                    } else {
+                        w.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
 
-        println!(
-            "📍 Word: \"{}\" | Time: {:.3}s - {:.3}s",
-            current_word, start, end
-        );
-        println!("   Highlighted: {}", highlighted);
+            println!(
+                "📍 Word: \"{}\" | Time: {:.3}s - {:.3}s",
+                current_word, start, end
+            );
+            println!("   Highlighted: {}", highlighted);
 
-        *count_clone.lock().unwrap() += 1;
-    };
+            *count_clone.lock().unwrap() += 1;
+        };
 
     // Start speaking with word boundary events
     engine.speak(

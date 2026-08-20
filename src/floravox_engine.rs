@@ -344,12 +344,20 @@ impl FloravoxEngine {
                 #[allow(clippy::cast_precision_loss)]
                 let (s, e) = (w.ms_start as f32 / 1000.0, w.ms_end as f32 / 1000.0);
                 #[allow(clippy::cast_possible_wrap)]
-                cb(&w.text, s, e, w.char_offset as i32, w.char_len as i32);
+                cb(
+                    &w.text,
+                    s,
+                    e,
+                    w.char_offset as i32,
+                    w.char_len as i32,
+                    w.estimated,
+                );
             }
             boundaries.push(WordBoundary {
                 text: w.text.clone(),
                 offset: w.ms_start,
                 duration: w.ms_end.saturating_sub(w.ms_start),
+                estimated: w.estimated,
             });
         };
         loop {

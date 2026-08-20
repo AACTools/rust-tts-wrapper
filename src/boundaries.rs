@@ -223,11 +223,13 @@ mod tests {
                 text: "hello".into(),
                 offset: 0,
                 duration: 400,
+                estimated: false,
             },
             WordBoundary {
                 text: "world".into(),
                 offset: 400,
                 duration: 400,
+                estimated: false,
             },
         ];
         let plan = EstimatePlan::from_estimates(&est, "hello world");

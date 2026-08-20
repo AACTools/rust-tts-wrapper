@@ -21,7 +21,7 @@ static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 // (same technique as VISEME_CB in the cloud engine) and clear them after.
 // Synthesis per engine instance is serialised by the tts_instance mutex.
 type AudioCbPtr = *mut dyn FnMut(&[u8]);
-type BoundaryCbPtr = *mut dyn FnMut(&str, f32, f32, i32, i32);
+type BoundaryCbPtr = *mut dyn FnMut(&str, f32, f32, i32, i32, bool);
 
 thread_local! {
     static STREAM_AUDIO_CB: std::cell::RefCell<Option<AudioCbPtr>> =
@@ -595,7 +595,7 @@ impl TtsEngine for SherpaOnnxEngine {
                 // SAFETY: as above.
                 unsafe {
                     std::mem::transmute::<
-                        *mut (dyn FnMut(&str, f32, f32, i32, i32) + '_),
+                        *mut (dyn FnMut(&str, f32, f32, i32, i32, bool) + '_),
                         BoundaryCbPtr,
                     >(std::ptr::from_mut(&mut **cb))
                 }
@@ -647,6 +647,7 @@ impl TtsEngine for SherpaOnnxEngine {
                                                     ev.end_s,
                                                     ev.char_offset,
                                                     ev.char_len,
+                                                    true, // wpm estimates
                                                 );
                                             }
                                         }
@@ -671,7 +672,14 @@ impl TtsEngine for SherpaOnnxEngine {
             if let (Some(f), Some(cb)) = (firer.as_ref(), on_boundary.as_mut()) {
                 if let Ok(mut f) = f.lock() {
                     f.flush(&mut |ev| {
-                        cb(&ev.word, ev.start_s, ev.end_s, ev.char_offset, ev.char_len);
+                        cb(
+                            &ev.word,
+                            ev.start_s,
+                            ev.end_s,
+                            ev.char_offset,
+                            ev.char_len,
+                            true,
+                        );
                     });
                 }
             }
@@ -696,7 +704,14 @@ impl TtsEngine for SherpaOnnxEngine {
                 let plan = EstimatePlan::build(text);
                 for i in 0..plan.len() {
                     let ev = plan.event(i).expect("in range");
-                    cb(&ev.word, ev.start_s, ev.end_s, ev.char_offset, ev.char_len);
+                    cb(
+                        &ev.word,
+                        ev.start_s,
+                        ev.end_s,
+                        ev.char_offset,
+                        ev.char_len,
+                        true,
+                    );
                 }
             }
         }

@@ -1400,6 +1400,7 @@ fn parse_google_timepoints(
             text: word.clone(),
             offset: tp.time_ms,
             duration,
+            estimated: false,
         });
     }
     boundaries
@@ -2163,6 +2164,7 @@ impl TtsEngine for CloudEngine {
                                                                 / 1000.0,
                                                             final_offset,
                                                             final_len,
+                                                            false,
                                                         );
                                                     }
                                                 }
@@ -2400,7 +2402,7 @@ impl TtsEngine for CloudEngine {
                             search_from = char_offset as usize + word.len();
                         }
                         let char_len = word.chars().count() as i32;
-                        cb(&word, start, end, char_offset, char_len);
+                        cb(&word, start, end, char_offset, char_len, false);
                     }
                 }
             }
@@ -2445,6 +2447,7 @@ impl TtsEngine for CloudEngine {
                             (b.offset + b.duration) as f32 / 1000.0,
                             -1,
                             -1,
+                            false,
                         );
                     }
                 } else {
@@ -2467,6 +2470,7 @@ impl TtsEngine for CloudEngine {
                             (b.offset + b.duration) as f32 / 1000.0,
                             char_offset,
                             char_len,
+                            false,
                         );
                     }
                 }
@@ -2488,7 +2492,7 @@ impl TtsEngine for CloudEngine {
                 }
                 StreamEvt::Boundary(word, start, end, offset, len) => {
                     if let Some(bcb) = on_boundary.as_mut() {
-                        bcb(word, start, end, offset, len);
+                        bcb(word, start, end, offset, len, false);
                     }
                 }
             };
@@ -4466,6 +4470,7 @@ mod tests {
             text: "Hi".into(),
             offset: 0,
             duration: 0,
+            estimated: false,
         }];
         compute_durations(&mut v);
         assert_eq!(v[0].duration, 500);
@@ -4478,16 +4483,19 @@ mod tests {
                 text: "a".into(),
                 offset: 0,
                 duration: 0,
+                estimated: false,
             },
             WordBoundary {
                 text: "b".into(),
                 offset: 300,
                 duration: 0,
+                estimated: false,
             },
             WordBoundary {
                 text: "c".into(),
                 offset: 700,
                 duration: 0,
+                estimated: false,
             },
         ];
         compute_durations(&mut v);
@@ -4503,11 +4511,13 @@ mod tests {
                 text: "a".into(),
                 offset: 0,
                 duration: 250,
+                estimated: false,
             },
             WordBoundary {
                 text: "b".into(),
                 offset: 250,
                 duration: 0,
+                estimated: false,
             },
         ];
         compute_durations(&mut v);

@@ -51,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 chunk.len() as u64 / 2 / 16,
             ));
         }),
-        Some(&mut |_w, _s, _e, _o, _l| {
+        Some(&mut |_w, _s, _e, _o, _l, _est| {
             nb.fetch_add(1, Ordering::SeqCst);
         }),
         None,

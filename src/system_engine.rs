@@ -78,7 +78,7 @@ impl TtsEngine for SystemEngine {
                 #[allow(clippy::cast_precision_loss)]
                 let end = (b.offset + b.duration) as f32 / 1000.0;
                 let char_len = b.text.chars().count() as i32;
-                cb(&b.text, start, end, char_offset, char_len);
+                cb(&b.text, start, end, char_offset, char_len, false);
             }
         }
 
