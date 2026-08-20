@@ -57,6 +57,7 @@ jobs:
             sherpa-models-${{ matrix.os }}-
 
       - name: Fetch registry models.json (canonical repo)
+        shell: bash
         run: |
           mkdir -p /tmp/rtw-registry
           curl -sSL -o /tmp/rtw-registry/models.json \
