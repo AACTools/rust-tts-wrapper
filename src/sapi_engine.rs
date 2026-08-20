@@ -180,7 +180,7 @@ impl SapiEngine {
                         #[allow(clippy::cast_precision_loss)]
                         let end = (b.offset + b.duration) as f32 / 1000.0;
                         let char_len = b.text.chars().count() as i32;
-                        cb(&b.text, start, end, char_offset, char_len);
+                        cb(&b.text, start, end, char_offset, char_len, true); // estimates
                     }
                 }
                 return Ok(());
@@ -248,7 +248,8 @@ impl SapiEngine {
                             let start_sec = audio_offset_ms as f32 / 1000.0;
                             #[allow(clippy::cast_precision_loss)]
                             let end_sec = (audio_offset_ms + 1) as f32 / 1000.0;
-                            cb(&word, start_sec, end_sec, pos as i32, len as i32);
+                            cb(&word, start_sec, end_sec, pos as i32, len as i32, true);
+                            // bookmark spans
                         }
                     }
                 }

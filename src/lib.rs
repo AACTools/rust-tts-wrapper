@@ -84,7 +84,7 @@ pub type CVisemeCb = Option<extern "C" fn(i32, f32, *mut std::ffi::c_void)>;
 pub type CVoidCb = Option<extern "C" fn(*mut std::ffi::c_void)>;
 pub type CErrorCb = Option<extern "C" fn(*const c_char, *mut std::ffi::c_void)>;
 type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
-type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32, i32, i32)>;
+type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32, i32, i32, bool)>;
 type BoxedMarkCb = Box<dyn FnMut(&str, f32, f32, i32)>;
 
 pub struct tts_ctx {
@@ -420,7 +420,12 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
         let mut on_boundary_closure: Option<BoxedBoundaryCb> = match (boundary.cb, boundary2.cb) {
             (None, None) => None,
             _ => Some(Box::new(
-                move |word: &str, start: f32, end: f32, char_offset: i32, char_len: i32| {
+                move |word: &str,
+                      start: f32,
+                      end: f32,
+                      char_offset: i32,
+                      char_len: i32,
+                      estimated: bool| {
                     if let Some(cb) = boundary.cb {
                         if let Ok(c_word) = CString::new(word) {
                             cb(c_word.as_ptr(), start, end, boundary.userdata);
@@ -446,7 +451,7 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
                                 char_len,
                                 start,
                                 end,
-                                0,
+                                i32::from(estimated),
                                 boundary3.userdata,
                             );
                         }
@@ -498,7 +503,7 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
                 .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
             on_boundary_closure
                 .as_mut()
-                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32)),
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32, bool)),
             on_mark_closure
                 .as_mut()
                 .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32)),
@@ -553,6 +558,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
         let boundary2 = { *ctx_ref.on_boundary2.lock().unwrap() };
+        let boundary3 = { *ctx_ref.on_boundary3.lock().unwrap() };
         let mark = { *ctx_ref.on_mark.lock().unwrap() };
 
         let mut on_mark_closure: Option<BoxedMarkCb> = mark.cb.map(|cb| {
@@ -576,7 +582,12 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let mut on_boundary_closure: Option<BoxedBoundaryCb> = match (boundary.cb, boundary2.cb) {
             (None, None) => None,
             _ => Some(Box::new(
-                move |word: &str, start: f32, end: f32, char_offset: i32, char_len: i32| {
+                move |word: &str,
+                      start: f32,
+                      end: f32,
+                      char_offset: i32,
+                      char_len: i32,
+                      estimated: bool| {
                     if let Some(cb) = boundary.cb {
                         if let Ok(c_word) = CString::new(word) {
                             cb(c_word.as_ptr(), start, end, boundary.userdata);
@@ -591,6 +602,19 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
                                 start,
                                 end,
                                 boundary2.userdata,
+                            );
+                        }
+                    }
+                    if let Some(cb) = boundary3.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(
+                                c_word.as_ptr(),
+                                char_offset,
+                                char_len,
+                                start,
+                                end,
+                                i32::from(estimated),
+                                boundary3.userdata,
                             );
                         }
                     }
@@ -632,7 +656,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
                 .map(|f| &mut **f as &mut dyn FnMut(&[u8])),
             on_boundary_closure
                 .as_mut()
-                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32)),
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32, bool)),
             on_mark_closure
                 .as_mut()
                 .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32)),

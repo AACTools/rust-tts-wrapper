@@ -283,7 +283,7 @@ fn sherpa_streams_audio_per_sentence_batch() {
                 *last_a.lock().unwrap() = t_start.elapsed();
                 seq_a.lock().unwrap().push(A);
             }),
-            Some(&mut move |_w, _s, _e, _o, _l| seq_b.lock().unwrap().push(B)),
+            Some(&mut move |_w, _s, _e, _o, _l, _est| seq_b.lock().unwrap().push(B)),
             None,
         )
         .expect("speak");
@@ -316,7 +316,7 @@ fn vits_piper_word_boundaries_fire_per_word() {
     let engine = engine_for(&id);
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let sink_cb = sink.clone();
-    let mut bound_cb = move |word: &str, start: f32, end: f32, _: i32, _: i32| {
+    let mut bound_cb = move |word: &str, start: f32, end: f32, _: i32, _: i32, _: bool| {
         sink_cb
             .lock()
             .unwrap()
@@ -454,7 +454,7 @@ fn matcha_word_boundaries_fire() {
     let engine = engine_for(&id);
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();
-    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32, _: bool| {
         s.lock().unwrap().words.push((w.into(), st, e));
     };
     engine

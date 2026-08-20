@@ -7,9 +7,12 @@ use std::fmt;
 pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 
 /// Callback for word boundary events.
-/// Signature: (word, start_sec, end_sec, char_offset, char_len)
+/// Signature: (word, start_sec, end_sec, char_offset, char_len, estimated)
 /// char_offset/char_len are -1 when the engine doesn't report them.
-pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32, i32);
+/// `estimated` is true for proportional estimates (unpatched voices,
+/// sherpa-onnx's wpm model) and false for measured timings (floravox
+/// duration tensor, cloud provider timings).
+pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32, i32, bool);
 
 /// Callback for SSML mark/bookmark events.
 /// Signature: (name, start_sec, end_sec, char_offset)
@@ -318,6 +321,7 @@ pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> V
             text: (*word).to_string(),
             offset: current_ms,
             duration,
+            estimated: true,
         });
         current_ms += duration;
     }

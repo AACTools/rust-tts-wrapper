@@ -119,6 +119,7 @@ impl TtsEngine for AvSynthEngine {
                     (b.offset + b.duration) as f32 / 1000.0,
                     -1,
                     -1,
+                    true, // wpm estimates
                 );
             }
         }
