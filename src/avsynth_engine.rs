@@ -134,7 +134,7 @@ impl TtsEngine for AvSynthEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
-        _on_mark: Option<crate::engine::OnMarkCallback>,
+        on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         self.speak(
             text,
@@ -144,7 +144,7 @@ impl TtsEngine for AvSynthEngine {
             volume,
             on_audio,
             on_boundary,
-            _on_mark,
+            on_mark,
         )
     }
 
