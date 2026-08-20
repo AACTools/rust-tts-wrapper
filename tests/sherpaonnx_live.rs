@@ -143,6 +143,7 @@ fn vits_piper_synthesises_nonempty_audio() {
             1.0,
             Some(&mut cb),
             None,
+            None,
         )
         .expect("speak");
 
@@ -167,7 +168,7 @@ fn vits_piper_rate_changes_audio_size() {
         *fb.lock().unwrap() += c.len();
     };
     engine
-        .speak(text, None, 2.0, 1.0, 1.0, Some(&mut cb_fast), None)
+        .speak(text, None, 2.0, 1.0, 1.0, Some(&mut cb_fast), None, None)
         .unwrap();
 
     let slow_bytes = Arc::new(Mutex::new(0usize));
@@ -176,7 +177,7 @@ fn vits_piper_rate_changes_audio_size() {
         *sb.lock().unwrap() += c.len();
     };
     engine
-        .speak(text, None, 0.5, 1.0, 1.0, Some(&mut cb_slow), None)
+        .speak(text, None, 0.5, 1.0, 1.0, Some(&mut cb_slow), None, None)
         .unwrap();
 
     let fast = *fast_bytes.lock().unwrap();
@@ -222,6 +223,7 @@ fn vits_piper_volume_changes_amplitude() {
                 1.0,
                 volume,
                 Some(&mut cb),
+                None,
                 None,
             )
             .unwrap();
@@ -282,6 +284,7 @@ fn sherpa_streams_audio_per_sentence_batch() {
                 seq_a.lock().unwrap().push(A);
             }),
             Some(&mut move |_w, _s, _e, _o, _l| seq_b.lock().unwrap().push(B)),
+            None,
         )
         .expect("speak");
 
@@ -322,7 +325,7 @@ fn vits_piper_word_boundaries_fire_per_word() {
     };
     let text = "one two three four five";
     engine
-        .speak(text, None, 1.0, 1.0, 1.0, None, Some(&mut bound_cb))
+        .speak(text, None, 1.0, 1.0, 1.0, None, Some(&mut bound_cb), None)
         .expect("speak with boundaries");
 
     let words = sink.lock().unwrap().words.clone();
@@ -364,7 +367,7 @@ fn vits_piper_streaming_vs_buffered_match() {
         *s.lock().unwrap() += c.len();
     };
     engine
-        .speak(text, None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .speak(text, None, 1.0, 1.0, 1.0, Some(&mut cb), None, None)
         .expect("speak");
 
     let streamed = *streamed.lock().unwrap();
@@ -407,6 +410,7 @@ fn vits_piper_multi_speaker_voice_id_selectable() {
                 1.0,
                 Some(&mut cb),
                 None,
+                None,
             )
             .expect("speak with speaker id");
         assert!(
@@ -437,6 +441,7 @@ fn matcha_synthesises_nonempty_audio() {
             1.0,
             Some(&mut cb),
             None,
+            None,
         )
         .expect("matcha speak");
     assert!(*total.lock().unwrap() > 0, "matcha produced no audio");
@@ -453,7 +458,16 @@ fn matcha_word_boundaries_fire() {
         s.lock().unwrap().words.push((w.into(), st, e));
     };
     engine
-        .speak("one two three", None, 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .speak(
+            "one two three",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            None,
+            Some(&mut cb),
+            None,
+        )
         .expect("matcha speak");
     assert_eq!(sink.lock().unwrap().words.len(), 3);
 }
@@ -479,6 +493,7 @@ fn kokoro_synthesises_nonempty_audio() {
             1.0,
             1.0,
             Some(&mut cb),
+            None,
             None,
         )
         .expect("kokoro speak");
@@ -526,6 +541,7 @@ fn supertonic_synthesises_nonempty_audio() {
             1.0,
             Some(&mut cb),
             None,
+            None,
         )
         .expect("supertonic speak");
     assert!(*total.lock().unwrap() > 0, "supertonic produced no audio");
@@ -562,7 +578,7 @@ fn supertonic_switches_language_via_voice_id() {
             *t.lock().unwrap() += c.len();
         };
         engine
-            .speak(text, Some(voice), 1.0, 1.0, 1.0, Some(&mut cb), None)
+            .speak(text, Some(voice), 1.0, 1.0, 1.0, Some(&mut cb), None, None)
             .unwrap_or_else(|e| panic!("speak {voice} failed: {e}"));
         assert!(
             *total.lock().unwrap() > 0,
@@ -594,6 +610,7 @@ fn speechmarkdown_input_does_not_break_synthesis() {
             1.0,
             1.0,
             Some(&mut cb),
+            None,
             None,
         )
         .expect("speak with speechmarkdown input");
@@ -628,7 +645,7 @@ fn pitch_shift_changes_sample_count() {
             *nc.lock().unwrap() += c.len();
         };
         engine
-            .speak(text, None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+            .speak(text, None, 1.0, 1.0, 1.0, Some(&mut cb), None, None)
             .unwrap();
         let v = *n.lock().unwrap();
         v
@@ -641,7 +658,7 @@ fn pitch_shift_changes_sample_count() {
             *sc.lock().unwrap() += c.len();
         };
         engine
-            .speak(text, None, 1.0, 2.0, 1.0, Some(&mut cb), None)
+            .speak(text, None, 1.0, 2.0, 1.0, Some(&mut cb), None, None)
             .unwrap();
         let v = *s.lock().unwrap();
         v
@@ -682,6 +699,7 @@ fn zipvoice_clones_bundled_reference_voice() {
             1.0,
             Some(&mut cb),
             None,
+            None,
         )
         .expect("zipvoice speak");
     assert!(*total.lock().unwrap() > 0, "zipvoice produced no audio");
@@ -716,7 +734,16 @@ fn zipvoice_reference_transcript_override() {
         *t.lock().unwrap() += c.len();
     };
     engine
-        .speak("Override check.", None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .speak(
+            "Override check.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+            None,
+        )
         .expect("zipvoice speak with overridden reference");
     assert!(*total.lock().unwrap() > 0);
 }
@@ -740,6 +767,7 @@ fn pocket_synthesises_with_bundled_reference() {
             1.0,
             1.0,
             Some(&mut cb),
+            None,
             None,
         )
         .expect("pocket speak");

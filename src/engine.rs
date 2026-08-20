@@ -11,6 +11,14 @@ pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 /// char_offset/char_len are -1 when the engine doesn't report them.
 pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32, i32);
 
+/// Callback for SSML mark/bookmark events.
+/// Signature: (name, start_sec, end_sec, char_offset)
+/// char_offset is -1 when the engine doesn't report it. Engines that
+/// support native `<mark>` (floravox) fire this at the measured (or
+/// estimated) audio position; consumers map it to their bookmark event
+/// (SAPI `SPEI_TTS_BOOKMARK`, SSIP index marks).
+pub type OnMarkCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32);
+
 /// Callback for speech-started events.
 pub type OnStartCallback<'a> = &'a mut dyn FnMut();
 
@@ -143,6 +151,7 @@ fn extract_name_attr(tag: &str) -> Option<String> {
 pub trait TtsEngine: Send + Sync + fmt::Debug {
     /// Start speaking `text` asynchronously.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn speak(
         &self,
         text: &str,
@@ -152,6 +161,7 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
         volume: f32,
         on_audio: Option<OnAudioCallback>,
         on_boundary: Option<OnBoundaryCallback>,
+        on_mark: Option<OnMarkCallback>,
     ) -> TtsResult<()>;
 
     /// Speak with full [`SpeakOptions`], matching Swift's `speak(_:options:)`.
@@ -161,6 +171,7 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
         options: Option<&SpeakOptions>,
         on_audio: Option<OnAudioCallback>,
         on_boundary: Option<OnBoundaryCallback>,
+        on_mark: Option<OnMarkCallback>,
     ) -> TtsResult<()> {
         let opts = options.cloned().unwrap_or_default();
         self.speak(
@@ -171,10 +182,12 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
             opts.effective_volume(),
             on_audio,
             on_boundary,
+            on_mark,
         )
     }
 
     /// Speak `text` synchronously, blocking until synthesis completes.
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn speak_sync(
         &self,
@@ -185,6 +198,7 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
         volume: f32,
         on_audio: Option<OnAudioCallback>,
         on_boundary: Option<OnBoundaryCallback>,
+        on_mark: Option<OnMarkCallback>,
     ) -> TtsResult<()>;
 
     /// Stop any in-progress speech.
@@ -235,6 +249,7 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
             Some(&mut |chunk: &[u8]| {
                 buf.extend_from_slice(chunk);
             }),
+            None,
             None,
         )?;
         Ok(buf)

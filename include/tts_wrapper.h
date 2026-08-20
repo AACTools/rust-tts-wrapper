@@ -43,6 +43,21 @@ typedef void (*CBoundaryCb)(const char*, float, float, void*);
 
 typedef void (*CBoundaryCb2)(const char*, int32_t, int32_t, float, float, void*);
 
+/**
+ * Mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
+ * char_offset is -1 when unknown; start/end are the measured (or
+ * estimated) audio position the mark fires at.
+ */
+typedef void (*CMarkCb)(const char*, int32_t, float, float, void*);
+
+/**
+ * Boundary callback with the estimated flag: cb(word, char_offset,
+ * char_len, start_s, end_s, estimated, userdata). `estimated` is 1 when
+ * the timings are proportional estimates (unpatched voice), 0 when
+ * measured from the model's duration tensor.
+ */
+typedef void (*CBoundaryCb3)(const char*, int32_t, int32_t, float, float, int32_t, void*);
+
 typedef void (*CVisemeCb)(int32_t, float, void*);
 
 typedef void (*CVoidCb)(void*);
@@ -234,6 +249,26 @@ void tts_set_on_boundary(struct tts_ctx *ctx, CBoundaryCb cb, void *userdata);
  * `ctx` must be valid.
  */
 void tts_set_on_boundary2(struct tts_ctx *ctx, CBoundaryCb2 cb, void *userdata);
+
+/**
+ * Set the mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
+ * Fires for `<mark>`/`<bookmark>` SSML tags at their measured audio
+ * position on engines that report them (floravox).
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_mark(struct tts_ctx *ctx, CMarkCb cb, void *userdata);
+
+/**
+ * Boundary callback with the estimated flag:
+ * cb(word, char_offset, char_len, start_s, end_s, estimated, userdata).
+ * `estimated` != 0 means proportional estimates, not measured timings.
+ *
+ * # Safety
+ * `ctx` must be valid.
+ */
+void tts_set_on_boundary3(struct tts_ctx *ctx, CBoundaryCb3 cb, void *userdata);
 
 /**
  * Viseme callback for lip-sync / facial animation.

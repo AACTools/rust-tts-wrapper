@@ -103,8 +103,14 @@ impl Config {
 /// convention for directory credentials).
 fn expand_tilde(p: &str) -> PathBuf {
     if let Some(rest) = p.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
-            return PathBuf::from(home).join(rest);
+        // Unix HOME first, Windows USERPROFILE second ($HOME is almost
+        // never set there).
+        for key in ["HOME", "USERPROFILE"] {
+            if let Some(home) = std::env::var_os(key) {
+                if !home.is_empty() {
+                    return PathBuf::from(home).join(rest);
+                }
+            }
         }
     }
     PathBuf::from(p)
@@ -243,6 +249,7 @@ impl FloravoxEngine {
         voice: Option<&str>,
         doc_lang: Option<&str>,
     ) -> TtsResult<Arc<Synthesizer<Phon>>> {
+        #[cfg_attr(not(feature = "floravox-lexicons"), allow(unused_variables))]
         let effective_lang = self.lang.as_deref().or(doc_lang);
         let onnx = self.resolve_model(voice)?;
         let key = format!(
@@ -267,10 +274,12 @@ impl FloravoxEngine {
         }
         let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
+        let auto_chars = model.config().is_char_table;
         let mut synth = Synthesizer::new(model, build_phonemizer(self, effective_lang));
 
         // Document-level pre-passes, in order of specificity:
-        //   chars (MMS-style character voices) > misaki (English)
+        //   explicit chars credential > auto-detected character table
+        //   (MMS-style voices) > misaki (English)
         if let Some(spec) = self.chars.as_deref() {
             let rom: Option<&'static str> = match spec {
                 "" | "true" => None,
@@ -279,6 +288,14 @@ impl FloravoxEngine {
             synth = synth.with_document_phonemizer(Box::new(CharFrontend {
                 lowercase: true,
                 romanize: rom,
+            }));
+        } else if auto_chars {
+            // Character-table voice with no explicit frontend: CharFrontend
+            // is the only correct choice — phonemizing per-word would
+            // spell everything out.
+            synth = synth.with_document_phonemizer(Box::new(CharFrontend {
+                lowercase: true,
+                romanize: None,
             }));
         } else if let Some(dialect) = self.misaki.as_deref() {
             let british = dialect.eq_ignore_ascii_case("gb");
@@ -294,18 +311,32 @@ impl FloravoxEngine {
 
     /// Shared pump: streams audio + events from a synthesis, feeding the
     /// callbacks. Returns collected `(pcm bytes, boundaries)`.
+    #[allow(clippy::too_many_arguments)]
     fn pump(
         &self,
         stream: StreamingSynthesis,
         volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback<'_>>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
+        mut on_mark: Option<crate::engine::OnMarkCallback<'_>>,
         collect: bool,
     ) -> TtsResult<(Vec<u8>, Vec<WordBoundary>)> {
         let StreamingSynthesis { audio, events } = stream;
         let mut bytes = Vec::new();
         let mut boundaries = Vec::new();
         self.cancel.store(false, Ordering::SeqCst);
+        let fire_mark =
+            |name: &str,
+             ms: u64,
+             char_offset: i64,
+             on_mark: &mut Option<crate::engine::OnMarkCallback<'_>>| {
+                if let Some(cb) = on_mark.as_mut() {
+                    #[allow(clippy::cast_precision_loss)]
+                    let s = ms as f32 / 1000.0;
+                    #[allow(clippy::cast_possible_wrap)]
+                    cb(name, s, s, char_offset as i32);
+                }
+            };
         let fire_boundary = |w: &floravox_core::WordTiming,
                              on_boundary: &mut Option<crate::engine::OnBoundaryCallback<'_>>,
                              boundaries: &mut Vec<WordBoundary>| {
@@ -328,8 +359,19 @@ impl FloravoxEngine {
             // Drain pending events first so boundaries precede the audio
             // they time.
             while let Ok(ev) = events.try_recv() {
-                if let SynthesisEvent::WordBoundary(w) = ev {
-                    fire_boundary(&w, &mut on_boundary, &mut boundaries);
+                match ev {
+                    SynthesisEvent::WordBoundary(w) => {
+                        fire_boundary(&w, &mut on_boundary, &mut boundaries);
+                    }
+                    SynthesisEvent::MarkReached {
+                        name,
+                        ms,
+                        char_offset,
+                        ..
+                    } => {
+                        fire_mark(&name, ms, char_offset, &mut on_mark);
+                    }
+                    _ => {}
                 }
             }
             match audio.recv_timeout(POLL) {
@@ -347,8 +389,19 @@ impl FloravoxEngine {
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     // Audio done; drain the remaining events.
                     for ev in events {
-                        if let SynthesisEvent::WordBoundary(w) = ev {
-                            fire_boundary(&w, &mut on_boundary, &mut boundaries);
+                        match ev {
+                            SynthesisEvent::WordBoundary(w) => {
+                                fire_boundary(&w, &mut on_boundary, &mut boundaries);
+                            }
+                            SynthesisEvent::MarkReached {
+                                name,
+                                ms,
+                                char_offset,
+                                ..
+                            } => {
+                                fire_mark(&name, ms, char_offset, &mut on_mark);
+                            }
+                            _ => {}
                         }
                     }
                     return Ok((bytes, boundaries));
@@ -360,14 +413,18 @@ impl FloravoxEngine {
 
 /// Default models dir: `~/.rust-tts-wrapper/floravox`.
 fn default_models_dir() -> PathBuf {
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from(".floravox"),
-        |h| PathBuf::from(h).join(".rust-tts-wrapper").join("floravox"),
-    )
+    ["HOME", "USERPROFILE"]
+        .iter()
+        .find_map(|k| {
+            let h = std::env::var_os(k)?;
+            (!h.is_empty()).then(|| PathBuf::from(h).join(".rust-tts-wrapper").join("floravox"))
+        })
+        .unwrap_or_else(|| PathBuf::from(".floravox"))
 }
 
 /// Build the phonemizer stack from the engine's g2p options.
 /// OOV chain: Phonetisaurus → ByT5 → letter spelling (first hit wins).
+#[cfg_attr(not(feature = "floravox-lexicons"), allow(unused_variables))]
 fn build_phonemizer(engine: &FloravoxEngine, effective_lang: Option<&str>) -> Phon {
     // Resolve the lexicon stem: explicit `lexicon` config wins; with the
     // floravox-lexicons feature, the published bundle for the voice's
@@ -677,6 +734,7 @@ fn bcp47_from(espeak_voice: &str, dataset: &str) -> (String, &'static str) {
 }
 
 impl TtsEngine for FloravoxEngine {
+    #[allow(clippy::too_many_arguments)]
     fn speak(
         &self,
         text: &str,
@@ -686,16 +744,18 @@ impl TtsEngine for FloravoxEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback<'_>>,
         on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
+        on_mark: Option<crate::engine::OnMarkCallback<'_>>,
     ) -> TtsResult<()> {
         let input = prepare_input(text, rate);
         let synth = self.synthesizer_for(voice, document_lang(text).as_deref())?;
         let stream = synth
             .synthesize_stream(&input)
             .map_err(|e| TtsError(format!("floravox synthesis: {e:#}")))?;
-        self.pump(stream, volume, on_audio, on_boundary, false)
+        self.pump(stream, volume, on_audio, on_boundary, on_mark, false)
             .map(|_| ())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn speak_sync(
         &self,
         text: &str,
@@ -705,8 +765,18 @@ impl TtsEngine for FloravoxEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback<'_>>,
         on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
+        on_mark: Option<crate::engine::OnMarkCallback<'_>>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
+        self.speak(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            on_audio,
+            on_boundary,
+            on_mark,
+        )
     }
 
     fn stop(&self) -> TtsResult<()> {
@@ -750,7 +820,7 @@ impl TtsEngine for FloravoxEngine {
         let stream = synth
             .synthesize_stream(&input)
             .map_err(|e| TtsError(format!("floravox synthesis: {e:#}")))?;
-        self.pump(stream, volume, None, None, true)
+        self.pump(stream, volume, None, None, None, true)
     }
 }
 
@@ -826,6 +896,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "speechmarkdown")]
     fn speechmarkdown_flows_into_floravox_ssml() {
         // SpeechMarkdown inline modifiers → generic-dialect SSML that
         // floravox parses natively (break, prosody rate, sub, say-as).
@@ -840,6 +911,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "speechmarkdown")]
     fn whisper_maps_to_floravox_prosody() {
         let input = prepare_input("(be very quiet)[whisper]", 1.0);
         assert!(

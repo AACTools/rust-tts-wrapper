@@ -54,8 +54,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(&mut |_w, _s, _e, _o, _l| {
             nb.fetch_add(1, Ordering::SeqCst);
         }),
+        None,
     )?;
-
     let total = t0.elapsed().as_millis() as u64;
     let fa = first_audio.load(Ordering::SeqCst);
     println!("first audio after   {fa} ms");

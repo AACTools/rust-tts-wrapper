@@ -153,6 +153,7 @@ fn demonstrate_word_boundaries(
         1.0,  // volume
         None, // no audio callback for this demo
         Some(&mut boundary_callback),
+        None, // no mark callback for this demo
     )?;
 
     // Give time for all events to complete

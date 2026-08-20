@@ -338,6 +338,7 @@ impl TtsEngine for SherpaOnnxEngine {
         volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         if self.loaded_model_id.is_empty() {
             return Err(TtsError(
@@ -712,8 +713,18 @@ impl TtsEngine for SherpaOnnxEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
+        self.speak(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            on_audio,
+            on_boundary,
+            on_mark,
+        )
     }
 
     fn stop(&self) -> TtsResult<()> {
@@ -2363,7 +2374,7 @@ mod tests {
     fn test_engine_speak_without_model_id_errors_clearly() {
         let engine = SherpaOnnxEngine::new("");
         let err = engine
-            .speak("hi", None, 1.0, 1.0, 1.0, None, None)
+            .speak("hi", None, 1.0, 1.0, 1.0, None, None, None)
             .unwrap_err();
         assert!(
             err.to_string().contains("modelId"),
@@ -2401,7 +2412,7 @@ mod tests {
     fn test_engine_speak_with_unknown_model_id_errors_with_count() {
         let engine = SherpaOnnxEngine::new(r#"{"modelId":"not-a-real-model"}"#);
         let err = engine
-            .speak("hi", None, 1.0, 1.0, 1.0, None, None)
+            .speak("hi", None, 1.0, 1.0, 1.0, None, None, None)
             .unwrap_err();
         // Error message should hint at how many models ARE available so the
         // caller can pick a valid one.

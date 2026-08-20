@@ -1830,6 +1830,7 @@ impl TtsEngine for CloudEngine {
         volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         let (original_text, is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
 
@@ -2525,8 +2526,18 @@ impl TtsEngine for CloudEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
+        self.speak(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            on_audio,
+            on_boundary,
+            on_mark,
+        )
     }
 
     fn stop(&self) -> TtsResult<()> {

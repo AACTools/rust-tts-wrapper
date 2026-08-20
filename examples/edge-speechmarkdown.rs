@@ -21,6 +21,7 @@ fn main() {
                 1.0,
                 Some(&mut |chunk: &[u8]| bytes += chunk.len()),
                 None,
+                None,
             )
             .unwrap_or_else(|e| panic!("{text}: {e}"));
         println!("{text:?}: {bytes} bytes");
