@@ -328,25 +328,19 @@ Cloud engines use provider-specific `CloudConfig`:
 
 ## Sherpa-ONNX Models
 
-1300+ models from the bundled `models.json` registry. Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
+1300+ models from the [sherpa-onnx-models](https://crates.io/crates/sherpa-onnx-models) registry crate (canonical: [AACTools/sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts-models); updates are dependency bumps). Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
 
 ### Updating the registry
 
-The registry is maintained in its own repo,
-[`AACTools/sherpa-onnx-tts-models`](https://github.com/AACTools/sherpa-onnx-tts-models),
-which publishes **tagged, checksummed releases**. To sync a new version into
-this crate:
+The registry ships as the
+[`sherpa-onnx-models`](https://crates.io/crates/sherpa-onnx-models) crate,
+published from [`AACTools/sherpa-onnx-tts-models`](https://github.com/AACTools/sherpa-onnx-tts-models)
+(tag `crate-v*`). Refresh it like any dependency:
 
 ```bash
-./scripts/sync-registry.sh v2026-08-10   # fetch a specific release
-./scripts/sync-registry.sh               # re-sync the currently-pinned tag
+cargo update -p sherpa-onnx-models   # within the pinned 0.x line
+# or bump the version in Cargo.toml for a new line
 ```
-
-The script downloads `models.json` from the release, verifies its SHA-256,
-writes it to `src/models.json`, and records the tag + checksum in
-`src/registry-version.txt`. Commit both files — the build then needs no
-network. CI (`lint.yml → registry-consistency`) asserts the two never drift
-apart.
 
 The registry's enriched fields (`license`, `sha256`, `voice_names`,
 `min_sherpa_onnx_version`, `deprecated`, …) are currently ignored by

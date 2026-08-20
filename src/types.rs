@@ -262,6 +262,10 @@ pub struct SherpaModelInfo {
     pub id: String,
     /// Model type (e.g. `"kokoro"`, `"vits"`).
     pub model_type: String,
+    /// Which engine can drive this family: `"floravox"` (vits/mms/
+    /// matcha/kokoro graphs — SSML, measured word timings) or
+    /// `"sherpa-onnx"` (audio-LM families).
+    pub engines: String,
     /// Human-readable model name.
     pub name: String,
     /// Languages supported by this model.

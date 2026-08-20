@@ -42,31 +42,14 @@ jobs:
         echo "- No unused imports or variables" >> $GITHUB_STEP_SUMMARY
         echo "- Use \`cargo fmt\` to format before committing" >> $GITHUB_STEP_SUMMARY
 
-  registry-consistency:
-    # The embedded src/models.json and src/registry-version.txt must
-    # never drift apart — every build needs to know exactly which registry
-    # version it ships. This catches "synced one file but forgot the other"
-    # without needing a Rust toolchain or network.
-    name: Registry version ↔ JSON consistency
+  registry-crate:
+    # The registry ships as the sherpa-onnx-models crate; verify the
+    # pinned version resolves and its data parses (catches a typo'd bump
+    # before the build jobs do).
+    name: Registry crate resolves
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - name: Verify sha256 + entry count match
-      run: |
-        set -e
-        actual_sha="$(sha256sum src/models.json | awk '{print $1}')"
-        pinned_sha="$(grep -E '^models\.json\.sha256:' src/registry-version.txt | awk '{print $2}')"
-        if [[ "$actual_sha" != "$pinned_sha" ]]; then
-          echo "::error::sha256 mismatch — src/models.json was edited without updating registry-version.txt (or vice versa)."
-          echo "  actual:  $actual_sha"
-          echo "  pinned:  $pinned_sha"
-          echo "  fix: ./scripts/sync-registry.sh  (re-sync) or edit registry-version.txt by hand if this was an intentional local edit."
-          exit 1
-        fi
-        actual_count="$(python3 -c "import json; print(len(json.load(open('src/models.json'))))")"
-        pinned_count="$(grep -E '^entries:' src/registry-version.txt | awk '{print $2}')"
-        if [[ "$actual_count" != "$pinned_count" ]]; then
-          echo "::error::entry count mismatch — models.json has $actual_count entries but registry-version.txt says $pinned_count."
-          exit 1
-        fi
-        echo "OK: models.json matches registry-version.txt (sha256 $actual_sha, $actual_count entries)."
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo metadata --format-version 1 > /dev/null
+    - run: cargo tree -p sherpa-onnx-models

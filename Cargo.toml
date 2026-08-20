@@ -1,6 +1,6 @@
 [package]
 name = "rust-tts-wrapper"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 license = "MIT"
 description = "Cross-platform TTS wrapper with C API — mirrors js-tts-wrapper / SwiftTTSWrapper"
@@ -47,7 +47,7 @@ path = "examples/simple-test.rs"
 default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
 system = ["speech-dispatcher"]
 cloud = ["reqwest", "dep:serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "symphonia", "sha2"]
-sherpaonnx = ["sherpa-onnx", "dep:serde_json"]
+sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
 tungstenite = ["dep:tungstenite"]
 uuid = ["dep:uuid"]
 url = ["dep:url"]
@@ -66,6 +66,7 @@ display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 # already linked by floravox-core).
 floravox = [
   "dep:floravox-core",
+  "dep:floravox-ssml",
   "dep:floravox-g2p",
   "floravox-g2p/onnx",
   "dep:serde_json",
@@ -86,6 +87,8 @@ serde_json = { version = "1", optional = true }
 # sys 1.13.5 doesn't even compile, and a newer crate references C-API
 # symbols an older prebuilt lib lacks → LNK2019). Bump both together.
 sherpa-onnx = { version = "=1.13.5", optional = true }
+# The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
+sherpa-onnx-models = { version = "0.1", optional = true }
 base64 = { version = "0.22", optional = true }
 speechmarkdown-rust = { version = "0.4.13", optional = true }
 anyhow = "1"
@@ -104,6 +107,7 @@ icu_locid = { version = "1.0.0-beta1", optional = true }
 # floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha,
 # Kokoro) with measured word timings (vs sherpa-onnx's estimated ones).
 floravox-core = { version = "0.7.1", optional = true }
+floravox-ssml = { version = "0.7.2", optional = true }
 floravox-g2p = { version = "0.7.1", optional = true, default-features = false }
 # Published lexicon bundles (gruut-derived, MIT) + per-language
 # Phonetisaurus models, fetched and cached by lang code.

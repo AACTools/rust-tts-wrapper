@@ -1,7 +1,0 @@
-# Provenance of src/models.json - do not edit by hand.
-# Regenerate with: ./scripts/sync-registry.sh
-tag: v2026-08-18
-models.json.sha256: 4c2680e4edcd283cf2b9b31f3558e8e6365c2504f42a2e1516a945738338b962
-entries: 1760
-source: https://github.com/AACTools/sherpa-onnx-tts-models
-fetched_at: 2026-08-18T04:00:44Z

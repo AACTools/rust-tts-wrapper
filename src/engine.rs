@@ -53,6 +53,10 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
         // few elements, which the engine boundary strips.
         "azure" | "edge" => Platform::MicrosoftAzure,
         "google" => Platform::GoogleAssistant,
+        // floravox parses the generic (Alexa-baseline) SSML dialect
+        // natively; the floravox engine normalizes vendor-specific
+        // elements (e.g. whisper's <amazon:effect>) on its side — as
+        // does everything else via the default.
         _ => Platform::AmazonAlexa,
     };
 

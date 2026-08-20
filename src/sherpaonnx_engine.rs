@@ -11,9 +11,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Embedded model registry compiled from `models.json`.
-static MODELS_JSON: &str = include_str!("models.json");
-
 /// Shared cancellation flag — set by `stop()`, read by the progress callback.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -295,92 +292,39 @@ fn default_model_dir() -> PathBuf {
 
 /// Parse the embedded `models.json` into a hashmap.
 fn load_models() -> HashMap<String, SherpaModelInfo> {
-    let raw: HashMap<String, serde_json::Value> = match serde_json::from_str(MODELS_JSON) {
-        Ok(v) => v,
-        Err(_) => return HashMap::new(),
-    };
-
-    let mut models = HashMap::new();
-    for (key, val) in raw {
-        if let Some(info) = parse_model(&key, &val) {
-            models.insert(key, info);
-        }
-    }
-    models
-}
-
-/// Parse a single model entry from the JSON registry.
-fn parse_model(id: &str, val: &serde_json::Value) -> Option<SherpaModelInfo> {
-    let obj = val.as_object()?;
-    Some(SherpaModelInfo {
-        id: id.to_string(),
-        model_type: obj
-            .get("model_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("vits")
-            .to_string(),
-        name: obj
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        language: obj
-            .get("language")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|l| {
-                        let lo = l.as_object()?;
-                        Some(SherpaLanguage {
-                            lang_code: lo.get("lang_code")?.as_str()?.to_string(),
-                            language_name: lo.get("language_name")?.as_str()?.to_string(),
-                            country: lo
-                                .get("country")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string(),
+    // Convert the typed registry crate into the wrapper's public
+    // SherpaModelInfo shape (API-compatible with the old embedded copy).
+    sherpa_onnx_models::models()
+        .iter()
+        .map(|(id, m)| {
+            (
+                id.clone(),
+                SherpaModelInfo {
+                    id: m.id.clone(),
+                    model_type: m.model_type.clone(),
+                    engines: m.engines.clone(),
+                    name: m.name.clone(),
+                    language: m
+                        .language
+                        .iter()
+                        .map(|l| SherpaLanguage {
+                            lang_code: l.lang_code.clone(),
+                            language_name: l.language_name.clone(),
+                            country: l.country.clone(),
                         })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default(),
-        sample_rate: obj
-            .get("sample_rate")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(24000) as u32,
-        num_speakers: obj
-            .get("num_speakers")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(1) as u32,
-        quality: obj
-            .get("quality")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        url: obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        compression: obj
-            .get("compression")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        filesize_mb: obj
-            .get("filesize_mb")
-            .and_then(serde_json::Value::as_f64)
-            .unwrap_or(0.0),
-        license: obj
-            .get("license")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        license_url: obj
-            .get("license_url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    })
+                        .collect(),
+                    sample_rate: m.sample_rate,
+                    num_speakers: m.num_speakers,
+                    quality: m.quality.clone(),
+                    url: m.url.clone(),
+                    compression: m.compression,
+                    filesize_mb: m.filesize_mb,
+                    license: m.license.clone(),
+                    license_url: m.license_url.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 impl TtsEngine for SherpaOnnxEngine {
@@ -2161,6 +2105,7 @@ mod tests {
         let info = SherpaModelInfo {
             id: "test".into(),
             model_type: "supertonic".into(),
+            engines: "sherpa-onnx".into(),
             name: "test".into(),
             language: vec![
                 SherpaLanguage {
@@ -2427,70 +2372,29 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_model_defaults_to_vits_when_model_type_absent() {
-        // MMS entries (1143 of them) lack model_type. Before the fix they were
-        // silently dropped by the `?` operator. Verify they now default to
-        // "vits" and parse successfully.
-        let json = serde_json::json!({
-            "language": [{"Iso Code": "eng", "Language Name": "English"}],
-            "url": "https://example.com/eng"
-        });
-        let model = parse_model("mms_eng", &json);
-        assert!(
-            model.is_some(),
-            "MMS entry without model_type must not be dropped"
-        );
-        assert_eq!(model.unwrap().model_type, "vits");
-    }
-
-    #[test]
-    fn test_parse_model_preserves_explicit_model_type() {
-        // Entries WITH model_type must still work (kokoro, matcha, vits).
-        let json = serde_json::json!({
-            "model_type": "kokoro",
-            "name": "test",
-            "url": "https://example.com/test"
-        });
-        let model = parse_model("test-kokoro", &json);
-        assert!(model.is_some());
-        assert_eq!(model.unwrap().model_type, "kokoro");
-    }
-
-    #[test]
-    fn test_parse_model_surfaces_licence_metadata() {
-        let json = serde_json::json!({
-            "name": "test",
-            "url": "https://example.com/test",
-            "license": "Apache-2.0",
-            "license_url": "https://example.com/LICENSE"
-        });
-        let model = parse_model("test-licensed", &json).unwrap();
-        assert_eq!(model.license, "Apache-2.0");
-        assert_eq!(model.license_url, "https://example.com/LICENSE");
-    }
-
-    #[test]
-    fn test_parse_model_licence_defaults_empty() {
-        let json = serde_json::json!({ "name": "test", "url": "https://example.com" });
-        let model = parse_model("test-unlicensed", &json).unwrap();
-        assert!(model.license.is_empty());
-        assert!(model.license_url.is_empty());
-    }
-
-    #[test]
-    fn test_parse_model_surfaces_quality() {
-        let json = serde_json::json!({
-            "name": "test", "url": "https://example.com", "quality": "high"
-        });
-        let model = parse_model("test-quality", &json).unwrap();
-        assert_eq!(model.quality, "high");
-    }
-
-    #[test]
-    fn test_parse_model_quality_defaults_empty() {
-        let json = serde_json::json!({ "name": "test", "url": "https://example.com" });
-        let model = parse_model("test-noquality", &json).unwrap();
-        assert!(model.quality.is_empty());
+    fn test_registry_crate_supplies_the_models() {
+        // The registry now ships as the sherpa-onnx-models crate; the old
+        // parse_model JSON path is gone. What used to be per-field parse
+        // tests is now: registry is large, typed, and defaults sane.
+        let models = load_models();
+        assert!(models.len() > 1700, "registry shrank: {}", models.len());
+        // engines covers every model and matches the family rule
+        for m in models.values() {
+            let expected = if matches!(m.model_type.as_str(), "vits" | "mms" | "matcha" | "kokoro")
+            {
+                "floravox"
+            } else {
+                "sherpa-onnx"
+            };
+            assert_eq!(m.engines, expected, "{}", m.id);
+        }
+        // a known MMS entry (no explicit model_type in raw data) parses
+        // with the vits-family default
+        let mms = models
+            .values()
+            .find(|m| m.id.starts_with("mms_"))
+            .expect("MMS entries present");
+        assert_eq!(mms.engines, "floravox");
     }
 
     #[test]
