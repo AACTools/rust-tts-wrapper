@@ -5,7 +5,7 @@
 //! and registry parsing.
 #![allow(dead_code, clippy::all, clippy::pedantic)]
 
-#[cfg(all(test, any(feature = "cloud", feature = "sherpaonnx")))]
+#[cfg(all(test, feature = "sherpaonnx"))]
 mod sherpaonnx_tests {
     use std::collections::HashMap;
 

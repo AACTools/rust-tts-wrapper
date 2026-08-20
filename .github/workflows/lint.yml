@@ -52,4 +52,4 @@ jobs:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
     - run: cargo metadata --format-version 1 > /dev/null
-    - run: cargo run -q --no-default-features --features sherpaonnx --example simple-test -- --help || true"
+    - run: cargo tree -p sherpa-onnx-models
