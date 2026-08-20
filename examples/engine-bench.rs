@@ -8,13 +8,30 @@ use rust_tts_wrapper::engine::TtsEngine;
 use std::time::Instant;
 
 fn rss_kb() -> i64 {
-    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    for line in status.lines() {
-        if let Some(v) = line.strip_prefix("VmHWM:") {
-            return v.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
-        }
+    #[cfg(target_os = "macos")]
+    {
+        // No /proc on macOS; sample current RSS via ps (KB). Peak-vs-
+        // current: Linux reads VmHWM (true peak); this is a point-in-time
+        // sample, taken after synthesis when the arena is at its high
+        // water mark, so it tracks the Linux number closely in practice.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output();
+        out.ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
     }
-    0
+    #[cfg(not(target_os = "macos"))]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        for line in status.lines() {
+            if let Some(v) = line.strip_prefix("VmHWM:") {
+                return v.trim().trim_end_matches("kB").trim().parse().unwrap_or(0);
+            }
+        }
+        0
+    }
 }
 
 fn bench(engine: &dyn TtsEngine, name: &str, text: &str, runs: usize) {
