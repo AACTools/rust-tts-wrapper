@@ -2,7 +2,7 @@
 
 Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
 
-## Engines (22 total)
+## Engines (23 total)
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
@@ -260,6 +260,7 @@ cargo build --all-features
 - `sapi` — SAPI (Windows system TTS)
 - `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
 - `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
+- `floravox` — [floravox](https://github.com/AACTools/floravox) offline TTS for piper-family voices: native SSML (`<break>`, `<prosody rate>`, `<mark>`, `<phoneme>`), pluggable G2P (FST lexicon + Phonetisaurus/ByT5 OOV), and **measured** word boundaries from the model's duration tensor (patched voices) instead of estimates. Voices are piper-layout dirs (`X.onnx` + `X.onnx.json`) under `~/.rust-tts-wrapper/floravox/` (configurable via `modelsDir`; also `modelId`, `lexicon`, `phonetisaurus`, `byt5Encoder`/`byt5Decoder` credentials). Links cleanly alongside `sherpaonnx` (shared onnxruntime). See `examples/floravox-demo.rs`.
 
 ### Lint & Test
 
