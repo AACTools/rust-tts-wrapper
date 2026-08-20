@@ -558,6 +558,7 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
         let boundary2 = { *ctx_ref.on_boundary2.lock().unwrap() };
+        let boundary3 = { *ctx_ref.on_boundary3.lock().unwrap() };
         let mark = { *ctx_ref.on_mark.lock().unwrap() };
 
         let mut on_mark_closure: Option<BoxedMarkCb> = mark.cb.map(|cb| {
@@ -601,6 +602,19 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
                                 start,
                                 end,
                                 boundary2.userdata,
+                            );
+                        }
+                    }
+                    if let Some(cb) = boundary3.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(
+                                c_word.as_ptr(),
+                                char_offset,
+                                char_len,
+                                start,
+                                end,
+                                i32::from(estimated),
+                                boundary3.userdata,
                             );
                         }
                     }
