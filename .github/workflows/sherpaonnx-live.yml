@@ -37,8 +37,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev wget bzip2 tar
 
       - name: Cache SherpaOnnx models
-        # Key on the hash of models.json so any registry update
-        # (which could rename or remove a model id) busts the cache and
+        # Key on the registry revision so any registry update (which
+        # could rename or remove a model id) busts the cache and
         # re-downloads. Without this the workflow re-pulled ~250 MB per
         # platform on every PR that touched sherpaonnx_engine.rs.
         uses: actions/cache@v4
@@ -52,7 +52,14 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/kyutai-en-pocket-tts-int8
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
             ~/.rust-tts-wrapper/sherpaonnx/vocos_24khz.onnx
-          key: sherpa-models-${{ matrix.os }}-${{ hashFiles('src/models.json') }}
+          key: sherpa-models-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Fetch registry models.json (canonical repo)
+        run: |
+          mkdir -p /tmp/rtw-registry
+          curl -sSL -o /tmp/rtw-registry/models.json \
+            https://raw.githubusercontent.com/AACTools/sherpa-onnx-tts-models/main/models.json
+          echo "RTW_MODELS=/tmp/rtw-registry/models.json" >> $GITHUB_ENV
           restore-keys: |
             sherpa-models-${{ matrix.os }}-
 

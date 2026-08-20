@@ -8,8 +8,9 @@ human-readable error on stderr otherwise. Used by the
 sherpaonnx-live.yml GitHub Actions workflow so a registry rename produces
 a clear error rather than an opaque Python traceback.
 
-The registry path can be overridden via the RTW_MODELS env var;
-    defaults to src/models.json relative to the repo root.
+The registry path can be overridden via the RTW_MODELS env var; by
+default the models.json embedded in the sherpa-onnx-models crate is
+located in the cargo registry cache (~/.cargo/registry/src/...).
 """
 
 from __future__ import annotations
@@ -26,15 +27,19 @@ def main() -> int:
         return 2
 
     model_id = sys.argv[1]
-    registry_path = Path(
-        os.environ.get(
-            "RTW_MODELS",
-            Path(__file__).resolve().parent.parent / "src" / "models.json",
-        )
-    )
+    def default_registry() -> Path | None:
+        cache = Path.home() / ".cargo" / "registry" / "src"
+        if not cache.is_dir():
+            return None
+        for candidate in sorted(cache.glob("*/sherpa-onnx-models-*/models.json"), reverse=True):
+            if candidate.is_file():
+                return candidate
+        return None
 
-    if not registry_path.is_file():
-        print(f"registry not found at {registry_path}", file=sys.stderr)
+    registry_path = Path(os.environ["RTW_MODELS"]) if "RTW_MODELS" in os.environ else default_registry()
+
+    if registry_path is None or not registry_path.is_file():
+        print(f"registry not found (looked in cargo cache for sherpa-onnx-models)", file=sys.stderr)
         return 1
 
     try:
