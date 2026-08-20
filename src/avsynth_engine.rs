@@ -62,6 +62,7 @@ impl TtsEngine for AvSynthEngine {
         volume: f32,
         _on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         let guard = self.handle.lock().unwrap();
         if guard.is_null() {
