@@ -19,43 +19,19 @@ mod sherpaonnx_tests {
         num_speakers: u32,
     }
 
-    /// Mirror of `sherpaonnx_engine::load_models` — parses the embedded
-    /// `models.json` so we can validate the registry actually loads
-    /// and the per-type counts match what the README advertises.
+    /// Registry access via the sherpa-onnx-models crate (the old
+    /// embedded-copy parse is gone); validates the registry loads and
+    /// the per-type counts match what the README advertises.
     fn parse_registry() -> HashMap<String, ModelInfo> {
-        let json = include_str!("../src/models.json");
-        let raw: HashMap<String, serde_json::Value> =
-            serde_json::from_str(json).expect("models.json must parse");
         let mut out = HashMap::new();
-        for (key, val) in raw {
-            let Some(obj) = val.as_object() else {
-                continue;
-            };
-            let model_type = obj
-                .get("model_type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let name = obj
-                .get("name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let sample_rate = obj
-                .get("sample_rate")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(24000) as u32;
-            let num_speakers = obj
-                .get("num_speakers")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(1) as u32;
+        for (key, m) in sherpa_onnx_models::models() {
             out.insert(
-                key,
+                key.clone(),
                 ModelInfo {
-                    model_type,
-                    name,
-                    sample_rate,
-                    num_speakers,
+                    model_type: m.model_type.clone(),
+                    name: m.name.clone(),
+                    sample_rate: m.sample_rate,
+                    num_speakers: m.num_speakers,
                 },
             );
         }

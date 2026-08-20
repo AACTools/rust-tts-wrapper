@@ -231,6 +231,19 @@ impl FloravoxEngine {
 
     /// Get (building if needed) the cached synthesizer for a voice.
     fn synthesizer(&self, voice: Option<&str>) -> TtsResult<Arc<Synthesizer<Phon>>> {
+        self.synthesizer_for(voice, None)
+    }
+
+    /// Resolve the synthesizer, letting an SSML `<speak xml:lang="...">`
+    /// stand in for a `lang` credential (per-utterance language routing;
+    /// the cache key covers it, so a language switch reuses the model
+    /// path but rebuilds the phonemizer only when the key differs).
+    fn synthesizer_for(
+        &self,
+        voice: Option<&str>,
+        doc_lang: Option<&str>,
+    ) -> TtsResult<Arc<Synthesizer<Phon>>> {
+        let effective_lang = self.lang.as_deref().or(doc_lang);
         let onnx = self.resolve_model(voice)?;
         let key = format!(
             "{}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}|{:?}",
@@ -241,7 +254,7 @@ impl FloravoxEngine {
             self.byt5_decoder,
             self.misaki,
             self.chars,
-            self.lang,
+            effective_lang,
         );
         let mut guard = self
             .synth
@@ -254,7 +267,7 @@ impl FloravoxEngine {
         }
         let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
-        let mut synth = Synthesizer::new(model, build_phonemizer(self));
+        let mut synth = Synthesizer::new(model, build_phonemizer(self, effective_lang));
 
         // Document-level pre-passes, in order of specificity:
         //   chars (MMS-style character voices) > misaki (English)
@@ -355,7 +368,7 @@ fn default_models_dir() -> PathBuf {
 
 /// Build the phonemizer stack from the engine's g2p options.
 /// OOV chain: Phonetisaurus → ByT5 → letter spelling (first hit wins).
-fn build_phonemizer(engine: &FloravoxEngine) -> Phon {
+fn build_phonemizer(engine: &FloravoxEngine, effective_lang: Option<&str>) -> Phon {
     // Resolve the lexicon stem: explicit `lexicon` config wins; with the
     // floravox-lexicons feature, the published bundle for the voice's
     // language (which also carries a trained Phonetisaurus WFST) is
@@ -366,7 +379,7 @@ fn build_phonemizer(engine: &FloravoxEngine) -> Phon {
     #[allow(unused_mut)]
     let mut lexicon_stem = lexicon_stem;
     #[cfg(feature = "floravox-lexicons")]
-    if let Some(lang) = &engine.lang {
+    if let Some(lang) = effective_lang {
         if lexicon_stem.is_none() && phonetisaurus.is_none() {
             match voicegarden_lexicons::LexiconArchive::default_archive()
                 .and_then(|a| a.fetch(lang))
@@ -497,6 +510,40 @@ fn wrap_rate(text: &str, rate: f32) -> String {
             escape_text(text)
         )
     }
+}
+
+/// Build the input floravox receives: SpeechMarkdown (when enabled) is
+/// converted to the generic SSML dialect and normalized for floravox;
+/// rate wraps an outer prosody. Exposed for tests.
+fn prepare_input(text: &str, rate: f32) -> String {
+    #[cfg(feature = "speechmarkdown")]
+    let text = {
+        let (processed, _is_ssml) = crate::engine::preprocess_speech_markdown(text, "floravox");
+        normalize_ssml_for_floravox(&processed)
+    };
+    #[cfg(not(feature = "speechmarkdown"))]
+    let text = text.to_string();
+    wrap_rate(&text, rate)
+}
+
+/// Document language: `<speak xml:lang="...">` when present. Used for
+/// lexicon-bundle routing when no explicit `lang` credential is set.
+fn document_lang(text: &str) -> Option<String> {
+    let doc = floravox_ssml::parse(text).ok()?;
+    doc.lang
+}
+
+/// Map vendor-specific SSML elements from the generic SpeechMarkdown
+/// dialect onto floravox-supported equivalents. floravox's parser treats
+/// unknown tags as transparent containers (their text still renders), so
+/// this is fidelity polish, not correctness: today only whisper has a
+/// better mapping than speak-normally.
+fn normalize_ssml_for_floravox(ssml: &str) -> String {
+    ssml.replace(
+        "<amazon:effect name=\"whispered\">",
+        "<prosody volume=\"soft\" rate=\"0.85\">",
+    )
+    .replace("</amazon:effect>", "</prosody>")
 }
 
 /// XML-escape plain text being wrapped into SSML.
@@ -640,8 +687,8 @@ impl TtsEngine for FloravoxEngine {
         on_audio: Option<crate::engine::OnAudioCallback<'_>>,
         on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
     ) -> TtsResult<()> {
-        let synth = self.synthesizer(voice)?;
-        let input = wrap_rate(text, rate);
+        let input = prepare_input(text, rate);
+        let synth = self.synthesizer_for(voice, document_lang(text).as_deref())?;
         let stream = synth
             .synthesize_stream(&input)
             .map_err(|e| TtsError(format!("floravox synthesis: {e:#}")))?;
@@ -698,8 +745,8 @@ impl TtsEngine for FloravoxEngine {
         _pitch: f32,
         volume: f32,
     ) -> TtsResult<(Vec<u8>, Vec<WordBoundary>)> {
-        let synth = self.synthesizer(voice)?;
-        let input = wrap_rate(text, rate);
+        let input = prepare_input(text, rate);
+        let synth = self.synthesizer_for(voice, document_lang(text).as_deref())?;
         let stream = synth
             .synthesize_stream(&input)
             .map_err(|e| TtsError(format!("floravox synthesis: {e:#}")))?;
@@ -776,6 +823,46 @@ mod tests {
         assert_eq!(list[0].provider, "floravox");
         assert_eq!(list[0].language_codes[0].bcp47, "en-US");
         assert_eq!(engine.engine_id(), "floravox");
+    }
+
+    #[test]
+    fn speechmarkdown_flows_into_floravox_ssml() {
+        // SpeechMarkdown inline modifiers → generic-dialect SSML that
+        // floravox parses natively (break, prosody rate, sub, say-as).
+        let input = prepare_input(
+            "[250ms] Hello (fast)[rate:2] (WWW)[sub:\"World Wide Web\"] (hi)[chars]",
+            1.0,
+        );
+        assert!(input.contains("<break"), "{input}");
+        assert!(input.contains("prosody"), "{input}");
+        assert!(input.contains("<sub alias="), "{input}");
+        assert!(input.contains("say-as"), "{input}");
+    }
+
+    #[test]
+    fn whisper_maps_to_floravox_prosody() {
+        let input = prepare_input("(be very quiet)[whisper]", 1.0);
+        assert!(
+            input.contains("<prosody volume=\"soft\" rate=\"0.85\">"),
+            "{input}"
+        );
+        assert!(!input.contains("amazon:effect"), "{input}");
+    }
+
+    #[test]
+    fn plain_text_passes_through_untouched() {
+        assert_eq!(prepare_input("plain words", 1.0), "plain words");
+        // rate wrapping still applies
+        assert!(prepare_input("plain words", 1.5).contains("prosody"));
+    }
+
+    #[test]
+    fn document_lang_is_extracted() {
+        assert_eq!(
+            document_lang(r#"<speak xml:lang="de-DE">Guten Tag</speak>"#).as_deref(),
+            Some("de-DE")
+        );
+        assert!(document_lang("plain text").is_none());
     }
 
     #[test]
