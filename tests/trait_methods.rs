@@ -290,7 +290,7 @@ fn speak_with_options_threads_options_to_engine() {
     // We don't assert on the Result — either it succeeds (network) or it
     // fails (no network / 401). The contract is that the option plumbing
     // doesn't panic.
-    let _ = e.speak_with_options("hi", Some(&opts), None, None);
+    let _ = e.speak_with_options("hi", Some(&opts), None, None, None);
 }
 
 // ===== synth_with_boundaries returns (audio, boundaries) of the right shape =====

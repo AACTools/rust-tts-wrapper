@@ -70,11 +70,22 @@ pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void
 pub type CBoundaryCb = Option<extern "C" fn(*const c_char, f32, f32, *mut std::ffi::c_void)>;
 pub type CBoundaryCb2 =
     Option<extern "C" fn(*const c_char, i32, i32, f32, f32, *mut std::ffi::c_void)>;
+/// Mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
+/// char_offset is -1 when unknown; start/end are the measured (or
+/// estimated) audio position the mark fires at.
+pub type CMarkCb = Option<extern "C" fn(*const c_char, i32, f32, f32, *mut std::ffi::c_void)>;
+/// Boundary callback with the estimated flag: cb(word, char_offset,
+/// char_len, start_s, end_s, estimated, userdata). `estimated` is 1 when
+/// the timings are proportional estimates (unpatched voice), 0 when
+/// measured from the model's duration tensor.
+pub type CBoundaryCb3 =
+    Option<extern "C" fn(*const c_char, i32, i32, f32, f32, i32, *mut std::ffi::c_void)>;
 pub type CVisemeCb = Option<extern "C" fn(i32, f32, *mut std::ffi::c_void)>;
 pub type CVoidCb = Option<extern "C" fn(*mut std::ffi::c_void)>;
 pub type CErrorCb = Option<extern "C" fn(*const c_char, *mut std::ffi::c_void)>;
 type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
 type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32, i32, i32)>;
+type BoxedMarkCb = Box<dyn FnMut(&str, f32, f32, i32)>;
 
 pub struct tts_ctx {
     // The TtsEngine trait already requires Send + Sync, and every engine
@@ -105,6 +116,8 @@ pub struct tts_ctx {
     on_end: Mutex<VoidCallback>,
     on_error: Mutex<ErrorCallback>,
     on_boundary2: Mutex<BoundaryCallback2>,
+    on_boundary3: Mutex<BoundaryCallback3>,
+    on_mark: Mutex<MarkCallback>,
     on_viseme: Mutex<VisemeCallback>,
 }
 
@@ -140,6 +153,18 @@ struct ErrorCallback {
 #[derive(Clone, Copy)]
 struct BoundaryCallback2 {
     cb: CBoundaryCb2,
+    userdata: *mut std::ffi::c_void,
+}
+
+#[derive(Clone, Copy)]
+struct MarkCallback {
+    cb: CMarkCb,
+    userdata: *mut std::ffi::c_void,
+}
+
+#[derive(Clone, Copy)]
+struct BoundaryCallback3 {
+    cb: CBoundaryCb3,
     userdata: *mut std::ffi::c_void,
 }
 
@@ -266,6 +291,14 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
                 cb: None,
                 userdata: ptr::null_mut(),
             }),
+            on_boundary3: Mutex::new(BoundaryCallback3 {
+                cb: None,
+                userdata: std::ptr::null_mut(),
+            }),
+            on_mark: Mutex::new(MarkCallback {
+                cb: None,
+                userdata: std::ptr::null_mut(),
+            }),
             on_boundary2: Mutex::new(BoundaryCallback2 {
                 cb: None,
                 userdata: ptr::null_mut(),
@@ -374,6 +407,8 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
         let boundary2 = { *ctx_ref.on_boundary2.lock().unwrap() };
+        let boundary3 = { *ctx_ref.on_boundary3.lock().unwrap() };
+        let mark = { *ctx_ref.on_mark.lock().unwrap() };
 
         let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
             Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -403,9 +438,33 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
                             );
                         }
                     }
+                    if let Some(cb) = boundary3.cb {
+                        if let Ok(c_word) = CString::new(word) {
+                            cb(
+                                c_word.as_ptr(),
+                                char_offset,
+                                char_len,
+                                start,
+                                end,
+                                0,
+                                boundary3.userdata,
+                            );
+                        }
+                    }
                 },
             )),
         };
+
+        let mut on_mark_closure: Option<BoxedMarkCb> = mark.cb.map(|cb| {
+            let ud = mark.userdata;
+            let b: BoxedMarkCb =
+                Box::new(move |name: &str, start: f32, end: f32, char_offset: i32| {
+                    if let Ok(c_name) = CString::new(name) {
+                        cb(c_name.as_ptr(), char_offset, start, end, ud);
+                    }
+                });
+            b
+        });
 
         let start_cb = { *ctx_ref.on_start.lock().unwrap() };
         let end_cb = { *ctx_ref.on_end.lock().unwrap() };
@@ -440,6 +499,9 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
             on_boundary_closure
                 .as_mut()
                 .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32)),
+            on_mark_closure
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32)),
         );
 
         match result {
@@ -473,6 +535,7 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
 /// `ctx` must be a valid pointer from [`tts_create`].
 /// `text` must be a valid null-terminated C string.
 #[no_mangle]
+#[allow(clippy::too_many_lines)]
 pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
     ffi_catch!({
         if ctx.is_null() || text.is_null() {
@@ -490,6 +553,18 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let audio = { *ctx_ref.on_audio.lock().unwrap() };
         let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
         let boundary2 = { *ctx_ref.on_boundary2.lock().unwrap() };
+        let mark = { *ctx_ref.on_mark.lock().unwrap() };
+
+        let mut on_mark_closure: Option<BoxedMarkCb> = mark.cb.map(|cb| {
+            let ud = mark.userdata;
+            let b: BoxedMarkCb =
+                Box::new(move |name: &str, start: f32, end: f32, char_offset: i32| {
+                    if let Ok(c_name) = CString::new(name) {
+                        cb(c_name.as_ptr(), char_offset, start, end, ud);
+                    }
+                });
+            b
+        });
 
         let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
             Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -558,6 +633,9 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             on_boundary_closure
                 .as_mut()
                 .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32, i32)),
+            on_mark_closure
+                .as_mut()
+                .map(|f| &mut **f as &mut dyn FnMut(&str, f32, f32, i32)),
         );
 
         match result {
@@ -846,6 +924,44 @@ pub extern "C" fn tts_set_on_boundary2(
         }
         let ctx_ref = unsafe { &*ctx };
         *ctx_ref.on_boundary2.lock().unwrap() = BoundaryCallback2 { cb, userdata };
+    }));
+}
+
+/// Set the mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
+/// Fires for `<mark>`/`<bookmark>` SSML tags at their measured audio
+/// position on engines that report them (floravox).
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_mark(ctx: *mut tts_ctx, cb: CMarkCb, userdata: *mut std::ffi::c_void) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_mark.lock().unwrap() = MarkCallback { cb, userdata };
+    }));
+}
+
+/// Boundary callback with the estimated flag:
+/// cb(word, char_offset, char_len, start_s, end_s, estimated, userdata).
+/// `estimated` != 0 means proportional estimates, not measured timings.
+///
+/// # Safety
+/// `ctx` must be valid.
+#[no_mangle]
+pub extern "C" fn tts_set_on_boundary3(
+    ctx: *mut tts_ctx,
+    cb: CBoundaryCb3,
+    userdata: *mut std::ffi::c_void,
+) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        let ctx_ref = unsafe { &*ctx };
+        *ctx_ref.on_boundary3.lock().unwrap() = BoundaryCallback3 { cb, userdata };
     }));
 }
 

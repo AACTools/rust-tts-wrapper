@@ -36,6 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         1.0,  // Normal volume
         None, // No audio callback (direct playback)
         None, // No word boundary callback
+        None, // No mark callback
     )?;
 
     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -64,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         1.2, // Louder volume
                         None,
                         None,
+                        None,
                     )?;
 
                     std::thread::sleep(std::time::Duration::from_millis(500));
@@ -86,23 +88,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let test_sentence = "This demonstrates rate and pitch control in text-to-speech.";
 
     println!("🐢 Slow speech:");
-    engine.speak(test_sentence, None, 0.7, 1.0, 1.0, None, None)?;
+    engine.speak(test_sentence, None, 0.7, 1.0, 1.0, None, None, None)?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     println!("🎯 Normal speech:");
-    engine.speak(test_sentence, None, 1.0, 1.0, 1.0, None, None)?;
+    engine.speak(test_sentence, None, 1.0, 1.0, 1.0, None, None, None)?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     println!("🐇 Fast speech:");
-    engine.speak(test_sentence, None, 1.5, 1.0, 1.0, None, None)?;
+    engine.speak(test_sentence, None, 1.5, 1.0, 1.0, None, None, None)?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     println!("🔈 Low pitch:");
-    engine.speak(test_sentence, None, 1.0, 0.8, 1.0, None, None)?;
+    engine.speak(test_sentence, None, 1.0, 0.8, 1.0, None, None, None)?;
     std::thread::sleep(std::time::Duration::from_millis(100));
 
     println!("🔊 High pitch:");
-    engine.speak(test_sentence, None, 1.0, 1.2, 1.0, None, None)?;
+    engine.speak(test_sentence, None, 1.0, 1.2, 1.0, None, None, None)?;
 
     // Example 4: Saving to file
     println!("\n\nExample 4: Saving Audio to File");
@@ -131,7 +133,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("let engine = create_engine(\"system\", \"\")?;");
     println!("");
     println!("// Simple speech");
-    println!("engine.speak(\"Hello!\", None, 1.0, 1.0, 1.0, None, None)?;");
+    println!("engine.speak(\"Hello!\", None, 1.0, 1.0, 1.0, None, None, None)?;");
     println!("");
     println!("// Save to file");
     println!("let audio = engine.synth_to_bytes(\"Hello file!\", None, 1.0, 1.0, 1.0)?;");

@@ -25,6 +25,7 @@ fn main() {
                 1.0,
                 Some(&mut |chunk: &[u8]| bytes += chunk.len()),
                 Some(&mut |_w, _s, _e, _o, _l| words += 1),
+                None,
             )
             .unwrap_or_else(|e| panic!("{text}: speak failed: {e}"));
         println!("{text:?}: {bytes} PCM bytes, {words} word boundaries");

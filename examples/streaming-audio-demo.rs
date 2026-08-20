@@ -145,6 +145,7 @@ fn stream_to_file(
             }
         }),
         None, // no boundary callback
+        None, // no mark callback
     )?;
 
     println!(

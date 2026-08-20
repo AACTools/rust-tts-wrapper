@@ -44,6 +44,7 @@ impl TtsEngine for SystemEngine {
         volume: f32,
         _on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
         let guard = self.conn.lock().unwrap();
         let conn = guard
@@ -93,8 +94,18 @@ impl TtsEngine for SystemEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback>,
         on_boundary: Option<crate::engine::OnBoundaryCallback>,
+        on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
-        self.speak(text, voice, rate, pitch, volume, on_audio, on_boundary)
+        self.speak(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            on_audio,
+            on_boundary,
+            on_mark,
+        )
     }
 
     fn stop(&self) -> TtsResult<()> {

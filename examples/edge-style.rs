@@ -15,6 +15,7 @@ fn main() {
                 1.0,
                 Some(&mut |c: &[u8]| bytes += c.len()),
                 None,
+                None,
             )
             .unwrap_or_else(|e| panic!("{text}: {e}"));
         println!("{text:?}: {bytes} bytes");

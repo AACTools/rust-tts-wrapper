@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     1.0,
                                     None,
                                     None,
+                                    None,
                                 ) {
                                     Ok(_) => println!("   ✅ Voice test successful"),
                                     Err(e) => println!("   ⚠️  Voice test failed: {}", e),
@@ -92,27 +93,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let test_text = "This demonstrates prosody control in text-to-speech synthesis.";
 
         println!("🐢 Slow speech (0.7x rate):");
-        engine.speak(test_text, None, 0.7, 1.0, 1.0, None, None)?;
+        engine.speak(test_text, None, 0.7, 1.0, 1.0, None, None, None)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         println!("🐇 Fast speech (1.5x rate):");
-        engine.speak(test_text, None, 1.5, 1.0, 1.0, None, None)?;
+        engine.speak(test_text, None, 1.5, 1.0, 1.0, None, None, None)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         println!("🔉 Low pitch (0.8x):");
-        engine.speak(test_text, None, 1.0, 0.8, 1.0, None, None)?;
+        engine.speak(test_text, None, 1.0, 0.8, 1.0, None, None, None)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         println!("🔈 High pitch (1.2x):");
-        engine.speak(test_text, None, 1.0, 1.2, 1.0, None, None)?;
+        engine.speak(test_text, None, 1.0, 1.2, 1.0, None, None, None)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         println!("🔉 Low volume (0.5x):");
-        engine.speak(test_text, None, 1.0, 1.0, 0.5, None, None)?;
+        engine.speak(test_text, None, 1.0, 1.0, 0.5, None, None, None)?;
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         println!("🔊 High volume (1.5x):");
-        engine.speak(test_text, None, 1.0, 1.0, 1.5, None, None)?;
+        engine.speak(test_text, None, 1.0, 1.0, 1.5, None, None, None)?;
 
         println!("✅ Prosody control demo complete\n");
     }
@@ -172,6 +173,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             1.0,
                             None,
                             None,
+                            None,
                         ) {
                             Ok(_) => println!("   ✅ Synthesis successful"),
                             Err(e) => println!("   ❌ Synthesis failed: {}", e),
@@ -223,7 +225,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "#;
 
             println!("Testing SSML input...");
-            match engine.speak(ssml_example, None, 1.0, 1.0, 1.0, None, None) {
+            match engine.speak(ssml_example, None, 1.0, 1.0, 1.0, None, None, None) {
                 Ok(_) => println!("✅ SSML synthesis successful"),
                 Err(e) => println!("❌ SSML synthesis failed: {}", e),
             }
