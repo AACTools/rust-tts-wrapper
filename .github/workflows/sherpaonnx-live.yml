@@ -53,6 +53,8 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
             ~/.rust-tts-wrapper/sherpaonnx/vocos_24khz.onnx
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            sherpa-models-${{ matrix.os }}-
 
       - name: Fetch registry models.json (canonical repo)
         run: |
@@ -60,8 +62,6 @@ jobs:
           curl -sSL -o /tmp/rtw-registry/models.json \
             https://raw.githubusercontent.com/AACTools/sherpa-onnx-tts-models/main/models.json
           echo "RTW_MODELS=/tmp/rtw-registry/models.json" >> $GITHUB_ENV
-          restore-keys: |
-            sherpa-models-${{ matrix.os }}-
 
       - name: Cache Cargo build
         uses: Swatinem/rust-cache@v2
