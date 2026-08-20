@@ -9,6 +9,8 @@ use std::sync::Arc;
 use crate::avsynth_engine::AvSynthEngine;
 #[cfg(feature = "cloud")]
 use crate::cloud_engine;
+#[cfg(feature = "floravox")]
+use crate::floravox_engine::FloravoxEngine;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 use crate::sapi_engine::SapiEngine;
 #[cfg(feature = "sherpaonnx")]
@@ -22,6 +24,7 @@ use crate::system_engine::SystemEngine;
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
 #[must_use]
 #[allow(unused_variables)]
+#[allow(clippy::too_many_lines)]
 pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
     // Detect engines that exist in the full catalogue but were compiled out
     // by disabled features, so callers get a useful error rather than a
@@ -80,6 +83,20 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
                 eprintln!(
                     "Engine 'sherpaonnx' is not enabled in this build. \
                      Rebuild with --features sherpaonnx."
+                );
+                return None;
+            }
+        }
+        "floravox" => {
+            #[cfg(feature = "floravox")]
+            {
+                return Some(Arc::new(FloravoxEngine::new(credentials_json)));
+            }
+            #[cfg(not(feature = "floravox"))]
+            {
+                eprintln!(
+                    "Engine 'floravox' is not enabled in this build. \
+                     Rebuild with --features floravox."
                 );
                 return None;
             }
@@ -162,6 +179,16 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         name: "Sherpa-ONNX".into(),
         needs_credentials: false,
         credential_keys_json: "[]".into(),
+    });
+
+    #[cfg(feature = "floravox")]
+    engines.push(EngineDescriptor {
+        id: "floravox".into(),
+        name: "floravox (piper voices, SSML, measured boundaries)".into(),
+        needs_credentials: false,
+        credential_keys_json:
+            r#"["modelsDir","modelId","lexicon","phonetisaurus","byt5Encoder","byt5Decoder"]"#
+                .into(),
     });
 
     #[cfg(feature = "cloud")]
