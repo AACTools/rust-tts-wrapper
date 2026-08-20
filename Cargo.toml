@@ -16,6 +16,18 @@ name = "quick-start"
 path = "examples/quick-start.rs"
 
 [[example]]
+name = "floravox-demo"
+required-features = ["floravox"]
+
+[[example]]
+name = "floravox-stream-demo"
+required-features = ["floravox"]
+
+[[example]]
+name = "engine-bench"
+required-features = ["floravox"]
+
+[[example]]
 name = "word-boundary-demo"
 path = "examples/word-boundary-demo.rs"
 
