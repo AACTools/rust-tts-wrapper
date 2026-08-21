@@ -102,7 +102,7 @@ jobs:
           echo "TTS_WRAPPER_LIB=$LIB" >> "$GITHUB_ENV"
       - name: dotnet test
         working-directory: bindings/dotnet
-        run: dotnet test -p:SkipNativeLibCheck=true
+        run: dotnet test tests/RustTtsWrapper.Bindings.Tests.csproj -p:SkipNativeLibCheck=true
 
   swift:
     name: Swift (macOS)

@@ -44,6 +44,14 @@
     <PackageReference Include="DotNetTtsWrapper" Version="1.1.4" />
   </ItemGroup>
 
+  <!-- The xunit test project lives in tests/ — keep it out of the
+       library assembly (the default **/*.cs glob would otherwise compile
+       the test sources into the NuGet assembly without xunit refs). -->
+  <ItemGroup>
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
   <!--
     Bundle the native DLLs into the NuGet package. The standard convention
     is runtimes/{RID}/native/{file}. MSBuild auto-resolves the correct

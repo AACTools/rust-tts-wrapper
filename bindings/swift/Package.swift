@@ -1,4 +1,5 @@
 // swift-tools-version:5.9
+import Foundation
 import PackageDescription
 
 // Build the Rust library first and point the build at it:
