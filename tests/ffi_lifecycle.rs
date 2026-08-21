@@ -20,10 +20,9 @@ use rust_tts_wrapper::types::{tts_engine_info, tts_voice};
 use rust_tts_wrapper::{
     tts_create, tts_destroy, tts_free_bytes, tts_free_engines, tts_free_voices,
     tts_get_engine_count, tts_get_engines, tts_get_last_error, tts_get_voices, tts_pause,
-    tts_resume, tts_set_on_audio, tts_set_on_boundary, tts_set_on_boundary2, tts_set_on_end,
-    tts_set_on_error, tts_set_on_start, tts_set_on_viseme, tts_set_pitch, tts_set_rate,
-    tts_set_voice, tts_set_volume, tts_speak, tts_speak_ssml, tts_speak_sync, tts_stop,
-    tts_synth_to_bytes,
+    tts_resume, tts_set_on_audio, tts_set_on_boundary, tts_set_on_end, tts_set_on_error,
+    tts_set_on_start, tts_set_on_viseme, tts_set_pitch, tts_set_rate, tts_set_voice,
+    tts_set_volume, tts_speak, tts_speak_ssml, tts_speak_sync, tts_stop, tts_synth_to_bytes,
 };
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -213,6 +212,28 @@ fn test_ffi_free_bytes_null_is_noop() {
     // do this on an empty synth result.
     tts_free_bytes(std::ptr::null_mut(), 0);
     tts_free_bytes(std::ptr::null_mut(), 1024);
+}
+
+#[test]
+fn test_ffi_boundary_registration_smoke() {
+    // Regression (issue #31): a boundary-only registration must wire the
+    // fan-out. With the single consolidated callback the closure is built
+    // directly from cb presence, so this can no longer be gated on a
+    // second registration — kept as a guard against re-introducing
+    // versioned fan-out gating.
+    let ctx = make_ctx();
+    extern "C" fn on_boundary(
+        _word: *const std::os::raw::c_char,
+        _char_offset: std::os::raw::c_int,
+        _char_len: std::os::raw::c_int,
+        _start_s: f32,
+        _end_s: f32,
+        _estimated: std::os::raw::c_int,
+        _userdata: *mut std::ffi::c_void,
+    ) {
+    }
+    tts_set_on_boundary(ctx, Some(on_boundary), std::ptr::null_mut());
+    tts_destroy(ctx);
 }
 
 #[test]
@@ -408,13 +429,13 @@ fn test_ffi_free_engines_null_is_noop() {
 // cloud tests).
 
 extern "C" fn sink_audio(_d: *const u8, _s: usize, _u: *mut std::ffi::c_void) {}
-extern "C" fn sink_boundary(_w: *const c_char, _s: f32, _e: f32, _u: *mut std::ffi::c_void) {}
-extern "C" fn sink_boundary2(
+extern "C" fn sink_boundary(
     _w: *const c_char,
     _o: i32,
     _l: i32,
     _s: f32,
     _e: f32,
+    _est: i32,
     _u: *mut std::ffi::c_void,
 ) {
 }
@@ -428,7 +449,6 @@ fn test_ffi_callback_setters_register_without_panicking() {
 
     tts_set_on_audio(ctx, Some(sink_audio), std::ptr::null_mut());
     tts_set_on_boundary(ctx, Some(sink_boundary), std::ptr::null_mut());
-    tts_set_on_boundary2(ctx, Some(sink_boundary2), std::ptr::null_mut());
     tts_set_on_viseme(ctx, Some(sink_viseme), std::ptr::null_mut());
     tts_set_on_start(ctx, Some(sink_void), std::ptr::null_mut());
     tts_set_on_end(ctx, Some(sink_void), std::ptr::null_mut());
@@ -448,9 +468,6 @@ fn test_ffi_callback_setters_accept_none_to_clear() {
 
     tts_set_on_boundary(ctx, Some(sink_boundary), std::ptr::null_mut());
     tts_set_on_boundary(ctx, None, std::ptr::null_mut());
-
-    tts_set_on_boundary2(ctx, Some(sink_boundary2), std::ptr::null_mut());
-    tts_set_on_boundary2(ctx, None, std::ptr::null_mut());
 
     tts_set_on_viseme(ctx, Some(sink_viseme), std::ptr::null_mut());
     tts_set_on_viseme(ctx, None, std::ptr::null_mut());
@@ -477,11 +494,6 @@ fn test_ffi_callback_setters_null_ctx_safe() {
         Some(sink_boundary),
         std::ptr::null_mut(),
     );
-    tts_set_on_boundary2(
-        std::ptr::null_mut(),
-        Some(sink_boundary2),
-        std::ptr::null_mut(),
-    );
     tts_set_on_viseme(
         std::ptr::null_mut(),
         Some(sink_viseme),
@@ -494,22 +506,23 @@ fn test_ffi_callback_setters_null_ctx_safe() {
     // And None + null ctx.
     tts_set_on_audio(std::ptr::null_mut(), None, std::ptr::null_mut());
     tts_set_on_boundary(std::ptr::null_mut(), None, std::ptr::null_mut());
-    tts_set_on_boundary2(std::ptr::null_mut(), None, std::ptr::null_mut());
     tts_set_on_viseme(std::ptr::null_mut(), None, std::ptr::null_mut());
     tts_set_on_start(std::ptr::null_mut(), None, std::ptr::null_mut());
     tts_set_on_end(std::ptr::null_mut(), None, std::ptr::null_mut());
     tts_set_on_error(std::ptr::null_mut(), None, std::ptr::null_mut());
 }
 
-// ===== Callback userdata round-trip (boundary2) =====
+// ===== Callback userdata round-trip (boundary) =====
 //
-// Extends the existing on_audio trampoline test: verify the richer
-// boundary2 callback signature preserves its 6 arguments end-to-end.
+// Extends the existing on_audio trampoline test: verify the boundary
+// callback signature preserves its 7 arguments (incl. estimated)
+// end-to-end.
 
 static B2_CALLS: AtomicUsize = AtomicUsize::new(0);
 static B2_USERDATA: Mutex<usize> = Mutex::new(0);
 static B2_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static B2_LEN: AtomicUsize = AtomicUsize::new(0);
+static B2_ESTIMATED: AtomicUsize = AtomicUsize::new(0);
 
 extern "C" fn boundary2_cb(
     _w: *const c_char,
@@ -517,11 +530,13 @@ extern "C" fn boundary2_cb(
     len: i32,
     _s: f32,
     _e: f32,
+    estimated: i32,
     userdata: *mut std::ffi::c_void,
 ) {
     B2_CALLS.fetch_add(1, Ordering::SeqCst);
     B2_OFFSET.store(offset.max(0) as usize, Ordering::SeqCst);
     B2_LEN.store(len.max(0) as usize, Ordering::SeqCst);
+    B2_ESTIMATED.store(estimated.max(0) as usize, Ordering::SeqCst);
     if !userdata.is_null() {
         *B2_USERDATA.lock().unwrap() = userdata as usize;
     }
@@ -534,13 +549,23 @@ fn test_ffi_boundary2_callback_signature_compiles() {
     B2_CALLS.store(0, Ordering::SeqCst);
     B2_OFFSET.store(0, Ordering::SeqCst);
     B2_LEN.store(0, Ordering::SeqCst);
+    B2_ESTIMATED.store(0, Ordering::SeqCst);
 
     let word = CString::new("hello").unwrap();
-    boundary2_cb(word.as_ptr(), 7, 5, 0.1, 0.5, USERDATA_SENTINEL as *mut _);
+    boundary2_cb(
+        word.as_ptr(),
+        7,
+        5,
+        0.1,
+        0.5,
+        1,
+        USERDATA_SENTINEL as *mut _,
+    );
 
     assert_eq!(B2_CALLS.load(Ordering::SeqCst), 1);
     assert_eq!(B2_OFFSET.load(Ordering::SeqCst), 7);
     assert_eq!(B2_LEN.load(Ordering::SeqCst), 5);
+    assert_eq!(B2_ESTIMATED.load(Ordering::SeqCst), 1);
     assert_eq!(*B2_USERDATA.lock().unwrap(), USERDATA_SENTINEL);
 }
 

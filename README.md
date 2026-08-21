@@ -180,8 +180,7 @@ All functions are `extern "C"`, `#[no_mangle]`:
 | `tts_set_pitch(ctx, pitch)` | Set pitch (1.0 = normal) |
 | `tts_set_volume(ctx, volume)` | Set volume (1.0 = normal) |
 | `tts_set_on_audio(ctx, cb, userdata)` | Set streaming audio callback |
-| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback (word, start_s, end_s) |
-| `tts_set_on_boundary2(ctx, cb, userdata)` | Set boundary callback with char offset + length |
+| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback: cb(word, char_offset, char_len, start_s, end_s, estimated, userdata) |
 | `tts_set_on_viseme(ctx, cb, userdata)` | Set viseme callback for lip-sync |
 | `tts_set_on_start(ctx, cb, userdata)` | Set speech-started callback |
 | `tts_set_on_end(ctx, cb, userdata)` | Set speech-completed callback |
@@ -201,8 +200,10 @@ void on_audio(const uint8_t* chunk, uintptr_t size, void* userdata) {
     printf("Audio chunk: %zu bytes\n", size);
 }
 
-void on_boundary(const char* word, float start, float end, void* userdata) {
-    printf("Word '%s' %.3f-%.3f\n", word, start, end);
+void on_boundary(const char* word, int32_t offset, int32_t len,
+                 float start, float end, int32_t estimated, void* userdata) {
+    printf("Word '%s' %d+%d %.3f-%.3f %s\n", word, offset, len, start, end,
+           estimated ? "(estimated)" : "(measured)");
 }
 
 int main() {
