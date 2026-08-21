@@ -176,10 +176,11 @@ jobs:
             features: "system,cloud,floravox"
             label: "floravox-system-cloud-x86_64-linux"
             lib_ext: so
+          # Intel Macs: no ort prebuilt — onnxruntime loads at runtime.
           - target: x86_64-apple-darwin
             os: macos-latest
-            features: "avsynth,cloud,floravox"
-            label: "floravox-avsynth-cloud-x86_64-macos"
+            features: "avsynth,cloud,floravox-dynamic"
+            label: "floravox-dynamic-avsynth-cloud-x86_64-macos"
             lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
