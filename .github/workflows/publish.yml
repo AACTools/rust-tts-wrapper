@@ -464,9 +464,35 @@ jobs:
             dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
           }
 
+  npm:
+    name: Publish @aactools/tts-wrapper to npm
+    needs: build
+    runs-on: ubuntu-latest
+    # No-op until the NPM_TOKEN secret is configured (publishes the
+    # koffi-based Node binding; the package itself is pure JS).
+    if: github.event_name == 'push' && hashFiles('bindings/nodejs/package.json') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Check token + publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: bindings/nodejs
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret not set — skipping npm publish (run 'npm publish --access public' locally or add the secret)"
+            exit 0
+          fi
+          npm install --no-fund --no-audit
+          npm test
+          npm publish --access public
+
   release:
     name: GitHub Release
-    needs: [build, xcframework]
+    needs: [build, xcframework, npm]
     runs-on: ubuntu-latest
     permissions:
       contents: write
