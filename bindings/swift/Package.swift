@@ -12,10 +12,10 @@ let package = Package(
         .library(name: "RustTtsWrapper", targets: ["RustTtsWrapper"]),
     ],
     targets: [
-        // C shim over the cbindgen header (single source of truth: the
-        // header is a symlink to ../../include/tts_wrapper.h — CI verifies
-        // it matches). Linking is runtime-agnostic: the dylib must be on
-        // the loader path at run time (or use the staticlib).
+        // C shim over the cbindgen header. The header is a committed copy
+        // of include/tts_wrapper.h — CI diffs the two to prevent drift;
+        // refresh it with:
+        //   cp ../../include/tts_wrapper.h Sources/CRustTtsWrapper/include/
         .target(
             name: "CRustTtsWrapper",
             linkerSettings: [

@@ -5,6 +5,8 @@
 //   cargo build --no-default-features --features system,cloud   (Linux)
 // and located via TTS_WRAPPER_LIB, or on the OS loader's path.
 
+using Xunit;
+
 namespace RustTtsWrapper.Bindings.Tests;
 
 public class AbiConformanceTests

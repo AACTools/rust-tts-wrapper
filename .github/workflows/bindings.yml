@@ -112,8 +112,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build library (debug)
         run: cargo build --no-default-features --features avsynth,cloud
-      - name: Verify header symlink resolves
-        run: test -f bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h
+      - name: Verify vendored header matches include/tts_wrapper.h
+        run: diff include/tts_wrapper.h bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h
       - name: swift test
         working-directory: bindings/swift
         env:
