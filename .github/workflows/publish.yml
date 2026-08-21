@@ -203,15 +203,17 @@ jobs:
           "SHERPA_ONNX_LIB_DIR=$PWD/sherpa-x86-libs/lib" >> $env:GITHUB_ENV
           Write-Host "SHERPA_ONNX_LIB_DIR set to $PWD/sherpa-x86-libs/lib"
           ls sherpa-x86-libs/lib/
+      - uses: nttld/setup-ndk@v1
+        if: matrix.android == true
+        with:
+          ndk-version: r27b
+          add-to-path: false
       - name: Set up Android NDK toolchain
         if: matrix.android == true
         run: |
-          NDK="$ANDROID_NDK_HOME"
-          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
-            NDK=$(ls -d $HOME/Android/Sdk/ndk/* /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
-          fi
-          echo "NDK=$NDK" >> "$GITHUB_ENV"
-          echo "Using NDK: $NDK"
+          echo "NDK=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+          echo "Using NDK: $ANDROID_NDK_HOME"
+          test -d "$ANDROID_NDK_HOME" || { echo "NDK not found"; exit 1; }
       - name: Build release (Android)
         if: matrix.android == true
         shell: bash

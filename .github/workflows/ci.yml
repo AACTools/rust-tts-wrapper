@@ -75,12 +75,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.targets }}
+      - uses: nttld/setup-ndk@v1
+        if: matrix.android
+        with:
+          ndk-version: r27b
+          add-to-path: false
       - name: Build all Android targets (cloud, NDK r27)
         if: matrix.android
         shell: bash
         run: |
-          NDK=$(ls -d $HOME/Android/Sdk/ndk/* /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
+          NDK="$ANDROID_NDK_HOME"
           echo "NDK: $NDK"
+          test -d "$NDK" || { echo "NDK not found"; exit 1; }
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
           set -e
           for T in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
