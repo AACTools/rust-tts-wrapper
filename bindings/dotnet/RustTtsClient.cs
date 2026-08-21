@@ -148,7 +148,7 @@ public class RustTtsClient : AbstractTtsClient
     {
         if (wordCallback != null)
         {
-            _inner.SetOnBoundary((word, start, end) =>
+            _inner.SetOnBoundary((word, _offset, _len, start, end, _estimated) =>
                 wordCallback(new WordTimingEventArgs(word, start, end)));
         }
 

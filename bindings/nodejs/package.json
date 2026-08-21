@@ -1,0 +1,26 @@
+{
+  "name": "@aactools/tts-wrapper",
+  "version": "0.4.1",
+  "description": "Node.js bindings for the rust-tts-wrapper C ABI (dlopen-based; no native compilation)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AACTools/rust-tts-wrapper.git",
+    "directory": "bindings/nodejs"
+  },
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "koffi": "^2.10.1"
+  }
+}

@@ -273,6 +273,12 @@ cargo test --all-features
 
 ## Bindings
 
+Every binding wraps the flat C ABI in `include/tts_wrapper.h`; see
+**[bindings/README.md](bindings/README.md)** for the full guide (loading
+conventions, test matrix, which package to use). All five suites — Rust
+ABI conformance, a C harness compiled with `-Wall -Wextra -Werror`, Node,
+.NET and Swift — run in CI on every push (`.github/workflows/bindings.yml`).
+
 ### Python (`bindings/python/tts_wrapper.py`)
 
 ```python
@@ -280,35 +286,54 @@ from tts_wrapper import TTSClient
 
 client = TTSClient("openai", {"apiKey": "your-key"})
 client.on_audio(lambda chunk: print(f"{len(chunk)} bytes"))
-client.on_boundary(lambda word, s, e: print(f"{word}: {s:.3f}-{e:.3f}"))
+# word, char_offset, char_len, start_s, end_s, estimated
+client.on_boundary(lambda w, off, ln, s, e, est: print(f"{w}: {s:.3f}-{e:.3f}{'~' if est else ''}"))
 client.set_voice("alloy")
 client.speak_sync("Hello world")
 client.stop()
 ```
 
-### .NET (`bindings/dotnet/TtsClient.cs`)
+### .NET (`bindings/dotnet/` — NuGet: `RustTtsWrapper.Bindings`)
 
 ```csharp
-using TtsWrapper;
+using RustTtsWrapper;
 
-var client = new TtsClient("openai", new() { {"apiKey", "your-key"} });
+using var client = new TtsClient("openai", new() { ["apiKey"] = "your-key" });
+client.SetOnBoundary((word, offset, len, start, end, estimated) =>
+    Console.WriteLine($"{word}: {start:F3}-{end:F3} {(estimated ? "estimated" : "measured")}"));
 client.SetVoice("alloy");
-client.SetRate(1.0f);
-client.SetPitch(1.0f);
-client.SetVolume(1.0f);
 client.SpeakSync("Hello world");
-client.Stop();
 ```
 
-### Swift (`bindings/swift/TtsClient.swift`)
+### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
 
 ```swift
-let client = TTSClient(engineId: "openai", credentials: ["apiKey": "your-key"])
+let client = try TtsClient(engineId: "openai", credentials: ["apiKey": "your-key"])
+client.setOnBoundary { word, offset, len, start, end, estimated in
+    print("\(word): \(start)-\(end) \(estimated ? "estimated" : "measured")")
+}
 client.setVoice("alloy")
-client.setRate(1.0)
-client.speakSync("Hello world")
-client.stop()
+try client.speakSync("Hello world")
 ```
+
+### Node (`bindings/nodejs/` — npm: `@aactools/tts-wrapper`)
+
+```js
+const { TtsClient } = require("@aactools/tts-wrapper");
+
+const client = new TtsClient({ engineId: "openai", credentials: { apiKey: "your-key" } });
+client.on("boundary", ({ word, startSec, endSec, estimated }) =>
+  console.log(`${word}: ${startSec}-${endSec} ${estimated ? "estimated" : "measured"}`));
+client.setVoice("alloy");
+client.speakSync("Hello world");
+client.close();
+```
+
+### C (`bindings/c/` — reference harness)
+
+`bindings/c/tts_abi_harness.c` exercises the whole ABI against the
+cdylib; `make -C bindings/c test` builds, compiles the header with
+`-Wall -Wextra -Werror` and runs it.
 
 ## Architecture
 

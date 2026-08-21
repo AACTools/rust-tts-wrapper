@@ -32,7 +32,22 @@ AUDIO_CB = ctypes.CFUNCTYPE(
     None, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.c_void_p
 )
 BOUNDARY_CB = ctypes.CFUNCTYPE(
-    None, ctypes.c_char_p, ctypes.c_float, ctypes.c_float, ctypes.c_void_p
+    None,
+    ctypes.c_char_p,   # word
+    ctypes.c_int32,    # char_offset (-1 when unknown)
+    ctypes.c_int32,    # char_len    (-1 when unknown)
+    ctypes.c_float,    # start_s
+    ctypes.c_float,    # end_s
+    ctypes.c_int32,    # estimated (1 = proportional estimate, 0 = measured)
+    ctypes.c_void_p,   # userdata
+)
+MARK_CB = ctypes.CFUNCTYPE(
+    None,
+    ctypes.c_char_p,   # name
+    ctypes.c_int32,    # char_offset (-1 when unknown)
+    ctypes.c_float,    # start_s
+    ctypes.c_float,    # end_s
+    ctypes.c_void_p,   # userdata
 )
 VOID_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
 ERROR_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
@@ -293,8 +308,15 @@ class TTSClient:
             return
 
         @BOUNDARY_CB
-        def _cb(word, start, end, _userdata):
-            callback(word.decode() if word else "", start, end)
+        def _cb(word, char_offset, char_len, start, end, estimated, _userdata):
+            callback(
+                word.decode() if word else "",
+                char_offset,
+                char_len,
+                start,
+                end,
+                bool(estimated),
+            )
 
         self._boundary_cb_ref = _cb
         self._lib.tts_set_on_boundary(self._ctx, _cb, None)
