@@ -6,8 +6,12 @@ import Foundation
 //    staticlib and imports the header under the crate's module name.
 #if canImport(CRustTtsWrapper)
 import CRustTtsWrapper
+typealias TtsVoiceC = tts_voice
+typealias TtsEngineInfoC = tts_engine_info
 #elseif canImport(rust_tts_wrapper)
 import rust_tts_wrapper
+typealias TtsVoiceC = tts_voice
+typealias TtsEngineInfoC = tts_engine_info
 #endif
 
 /// High-level voice descriptor returned by `TtsClient.getVoices()`.
@@ -125,14 +129,14 @@ public final class TtsClient: @unchecked Sendable {
     public func synthToBytes(_ text: String) throws -> Data {
         guard let ctx else { throw TtsError("client closed") }
         var bufPtr: UnsafeMutablePointer<UInt8>?
-        var length: Int = 0
+        var length: UInt = 0
         let rc = text.withCString { textPtr in
             tts_synth_to_bytes(ctx, textPtr, &bufPtr, &length)
         }
         if rc != 0 { throw TtsError(getLastError() ?? "synth_to_bytes failed") }
         guard let buf = bufPtr, length > 0 else { return Data() }
         defer { tts_free_bytes(buf, length) }
-        return Data(bytes: buf, count: length)
+        return Data(bytes: buf, count: Int(length))
     }
 
     // --- playback control ---------------------------------------------
@@ -186,7 +190,7 @@ public final class TtsClient: @unchecked Sendable {
                 { bytes, len, userdata in
                     guard let bytes, len > 0, let userdata else { return }
                     let box = Unmanaged<CallbackBox<AudioCallback>>.fromOpaque(userdata).takeUnretainedValue()
-                    let data = Data(bytes: bytes, count: len)
+                    let data = Data(bytes: bytes, count: Int(len))
                     box.callback(data)
                 },
                 opaque
