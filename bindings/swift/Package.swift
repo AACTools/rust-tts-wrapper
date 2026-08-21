@@ -26,8 +26,7 @@ let package = Package(
         ),
         .target(
             name: "RustTtsWrapper",
-            dependencies: ["CRustTtsWrapper"],
-            path: "."
+            dependencies: ["CRustTtsWrapper"]
         ),
         .testTarget(
             name: "RustTtsWrapperTests",

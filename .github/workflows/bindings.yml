@@ -98,7 +98,11 @@ jobs:
       - name: Set TTS_WRAPPER_LIB
         shell: bash
         run: |
-          LIB="$PWD/target/release/$([ "${{ runner.os }}" = Windows ] && echo rust_tts_wrapper.dll || echo librust_tts_wrapper.${{ runner.os == 'macOS' && 'dylib' || 'so' }})"
+          if [ "${{ runner.os }}" = Windows ]; then
+            LIB=$(cygpath -w "$PWD/target/release/rust_tts_wrapper.dll")
+          else
+            LIB="$PWD/target/release/librust_tts_wrapper.${{ runner.os == 'macOS' && 'dylib' || 'so' }}"
+          fi
           echo "TTS_WRAPPER_LIB=$LIB" >> "$GITHUB_ENV"
       - name: dotnet test
         working-directory: bindings/dotnet
