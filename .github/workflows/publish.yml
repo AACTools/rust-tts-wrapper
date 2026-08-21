@@ -466,7 +466,7 @@ jobs:
 
   release:
     name: GitHub Release
-    needs: [build]
+    needs: [build, xcframework]
     runs-on: ubuntu-latest
     permissions:
       contents: write
