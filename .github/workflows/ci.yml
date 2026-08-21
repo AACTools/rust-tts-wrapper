@@ -80,7 +80,7 @@ jobs:
         with:
           ndk-version: r27b
           add-to-path: false
-      - name: Build all Android targets (cloud, NDK r27)
+      - name: Build all Android targets (cloud + floravox, NDK r27)
         if: matrix.android
         shell: bash
         run: |
@@ -95,15 +95,25 @@ jobs:
               *) TRIPLE=$T ;;
             esac
             TUP=$(echo $T | tr a-z- A-Z_)
+            # cloud (static ort where a prebuilt exists)
             env CARGO_TARGET_${TUP}_LINKER="$TC/${TRIPLE}24-clang" \
                 CC_$T="$TC/${TRIPLE}24-clang" AR_$T="$TC/llvm-ar" \
                 cargo build --release --target $T --no-default-features --features cloud
+            # floravox: static NNAPI on arm64, dynamic onnxruntime elsewhere
+            case $T in
+              aarch64-linux-android) FV=floravox ;;
+              *) FV=floravox-dynamic ;;
+            esac
+            env CARGO_TARGET_${TUP}_LINKER="$TC/${TRIPLE}24-clang" \
+                CC_$T="$TC/${TRIPLE}24-clang" AR_$T="$TC/llvm-ar" \
+                cargo build --release --target $T --no-default-features --features "$FV,cloud"
           done
-      - name: Build all iOS targets (cloud, staticlib)
+      - name: Build all iOS targets (cloud + floravox, staticlib)
         if: "!matrix.android"
         run: |
           for T in aarch64-apple-ios aarch64-apple-ios-sim; do
             cargo build --release --target $T --no-default-features --features cloud
+            cargo build --release --target $T --no-default-features --features floravox,cloud
           done
 
   windows-build:

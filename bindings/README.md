@@ -45,15 +45,20 @@ for every supported platform:
 
 | Platform | Targets | Engines | Artifact |
 |---|---|---|---|
-| Linux | x86_64, aarch64 | system+cloud (+sherpaonnx x86_64) | `.so` + `.a` |
-| macOS | x86_64, aarch64 | avsynth+cloud (+sherpaonnx) | `.dylib` + `.a` |
-| Windows | x86_64, aarch64, i686 | sapi+cloud (+sherpaonnx) | `.dll` + `.lib` |
-| Android | arm64-v8a, armeabi-v7a, x86_64, x86 (API 24+) | cloud | `.so` + `.a` |
-| iOS | arm64 device, arm64 simulator | cloud | `RustTtsWrapper.xcframework` + `.a` |
+| Linux | x86_64, aarch64 | system+cloud (+sherpaonnx x86_64, +floravox x86_64) | `.so` + `.a` |
+| macOS | x86_64, aarch64 | avsynth+cloud (+sherpaonnx, +floravox) | `.dylib` + `.a` |
+| Windows | x86_64, aarch64, i686 | sapi+cloud (+sherpaonnx; +floravox x64/arm64, +floravox-dynamic i686) | `.dll` + `.lib` |
+| Android | arm64-v8a, armeabi-v7a, x86_64, x86 (API 24+) | cloud; +floravox (static onnxruntime/NNAPI on arm64, dynamic elsewhere) | `.so` + `.a` |
+| iOS | arm64 device, arm64 simulator | cloud; +floravox (static onnxruntime/CoreML) | `RustTtsWrapper(.Floravox).xcframework` + `.a` |
 
 Mobile notes: the cloud feature is pure Rust (rustls — no OpenSSL), so the
-NDK/Apple builds need no system dependencies. The iOS XCFramework bundles
-the device + simulator staticlibs with the C header; drag it into Xcode.
+NDK/Apple builds need no system dependencies. The iOS XCFrameworks bundle
+the device + simulator staticlibs with the C header; drag them into Xcode.
+For `floravox-dynamic` builds (32-bit/x86 Android, i686 Windows) ship the
+matching `libonnxruntime.so`/`onnxruntime.dll` from the official [ONNX
+Runtime release](https://github.com/microsoft/onnxruntime/releases) next to
+the library — onnxruntime is dlopen'ed at runtime. Static Windows
+floravox builds carry the DirectML floor (Win10 1903+; floravox#1).
 
 ## The bindings
 

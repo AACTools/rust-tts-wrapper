@@ -167,6 +167,81 @@ jobs:
             label: "cloud-aarch64-apple-ios-sim"
             lib_ext: a
             ios: true
+
+          # --- floravox local engine, desktop ---
+          # Windows static builds carry the DirectML floor (Win10 1903+);
+          # i686 has no ort prebuilt, so it links onnxruntime at runtime.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud,floravox"
+            label: "floravox-system-cloud-x86_64-linux"
+            lib_ext: so
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,floravox"
+            label: "floravox-avsynth-cloud-x86_64-macos"
+            lib_ext: dylib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,floravox"
+            label: "floravox-avsynth-cloud-aarch64-macos"
+            lib_ext: dylib
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox"
+            label: "floravox-sapi-cloud-x86_64-windows"
+            lib_ext: dll
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox"
+            label: "floravox-sapi-cloud-aarch64-windows"
+            lib_ext: dll
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox-dynamic"
+            label: "floravox-dynamic-sapi-cloud-i686-windows"
+            lib_ext: dll
+
+          # --- floravox local engine, mobile ---
+          # arm64 android: ort ships an NNAPI static prebuilt.
+          # 32-bit/x86 android: no prebuilts — onnxruntime loads at
+          # runtime from the Microsoft onnxruntime-android release.
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            features: "floravox,cloud"
+            label: "floravox-cloud-aarch64-linux-android"
+            lib_ext: so
+            android: true
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            features: "floravox-dynamic,cloud"
+            label: "floravox-dynamic-cloud-armv7-linux-android"
+            lib_ext: so
+            android: true
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            features: "floravox-dynamic,cloud"
+            label: "floravox-dynamic-cloud-x86_64-linux-android"
+            lib_ext: so
+            android: true
+          - target: i686-linux-android
+            os: ubuntu-latest
+            features: "floravox-dynamic,cloud"
+            label: "floravox-dynamic-cloud-i686-linux-android"
+            lib_ext: so
+            android: true
+          - target: aarch64-apple-ios
+            os: macos-latest
+            features: "floravox,cloud"
+            label: "floravox-cloud-aarch64-apple-ios"
+            lib_ext: a
+            ios: true
+          - target: aarch64-apple-ios-sim
+            os: macos-latest
+            features: "floravox,cloud"
+            label: "floravox-cloud-aarch64-apple-ios-sim"
+            lib_ext: a
+            ios: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -270,37 +345,44 @@ jobs:
     name: Apple XCFramework
     needs: build
     runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - name: RustTtsWrapper
+            suffix: cloud
+          - name: RustTtsWrapperFloravox
+            suffix: floravox-cloud
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: static-cloud-aarch64-apple-ios
+          name: static-${{ matrix.suffix }}-aarch64-apple-ios
           path: ios-device
       - uses: actions/download-artifact@v4
         with:
-          name: static-cloud-aarch64-apple-ios-sim
+          name: static-${{ matrix.suffix }}-aarch64-apple-ios-sim
           path: ios-sim
-      - name: Create RustTtsWrapper.xcframework
+      - name: Create ${{ matrix.name }}.xcframework
         run: |
           mkdir -p headers
           cp include/tts_wrapper.h headers/
           # Give each slice its own directory (xcodebuild requires distinct
           # paths and renames the lib per slice).
           mkdir -p device sim
-          cp ios-device/librust_tts_wrapper-cloud-aarch64-apple-ios.a device/librust_tts_wrapper.a
+          cp ios-device/librust_tts_wrapper-${{ matrix.suffix }}-aarch64-apple-ios.a device/librust_tts_wrapper.a
           cp headers/tts_wrapper.h device/
-          cp ios-sim/librust_tts_wrapper-cloud-aarch64-apple-ios-sim.a sim/librust_tts_wrapper.a
+          cp ios-sim/librust_tts_wrapper-${{ matrix.suffix }}-aarch64-apple-ios-sim.a sim/librust_tts_wrapper.a
           cp headers/tts_wrapper.h sim/
-          rm -rf RustTtsWrapper.xcframework
+          rm -rf ${{ matrix.name }}.xcframework
           xcodebuild -create-xcframework \
             -library device/librust_tts_wrapper.a -headers device \
             -library sim/librust_tts_wrapper.a -headers sim \
-            -output RustTtsWrapper.xcframework
-          ditto -c -k --sequesterRsrc --keepParent RustTtsWrapper.xcframework RustTtsWrapper.xcframework.zip
+            -output ${{ matrix.name }}.xcframework
+          ditto -c -k --sequesterRsrc --keepParent ${{ matrix.name }}.xcframework ${{ matrix.name }}.xcframework.zip
       - uses: actions/upload-artifact@v4
         with:
-          name: xcframework
-          path: RustTtsWrapper.xcframework.zip
+          name: xcframework-${{ matrix.name }}
+          path: ${{ matrix.name }}.xcframework.zip
 
   nuget:
     name: Pack & Publish .NET NuGet
@@ -395,7 +477,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-          name: xcframework
+          pattern: "xcframework-*"
       - name: Organize release assets
         run: |
           mkdir -p release-assets

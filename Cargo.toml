@@ -73,6 +73,11 @@ floravox = [
   "floravox-g2p/misaki",
   "floravox-g2p/uroman",
 ]
+# floravox with runtime-loaded onnxruntime (libonnxruntime.so/.dll from the
+# official ONNX Runtime release) instead of ort's static artifact — for
+# targets without ort prebuilts (32-bit/x86 Android) and integrators who
+# must control the onnxruntime build (Windows <10 1903; floravox#1).
+floravox-dynamic = ["floravox", "floravox-core/onnx-dynamic"]
 # Voice-model-registry routing: lang code -> published lexicon bundle
 # (gruut-derived MIT lexicons + trained Phonetisaurus models).
 floravox-lexicons = ["floravox", "dep:voicegarden-lexicons"]
@@ -106,9 +111,9 @@ icu_displaynames = { version = "0.11", optional = true, features = ["compiled_da
 icu_locid = { version = "1.0.0-beta1", optional = true }
 # floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha,
 # Kokoro) with measured word timings (vs sherpa-onnx's estimated ones).
-floravox-core = { version = "0.8.1", optional = true }
-floravox-ssml = { version = "0.8.1", optional = true }
-floravox-g2p = { version = "0.8.1", optional = true, default-features = false }
+floravox-core = { version = "0.8.2", optional = true }
+floravox-ssml = { version = "0.8.2", optional = true }
+floravox-g2p = { version = "0.8.2", optional = true, default-features = false }
 # Published lexicon bundles (gruut-derived, MIT) + per-language
 # Phonetisaurus models, fetched and cached by lang code.
 voicegarden-lexicons = { version = "0.2.0", optional = true }
