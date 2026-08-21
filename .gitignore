@@ -12,3 +12,8 @@ Cargo.lock
 .env
 .env.*
 !.env.example
+
+# Language-binding build artifacts
+node_modules/
+**/bin/
+**/obj/

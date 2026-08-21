@@ -1,0 +1,121 @@
+name: Bindings
+
+# Full test matrix for the language bindings over the C ABI:
+#   Rust conformance + C harness + Node + .NET + Swift, on the OSes each
+#   toolchain supports. Mirrors bindings/README.md ("Running the suites").
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-conformance:
+    name: Rust ABI conformance (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            features: system,cloud
+          - os: macos-latest
+            features: avsynth,cloud
+          - os: windows-latest
+            features: sapi,cloud
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: ABI conformance suites
+        run: cargo test --no-default-features --features ${{ matrix.features }} --test ffi_conformance --test ffi_lifecycle --test ffi_safety
+
+  c-harness:
+    name: C harness (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install native deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Build + compile header with -Wall -Wextra -Werror + run
+        run: make -C bindings/c test FEATURES=${{ runner.os == 'macOS' && 'avsynth,cloud' || 'system,cloud' }}
+
+  node:
+    name: Node (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install native deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Build library
+        shell: bash
+        run: cargo build --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+      - name: npm install + test
+        working-directory: bindings/nodejs
+        run: |
+          npm install --no-fund --no-audit
+          npm test
+
+  dotnet:
+    name: .NET (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Install native deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Build library (release)
+        shell: bash
+        run: cargo build --release --no-default-features --features ${{ runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+      - name: Set TTS_WRAPPER_LIB
+        shell: bash
+        run: |
+          LIB="$PWD/target/release/$([ "${{ runner.os }}" = Windows ] && echo rust_tts_wrapper.dll || echo librust_tts_wrapper.${{ runner.os == 'macOS' && 'dylib' || 'so' }})"
+          echo "TTS_WRAPPER_LIB=$LIB" >> "$GITHUB_ENV"
+      - name: dotnet test
+        working-directory: bindings/dotnet
+        run: dotnet test -p:SkipNativeLibCheck=true
+
+  swift:
+    name: Swift (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build library (debug)
+        run: cargo build --no-default-features --features avsynth,cloud
+      - name: Verify header symlink resolves
+        run: test -f bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h
+      - name: swift test
+        working-directory: bindings/swift
+        env:
+          TTS_WRAPPER_LIB_DIR: ${{ github.workspace }}/target/debug
+        run: swift test

@@ -13,6 +13,24 @@ public static class Native
 {
     private const string Lib = "rust_tts_wrapper";
 
+    static Native()
+    {
+        // Optional explicit library location (absolute or relative path):
+        //   TTS_WRAPPER_LIB=/path/to/librust_tts_wrapper.so
+        // When set, preload it and resolve the DllImport name to that
+        // handle — otherwise the OS loader's default search applies
+        // (runtimes/{rid}/native works automatically for NuGet consumers).
+        string? explicitPath = Environment.GetEnvironmentVariable("TTS_WRAPPER_LIB");
+        if (!string.IsNullOrEmpty(explicitPath))
+        {
+            if (!File.Exists(explicitPath))
+                throw new DllNotFoundException($"TTS_WRAPPER_LIB points to a missing file: {explicitPath}");
+            IntPtr handle = NativeLibrary.Load(explicitPath);
+            NativeLibrary.SetDllImportResolver(typeof(Native).Assembly, (name, _, _) =>
+                name == Lib ? handle : IntPtr.Zero);
+        }
+    }
+
     [DllImport(Lib)] public static extern IntPtr tts_create(string engineId, string credentialsJson);
     [DllImport(Lib)] public static extern void tts_destroy(IntPtr ctx);
     [DllImport(Lib)] public static extern int tts_speak(IntPtr ctx, string text);
@@ -34,9 +52,20 @@ public static class Native
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate void AudioCallbackNative(IntPtr bytes, UIntPtr len, IntPtr userdata);
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-    public delegate void BoundaryCallbackNative(IntPtr word, float start, float end, IntPtr userdata);
+    public delegate void BoundaryCallbackNative(IntPtr word, int charOffset, int charLen,
+        float start, float end, int estimated, IntPtr userdata);
     [DllImport(Lib)] public static extern void tts_set_on_audio(IntPtr ctx, AudioCallbackNative? cb, IntPtr userdata);
     [DllImport(Lib)] public static extern void tts_set_on_boundary(IntPtr ctx, BoundaryCallbackNative? cb, IntPtr userdata);
+
+    // Mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void MarkCallbackNative(IntPtr name, int charOffset, float start, float end, IntPtr userdata);
+    [DllImport(Lib)] public static extern void tts_set_on_mark(IntPtr ctx, MarkCallbackNative? cb, IntPtr userdata);
+
+    // Viseme callback for lip-sync: cb(viseme_id, audio_offset_sec, userdata).
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void VisemeCallbackNative(int visemeId, float offsetSec, IntPtr userdata);
+    [DllImport(Lib)] public static extern void tts_set_on_viseme(IntPtr ctx, VisemeCallbackNative? cb, IntPtr userdata);
 
     // Lifecycle callbacks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -142,7 +171,20 @@ public sealed class TtsEngineInfo
 public delegate void AudioCallback(byte[] chunk);
 
 /// <summary>Word-boundary event handed to <see cref="TtsClient.SetOnBoundary"/>.</summary>
-public delegate void BoundaryCallback(string word, float startTime, float endTime);
+/// <remarks>
+/// <paramref name="charOffset"/>/<paramref name="charLen"/> are -1 when the
+/// engine does not report source positions. <paramref name="estimated"/> is
+/// true when the timings are proportional estimates (unpatched voice, wpm
+/// model), false when measured (floravox duration tensor, cloud timings).
+/// </remarks>
+public delegate void BoundaryCallback(string word, int charOffset, int charLen,
+    float startTime, float endTime, bool estimated);
+
+/// <summary>Mark/bookmark event handed to <see cref="TtsClient.SetOnMark"/>.</summary>
+public delegate void MarkCallback(string name, int charOffset, float startTime, float endTime);
+
+/// <summary>Viseme event for lip-sync handed to <see cref="TtsClient.SetOnViseme"/>.</summary>
+public delegate void VisemeCallback(int visemeId, float offsetSec);
 
 /// <summary>Lifecycle callback (no payload).</summary>
 public delegate void LifecycleCallback();
@@ -173,6 +215,8 @@ public class TtsClient : IDisposable
     // them while native code still holds a function pointer.
     private Native.AudioCallbackNative? _audioNative;
     private Native.BoundaryCallbackNative? _boundaryNative;
+    private Native.MarkCallbackNative? _markNative;
+    private Native.VisemeCallbackNative? _visemeNative;
     private Native.VoidCallbackNative? _startNative;
     private Native.VoidCallbackNative? _endNative;
     private Native.ErrorCallbackNative? _errorNative;
@@ -283,12 +327,53 @@ public class TtsClient : IDisposable
             return;
         }
 
-        _boundaryNative = (IntPtr wordPtr, float start, float end, IntPtr _userdata) =>
+        _boundaryNative = (IntPtr wordPtr, int charOffset, int charLen,
+            float start, float end, int estimated, IntPtr _userdata) =>
         {
             string word = wordPtr == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(wordPtr) ?? "";
-            callback(word, start, end);
+            callback(word, charOffset, charLen, start, end, estimated != 0);
         };
         Native.tts_set_on_boundary(_ctx, _boundaryNative, IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// Register a mark/bookmark callback (SSML &lt;mark&gt;). Pass <c>null</c> to clear.
+    /// </summary>
+    public void SetOnMark(MarkCallback? callback)
+    {
+        ThrowIfDisposed();
+        if (callback == null)
+        {
+            _markNative = null;
+            Native.tts_set_on_mark(_ctx, null, IntPtr.Zero);
+            return;
+        }
+
+        _markNative = (IntPtr namePtr, int charOffset, float start, float end, IntPtr _userdata) =>
+        {
+            string name = namePtr == IntPtr.Zero ? "" : Marshal.PtrToStringAnsi(namePtr) ?? "";
+            callback(name, charOffset, start, end);
+        };
+        Native.tts_set_on_mark(_ctx, _markNative, IntPtr.Zero);
+    }
+
+    /// <summary>
+    /// Register a viseme callback for lip-sync / facial animation.
+    /// Pass <c>null</c> to clear.
+    /// </summary>
+    public void SetOnViseme(VisemeCallback? callback)
+    {
+        ThrowIfDisposed();
+        if (callback == null)
+        {
+            _visemeNative = null;
+            Native.tts_set_on_viseme(_ctx, null, IntPtr.Zero);
+            return;
+        }
+
+        _visemeNative = (int visemeId, float offsetSec, IntPtr _userdata) =>
+            callback(visemeId, offsetSec);
+        Native.tts_set_on_viseme(_ctx, _visemeNative, IntPtr.Zero);
     }
 
     /// <summary>
