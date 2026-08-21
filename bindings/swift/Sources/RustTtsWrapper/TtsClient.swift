@@ -412,9 +412,11 @@ public final class TtsClient: @unchecked Sendable {
 
     // --- private helpers ----------------------------------------------
 
-    private static func cStringPtr(_ p: UnsafePointer<CChar>?) -> String {
-        p.map { String(cString: $0) } ?? ""
-    }
+
+}
+
+private func cStringPtr(_ p: UnsafePointer<CChar>?) -> String {
+    p.map { String(cString: $0) } ?? ""
 }
 
 /// Type-erased container that holds a Swift closure alive while the C code
