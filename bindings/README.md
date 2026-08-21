@@ -40,7 +40,20 @@ cargo build --release --no-default-features --features sapi,cloud     # Windows
 
 Artifacts: `librust_tts_wrapper.so` / `librust_tts_wrapper.dylib` /
 `rust_tts_wrapper.dll` (+ `.a` staticlib). Prebuilt binaries ship with each
-[GitHub release](https://github.com/AACTools/rust-tts-wrapper/releases).
+[GitHub release](https://github.com/AACTools/rust-tts-wrapper/releases)
+for every supported platform:
+
+| Platform | Targets | Engines | Artifact |
+|---|---|---|---|
+| Linux | x86_64, aarch64 | system+cloud (+sherpaonnx x86_64) | `.so` + `.a` |
+| macOS | x86_64, aarch64 | avsynth+cloud (+sherpaonnx) | `.dylib` + `.a` |
+| Windows | x86_64, aarch64, i686 | sapi+cloud (+sherpaonnx) | `.dll` + `.lib` |
+| Android | arm64-v8a, armeabi-v7a, x86_64, x86 (API 24+) | cloud | `.so` + `.a` |
+| iOS | arm64 device, arm64 simulator | cloud | `RustTtsWrapper.xcframework` + `.a` |
+
+Mobile notes: the cloud feature is pure Rust (rustls — no OpenSSL), so the
+NDK/Apple builds need no system dependencies. The iOS XCFramework bundles
+the device + simulator staticlibs with the C header; drag it into Xcode.
 
 ## The bindings
 

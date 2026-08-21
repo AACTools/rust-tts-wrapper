@@ -125,6 +125,48 @@ jobs:
             features: "sapi,cloud,sherpaonnx"
             label: "sapi-cloud-sherpaonnx-i686-windows"
             lib_ext: dll
+
+          # --- Mobile: Android (all four ABIs, cloud-only) ---
+          # rustls everywhere (no OpenSSL), so these are pure-Rust builds
+          # against the NDK clang. API 24+ (Android 7.0) floor.
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-aarch64-linux-android"
+            lib_ext: so
+            android: true
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-armv7-linux-android"
+            lib_ext: so
+            android: true
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-x86_64-linux-android"
+            lib_ext: so
+            android: true
+          - target: i686-linux-android
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-i686-linux-android"
+            lib_ext: so
+            android: true
+
+          # --- Mobile: iOS (staticlib; App Store forbids dylibs) ---
+          - target: aarch64-apple-ios
+            os: macos-latest
+            features: "cloud"
+            label: "cloud-aarch64-apple-ios"
+            lib_ext: a
+            ios: true
+          - target: aarch64-apple-ios-sim
+            os: macos-latest
+            features: "cloud"
+            label: "cloud-aarch64-apple-ios-sim"
+            lib_ext: a
+            ios: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -161,8 +203,32 @@ jobs:
           "SHERPA_ONNX_LIB_DIR=$PWD/sherpa-x86-libs/lib" >> $env:GITHUB_ENV
           Write-Host "SHERPA_ONNX_LIB_DIR set to $PWD/sherpa-x86-libs/lib"
           ls sherpa-x86-libs/lib/
+      - name: Set up Android NDK toolchain
+        if: matrix.android == true
+        run: |
+          NDK="$ANDROID_NDK_HOME"
+          if [ -z "$NDK" ] || [ ! -d "$NDK" ]; then
+            NDK=$(ls -d $HOME/Android/Sdk/ndk/* /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
+          fi
+          echo "NDK=$NDK" >> "$GITHUB_ENV"
+          echo "Using NDK: $NDK"
+      - name: Build release (Android)
+        if: matrix.android == true
+        shell: bash
+        run: |
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          TUP=$(echo ${{ matrix.target }} | tr a-z- A-Z_)
+          # rustup target should already be installed via toolchain step
+          case ${{ matrix.target }} in
+            armv7-linux-androideabi) CLANG_TRIPLE=armv7a-linux-androideabi ;;
+            *) CLANG_TRIPLE=${{ matrix.target }} ;;
+          esac
+          export CARGO_TARGET_${TUP}_LINKER="$TC/${CLANG_TRIPLE}24-clang"
+          export CC_${{ matrix.target }}="$TC/${CLANG_TRIPLE}24-clang"
+          export AR_${{ matrix.target }}="$TC/llvm-ar"
+          cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Build release (cargo)
-        if: matrix.cross != true
+        if: matrix.cross != true && matrix.android != true
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Build release (cross)
         if: matrix.cross == true
@@ -180,6 +246,7 @@ jobs:
             cp librust_tts_wrapper.a "librust_tts_wrapper-${LABEL}.a" 2>/dev/null || true
           fi
       - name: Upload shared library
+        if: matrix.ios != true
         uses: actions/upload-artifact@v4
         with:
           name: lib-${{ matrix.label }}
@@ -196,6 +263,42 @@ jobs:
         with:
           name: static-${{ matrix.label }}
           path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.lib
+
+  xcframework:
+    name: Apple XCFramework
+    needs: build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: static-cloud-aarch64-apple-ios
+          path: ios-device
+      - uses: actions/download-artifact@v4
+        with:
+          name: static-cloud-aarch64-apple-ios-sim
+          path: ios-sim
+      - name: Create RustTtsWrapper.xcframework
+        run: |
+          mkdir -p headers
+          cp include/tts_wrapper.h headers/
+          # Give each slice its own directory (xcodebuild requires distinct
+          # paths and renames the lib per slice).
+          mkdir -p device sim
+          cp ios-device/librust_tts_wrapper-cloud-aarch64-apple-ios.a device/librust_tts_wrapper.a
+          cp headers/tts_wrapper.h device/
+          cp ios-sim/librust_tts_wrapper-cloud-aarch64-apple-ios-sim.a sim/librust_tts_wrapper.a
+          cp headers/tts_wrapper.h sim/
+          rm -rf RustTtsWrapper.xcframework
+          xcodebuild -create-xcframework \
+            -library device/librust_tts_wrapper.a -headers device \
+            -library sim/librust_tts_wrapper.a -headers sim \
+            -output RustTtsWrapper.xcframework
+          ditto -c -k --sequesterRsrc --keepParent RustTtsWrapper.xcframework RustTtsWrapper.xcframework.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcframework
+          path: RustTtsWrapper.xcframework.zip
 
   nuget:
     name: Pack & Publish .NET NuGet
@@ -287,6 +390,10 @@ jobs:
           path: artifacts
           pattern: "{lib-*,static-*}"
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          name: xcframework
       - name: Organize release assets
         run: |
           mkdir -p release-assets

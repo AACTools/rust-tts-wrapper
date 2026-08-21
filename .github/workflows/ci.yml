@@ -55,6 +55,51 @@ jobs:
       - name: Run tests
         run: cargo test --no-default-features --features avsynth,cloud
 
+  mobile-cross-compile:
+    # Android + iOS are release platforms now (publish.yml ships .so/.a for
+    # them) — catch breakage at PR time. ring/rustls need the NDK clang on
+    # Linux; iOS needs Apple clang (macos runner).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: "aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android"
+            android: true
+          - os: macos-latest
+            targets: "aarch64-apple-ios aarch64-apple-ios-sim"
+            android: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - name: Build all Android targets (cloud, NDK r27)
+        if: matrix.android
+        shell: bash
+        run: |
+          NDK=$(ls -d $HOME/Android/Sdk/ndk/* /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
+          echo "NDK: $NDK"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          set -e
+          for T in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+            case $T in
+              armv7-linux-androideabi) TRIPLE=armv7a-linux-androideabi ;;
+              *) TRIPLE=$T ;;
+            esac
+            TUP=$(echo $T | tr a-z- A-Z_)
+            env CARGO_TARGET_${TUP}_LINKER="$TC/${TRIPLE}24-clang" \
+                CC_$T="$TC/${TRIPLE}24-clang" AR_$T="$TC/llvm-ar" \
+                cargo build --release --target $T --no-default-features --features cloud
+          done
+      - name: Build all iOS targets (cloud, staticlib)
+        if: "!matrix.android"
+        run: |
+          for T in aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo build --release --target $T --no-default-features --features cloud
+          done
+
   windows-build:
     runs-on: windows-latest
     continue-on-error: false
