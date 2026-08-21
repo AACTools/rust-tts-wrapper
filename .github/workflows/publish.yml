@@ -300,10 +300,12 @@ jobs:
             armv7-linux-androideabi) CLANG_TRIPLE=armv7a-linux-androideabi ;;
             *) CLANG_TRIPLE=${{ matrix.target }} ;;
           esac
-          export CARGO_TARGET_${TUP}_LINKER="$TC/${CLANG_TRIPLE}24-clang"
-          export CC_${{ matrix.target }}="$TC/${CLANG_TRIPLE}24-clang"
-          export AR_${{ matrix.target }}="$TC/llvm-ar"
-          cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+          # NOTE: CC/AR names must go through the `env` command — target
+          # triples contain dashes, which `export` rejects as identifiers.
+          env CARGO_TARGET_${TUP}_LINKER="$TC/${CLANG_TRIPLE}24-clang" \
+              CC_${{ matrix.target }}="$TC/${CLANG_TRIPLE}24-clang" \
+              AR_${{ matrix.target }}="$TC/llvm-ar" \
+              cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Build release (cargo)
         if: matrix.cross != true && matrix.android != true
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
