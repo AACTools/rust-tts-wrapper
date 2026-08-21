@@ -412,7 +412,7 @@ public final class TtsClient: @unchecked Sendable {
 
     // --- private helpers ----------------------------------------------
 
-    private func cStringPtr(_ p: UnsafePointer<CChar>?) -> String {
+    private static func cStringPtr(_ p: UnsafePointer<CChar>?) -> String {
         p.map { String(cString: $0) } ?? ""
     }
 }
