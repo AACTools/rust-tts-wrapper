@@ -94,6 +94,8 @@ serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "=1.13.5", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
 sherpa-onnx-models = { version = "0.1", optional = true }
+# Pin sys to match the main crate (cargo update can drift them apart).
+sherpa-onnx-sys = { version = "=1.13.5", optional = true }
 base64 = { version = "0.22", optional = true }
 speechmarkdown-rust = { version = "0.4.13", optional = true }
 anyhow = "1"
