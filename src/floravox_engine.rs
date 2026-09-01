@@ -446,7 +446,8 @@ fn build_phonemizer(engine: &FloravoxEngine, effective_lang: Option<&str>) -> Ph
     #[cfg(feature = "floravox-lexicons")]
     if let Some(lang) = effective_lang {
         if lexicon_stem.is_none() && phonetisaurus.is_none() {
-            match voicegarden_lexicons::LexiconArchive::default_archive()
+            match voicegarden_lexicons::LexiconArchive::default_expanded()
+                .or_else(|_| voicegarden_lexicons::LexiconArchive::default_archive())
                 .and_then(|a| a.fetch(lang))
             {
                 Ok(bundle) => {
