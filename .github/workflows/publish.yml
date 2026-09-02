@@ -11,6 +11,7 @@ env:
 jobs:
   version:
     name: Sync version
+    if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
