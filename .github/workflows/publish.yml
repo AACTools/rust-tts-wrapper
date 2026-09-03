@@ -496,7 +496,10 @@ jobs:
     runs-on: ubuntu-latest
     # No-op until the NPM_TOKEN secret is configured (publishes the
     # koffi-based Node binding; the package itself is pure JS).
-    if: github.event_name == 'push' && hashFiles('bindings/nodejs/package.json') != ''
+    # NOTE: hashFiles() is NOT allowed in a job-level `if` (it broke the
+    # whole workflow file — every publish since 6b28b04 silently never ran).
+    # The bindings check happens inside the step instead.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -508,8 +511,12 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: bindings/nodejs
         run: |
+          if [ ! -f package.json ]; then
+            echo "no nodejs bindings - skipping npm publish"
+            exit 0
+          fi
           if [ -z "$NODE_AUTH_TOKEN" ]; then
-            echo "NPM_TOKEN secret not set — skipping npm publish (run 'npm publish --access public' locally or add the secret)"
+            echo "NPM_TOKEN secret not set - skipping npm publish (run 'npm publish --access public' locally or add the secret)"
             exit 0
           fi
           npm install --no-fund --no-audit
