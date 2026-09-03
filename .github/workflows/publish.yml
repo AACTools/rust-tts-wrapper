@@ -52,9 +52,27 @@ jobs:
       - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
 
+  test-windows:
+    # The Windows NuGet DLLs carry sherpaonnx + floravox-lexicons together
+    # (see the build matrix). Test that exact combination — it is the
+    # configuration every .NET consumer actually loads.
+    name: Test (Windows NuGet features)
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: version-sync
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test (sapi,cloud,sherpaonnx,floravox-lexicons)
+        env:
+          RTW_SKIP_EDGE_LIVE: "1"
+        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,floravox-lexicons
+
   build:
     name: Build ${{ matrix.label }}
-    needs: test
+    needs: [test, test-windows]
     # Per-matrix-entry: sherpa-onnx builds may fail due to upstream 504
     # download issues (see TODO.md). Core builds are strict.
     continue-on-error: ${{ matrix.allow_failure == true }}
@@ -114,9 +132,16 @@ jobs:
             label: "avsynth-cloud-sherpaonnx-aarch64-macos"
             lib_ext: dylib
             allow_failure: true
+          # --- Sherpa-onnx NuGet builds (Windows) ---
+          # These two feed the .NET NuGet package. x64 carries the full local
+          # stack: sherpa-onnx (legacy voices) + floravox with published
+          # lexicon/G2P bundles (piper-family voices, measured boundaries,
+          # SSML marks). x86 stays sherpa-only: ort's API level (27) exceeds
+          # the last Microsoft x86 onnxruntime (1.22 / API 22), so floravox
+          # cannot load there — consumers must fall back to sherpaonnx.
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,sherpaonnx"
+            features: "sapi,cloud,sherpaonnx,floravox-lexicons"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
             # Strict: the NuGet package ships this DLL, so a sherpa-onnx build
@@ -427,7 +452,7 @@ jobs:
             Copy-Item $dll32.FullName target/release/rust_tts_wrapper.x86.dll
             Write-Host "Placed $($dll32.Name) -> target/release/rust_tts_wrapper.x86.dll (x86)"
           } else {
-            Write-Host "WARNING: No x86 DLL found — packing x64-only"
+            Write-Host "WARNING: No x86 DLL found - packing x64-only"
           }
       - uses: actions/setup-dotnet@v4
         with:

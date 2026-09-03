@@ -894,9 +894,11 @@ mod tests {
         assert_eq!(voices[0].iso639_3, "eng");
         assert_eq!(voices[0].sample_rate, 16_000);
 
-        // get_voices through the engine
-        let engine =
-            FloravoxEngine::new(&format!("{{\"modelsDir\":\"{}\"}}", dir.path().display()));
+        // get_voices through the engine. (Forward slashes: Windows tempdir
+        // paths contain backslashes, which are invalid JSON escapes when
+        // spliced raw into the credentials string.)
+        let dir_json = dir.path().to_string_lossy().replace('\\', "/");
+        let engine = FloravoxEngine::new(&format!("{{\"modelsDir\":\"{dir_json}\"}}"));
         let list = engine.get_voices().unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].provider, "floravox");

@@ -17,3 +17,5 @@ Cargo.lock
 node_modules/
 **/bin/
 **/obj/
+
+.voicegarden-lexicons/
