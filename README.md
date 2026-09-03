@@ -8,6 +8,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
 | System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
+| floravox | Local (piper/MMS VITS, Matcha, Kokoro) | None (optional G2P: `lang`, `misaki`, …) | Event chunks | Scans `modelsDir` | **Measured** (duration-patched voices; audio-scaled estimates otherwise) | Generic SSML |
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
 | Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
@@ -30,7 +31,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 
 - **Streaming**: Audio is delivered through the `on_audio` callback in chunks, as it becomes available. REST engines stream the response body as bytes arrive over the network (MP3 decoded to PCM16 mono incrementally on a background reader thread; raw-PCM providers pass straight through); Azure and Edge deliver real-time over WebSockets; Sherpa-ONNX delivers each sentence batch as it is synthesised (via the generate progress callback — a single-sentence utterance still completes before delivery). Exceptions: Google and ElevenLabs `with-timestamps` return one JSON document with base64 audio, so they can only deliver after the response completes (an API limitation, not buffering). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
-- **Native engine varies by platform**: the table shows `system` (Linux speech-dispatcher); macOS uses `avsynth` (AVSpeechSynthesizer) and Windows uses `sapi`. "22 total" counts one native engine + Sherpa-ONNX + the 20 cloud engines, per platform.
+- **Native engine varies by platform**: the table shows `system` (Linux speech-dispatcher); macOS uses `avsynth` (AVSpeechSynthesizer) and Windows uses `sapi`. "23 total" counts one native engine + Sherpa-ONNX + floravox + the 20 cloud engines, per platform.
 
 ## Formatting & Testing
 
@@ -304,6 +305,13 @@ client.SetOnBoundary((word, offset, len, start, end, estimated) =>
 client.SetVoice("alloy");
 client.SpeakSync("Hello world");
 ```
+
+**NuGet contents per RID** (since 0.5.3): `win-x64` bundles one DLL with
+`sapi` + `cloud` + `sherpaonnx` + `floravox-lexicons` (lexicon/Phonetisaurus/
+ByT5 G2P bundles, measured boundaries, SSML marks). `win-x86` bundles
+`sapi` + `cloud` + `sherpaonnx` only — ort needs onnxruntime API 27 and
+Microsoft's last x86 onnxruntime is API 22, so floravox cannot load there;
+treat `tts_create("floravox", …)` failure as a fallback-to-sherpaonnx signal.
 
 ### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
 
