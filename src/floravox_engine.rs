@@ -275,7 +275,24 @@ impl FloravoxEngine {
         let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
         let auto_chars = model.config().is_char_table;
-        let mut synth = Synthesizer::new(model, build_phonemizer(self, effective_lang));
+        let stack = build_phonemizer(self, effective_lang);
+
+        // Without any real G2P stage (no lexicon — so every word is OOV —
+        // and no Phonetisaurus/ByT5), the chain ends in letter spelling and
+        // the voice reads words spelled out ("a r e ..."). Character-table
+        // voices (MMS-style) are exempt: CharFrontend feeds their symbols
+        // directly. Warn once per synthesizer build (cached per voice/lang).
+        let char_frontend = self.chars.is_some() || auto_chars;
+        if !stack.real_g2p && !char_frontend {
+            eprintln!(
+                "floravox: no G2P for voice {} — no lexicon/Phonetisaurus/ByT5 loaded and \
+                 no `lang` credential resolved a bundle; every word will be letter-spelled. \
+                 Pass `lang` (e.g. \"en\") or `lexicon`/`phonetisaurus` in the credentials JSON.",
+                onnx.display()
+            );
+        }
+
+        let mut synth = Synthesizer::new(model, stack.phonemizer);
 
         // Document-level pre-passes, in order of specificity:
         //   explicit chars credential > auto-detected character table
@@ -433,7 +450,7 @@ fn default_models_dir() -> PathBuf {
 /// Build the phonemizer stack from the engine's g2p options.
 /// OOV chain: Phonetisaurus → ByT5 → letter spelling (first hit wins).
 #[cfg_attr(not(feature = "floravox-lexicons"), allow(unused_variables))]
-fn build_phonemizer(engine: &FloravoxEngine, effective_lang: Option<&str>) -> Phon {
+fn build_phonemizer(engine: &FloravoxEngine, effective_lang: Option<&str>) -> PhonemizerStack {
     // Resolve the lexicon stem: explicit `lexicon` config wins; with the
     // floravox-lexicons feature, the published bundle for the voice's
     // language (which also carries a trained Phonetisaurus WFST) is
@@ -468,25 +485,47 @@ fn build_phonemizer(engine: &FloravoxEngine, effective_lang: Option<&str>) -> Ph
     }
 
     // OOV chain: Phonetisaurus -> ByT5 -> letter spelling.
+    let mut real_g2p = false;
     let mut fallback: Box<dyn OovFallback + Send> = Box::new(RuleFallback::default());
     if let (Some(enc), Some(dec)) = (&engine.byt5_encoder, &engine.byt5_decoder) {
         if let Ok(byt5) = Byt5G2p::load(enc, dec) {
             fallback = Box::new(ChainedFallback(byt5, fallback));
+            real_g2p = true;
         }
     }
     if let Some(model) = &phonetisaurus {
         if let Ok(ph) = PhonetisaurusG2p::open(model) {
             fallback = Box::new(ChainedFallback(ph, fallback));
+            real_g2p = true;
         }
     }
+    let mut lexicon_opened = false;
     let lexicon = lexicon_stem
         .as_deref()
-        .and_then(|stem| floravox_g2p::MmapLexicon::open(stem).ok())
+        .and_then(|stem| {
+            floravox_g2p::MmapLexicon::open(stem)
+                .ok()
+                .inspect(|_| lexicon_opened = true)
+        })
         .map_or_else(
             || FstLexicon::from_rows(Vec::new()).expect("empty lexicon"),
             |m| m.to_mem(),
         );
-    CachedPhonemizer::new(LexiconPhonemizer::new(lexicon, fallback), 1024)
+    if lexicon_opened {
+        real_g2p = true;
+    }
+    PhonemizerStack {
+        phonemizer: CachedPhonemizer::new(LexiconPhonemizer::new(lexicon, fallback), 1024),
+        real_g2p,
+    }
+}
+
+/// The phonemizer plus whether any real G2P stage loaded. With
+/// `real_g2p == false` the OOV chain is letter spelling only — and with no
+/// lexicon every word is OOV, so the whole utterance gets spelled out.
+struct PhonemizerStack {
+    phonemizer: Phon,
+    real_g2p: bool,
 }
 
 /// Scale f32 samples by a volume factor (clamped).
@@ -946,6 +985,23 @@ mod tests {
             Some("de-DE")
         );
         assert!(document_lang("plain text").is_none());
+    }
+
+    #[test]
+    fn phonemizer_stack_flags_letter_spell_only_config() {
+        // Nothing configured: empty lexicon + RuleFallback-only OOV chain —
+        // every word would be letter-spelled (the coqui-en-ljspeech class
+        // of misconfiguration this flag exists to catch).
+        let engine = FloravoxEngine::new("{}");
+        let stack = build_phonemizer(&engine, None);
+        assert!(!stack.real_g2p);
+
+        // A configured-but-unopenable lexicon path is NOT real G2P.
+        let engine = FloravoxEngine::new(
+            r#"{"lexicon":"/nonexistent/no-such-stem","phonetisaurus":"/nonexistent/ph.fst"}"#,
+        );
+        let stack = build_phonemizer(&engine, None);
+        assert!(!stack.real_g2p);
     }
 
     #[test]
