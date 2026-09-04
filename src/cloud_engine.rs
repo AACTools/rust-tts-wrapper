@@ -2315,105 +2315,131 @@ impl TtsEngine for CloudEngine {
             return Ok(());
         }
 
-        let mut synth_url = self.config.synth_url.clone();
-        if self.config.provider_id == "elevenlabs" && on_boundary.is_some() {
-            synth_url.push_str("/with-timestamps");
-        }
-        let mut req = self.client.post(&synth_url);
+        // ElevenLabs word timing comes from the /with-timestamps endpoint
+        // variant. Model support for that variant varies (not documented
+        // for eleven_v3) — if it rejects the request we degrade to a
+        // plain synthesis and estimated boundaries below rather than
+        // failing every boundary-requesting call on that model.
+        let wants_timestamps = self.config.provider_id == "elevenlabs" && on_boundary.is_some();
 
-        // Auth header
-        if !self.config.auth_header.is_empty() {
-            let val = format!("{}{}", self.config.auth_prefix, self.api_key);
-            req = req.header(&self.config.auth_header, val);
-        }
+        // Build and send the synthesis request. A closure so the
+        // with-timestamps attempt can be retried without the suffix.
+        let send_synthesis = |synth_url: &str| -> Result<reqwest::blocking::Response, TtsError> {
+            let mut req = self.client.post(synth_url);
 
-        // Extra headers
-        for (k, v) in &self.config.extra_headers {
-            req = req.header(k.as_str(), v.as_str());
-        }
+            // Auth header
+            if !self.config.auth_header.is_empty() {
+                let val = format!("{}{}", self.config.auth_prefix, self.api_key);
+                req = req.header(&self.config.auth_header, val);
+            }
 
-        // Body depends on engine type
-        let resp = if self.config.body_is_ssml {
-            // Azure: send SSML XML body. When is_ssml=true, the text is
-            // already SSML — send it directly (don't escape/wrap with
-            // build_azure_ssml). Inject voice if the SSML lacks a <voice>
-            // tag, after completing the envelope and dropping unsupported
-            // <mark> elements (Azure accepts its documented <bookmark>
-            // here, so bookmarks are kept on this path).
-            let ssml = if is_ssml {
-                inject_voice_if_missing(
-                    &strip_unsupported_marks(&normalize_ssml_envelope(&text, &voice_to_use), false),
+            // Extra headers
+            for (k, v) in &self.config.extra_headers {
+                req = req.header(k.as_str(), v.as_str());
+            }
+
+            // Body depends on engine type
+            let resp = if self.config.body_is_ssml {
+                // Azure: send SSML XML body. When is_ssml=true, the text is
+                // already SSML — send it directly (don't escape/wrap with
+                // build_azure_ssml). Inject voice if the SSML lacks a <voice>
+                // tag, after completing the envelope and dropping unsupported
+                // <mark> elements (Azure accepts its documented <bookmark>
+                // here, so bookmarks are kept on this path).
+                let ssml = if is_ssml {
+                    inject_voice_if_missing(
+                        &strip_unsupported_marks(
+                            &normalize_ssml_envelope(&text, &voice_to_use),
+                            false,
+                        ),
+                        &voice_to_use,
+                    )
+                } else {
+                    build_azure_ssml(&text, &voice_to_use, rate, pitch, volume)
+                };
+                let ct = self
+                    .config
+                    .content_type
+                    .as_deref()
+                    .unwrap_or("application/ssml+xml");
+                req = req.header("Content-Type", ct);
+                req.body(ssml).send()
+            } else if self.config.provider_id == "google" {
+                // Google: build JSON body with proper structure
+                let (body, _words) = build_google_request(
+                    &text,
                     &voice_to_use,
-                )
+                    on_boundary.is_some(),
+                    google_ssml_override.as_deref(),
+                );
+                req = req.json(&body);
+                req.send()
             } else {
-                build_azure_ssml(&text, &voice_to_use, rate, pitch, volume)
-            };
-            let ct = self
-                .config
-                .content_type
-                .as_deref()
-                .unwrap_or("application/ssml+xml");
-            req = req.header("Content-Type", ct);
-            req.body(ssml).send()
-        } else if self.config.provider_id == "google" {
-            // Google: build JSON body with proper structure
-            let (body, _words) = build_google_request(
-                &text,
-                &voice_to_use,
-                on_boundary.is_some(),
-                google_ssml_override.as_deref(),
-            );
-            req = req.json(&body);
-            req.send()
-        } else {
-            // Standard JSON body for all other engines
-            let mut body = serde_json::Map::new();
-            if !self.config.text_field.is_empty() {
-                body.insert(
-                    self.config.text_field.clone(),
-                    serde_json::Value::String(text.clone()),
-                );
-            }
-            if !self.config.voice_param.is_empty() && !voice_to_use.is_empty() {
-                body.insert(
-                    self.config.voice_param.clone(),
-                    serde_json::Value::String(voice_to_use.clone()),
-                );
-            }
-            if let Some(ref model_param) = self.config.model_param {
-                if let Some(ref model) = self.config.model_default {
+                // Standard JSON body for all other engines
+                let mut body = serde_json::Map::new();
+                if !self.config.text_field.is_empty() {
                     body.insert(
-                        model_param.clone(),
-                        serde_json::Value::String(model.clone()),
+                        self.config.text_field.clone(),
+                        serde_json::Value::String(text.clone()),
                     );
                 }
-            }
-            // ElevenLabs: map the wrapper's rate multiplier (1.0 = normal)
-            // onto the deterministic voice_settings.speed API parameter
-            // (valid range 0.7–1.2; clamped). Only sent for explicit
-            // non-default rates. pitch/volume have no API equivalent
-            // (v3 models: use audio tags). Inserted before extra_body so
-            // a config-supplied voice_settings object (stability,
-            // similarity, …) takes precedence over the derived one.
-            if self.config.provider_id == "elevenlabs"
-                && rate > 0.0
-                && (rate - 1.0).abs() > f32::EPSILON
-                && !self.config.extra_body.contains_key("voice_settings")
-            {
-                let speed = rate.clamp(0.7, 1.2);
-                body.insert(
-                    "voice_settings".to_string(),
-                    serde_json::json!({ "speed": speed }),
-                );
-            }
-            for (k, v) in &self.config.extra_body {
-                body.insert(k.clone(), v.clone());
-            }
-            req = req.json(&serde_json::Value::Object(body));
-            req.send()
+                if !self.config.voice_param.is_empty() && !voice_to_use.is_empty() {
+                    body.insert(
+                        self.config.voice_param.clone(),
+                        serde_json::Value::String(voice_to_use.clone()),
+                    );
+                }
+                if let Some(ref model_param) = self.config.model_param {
+                    if let Some(ref model) = self.config.model_default {
+                        body.insert(
+                            model_param.clone(),
+                            serde_json::Value::String(model.clone()),
+                        );
+                    }
+                }
+                // ElevenLabs: map the wrapper's rate multiplier (1.0 = normal)
+                // onto the deterministic voice_settings.speed API parameter
+                // (valid range 0.7–1.2; clamped). Only sent for explicit
+                // non-default rates. pitch/volume have no API equivalent
+                // (v3 models: use audio tags). Inserted before extra_body so
+                // a config-supplied voice_settings object (stability,
+                // similarity, …) takes precedence over the derived one.
+                if self.config.provider_id == "elevenlabs"
+                    && rate > 0.0
+                    && (rate - 1.0).abs() > f32::EPSILON
+                    && !self.config.extra_body.contains_key("voice_settings")
+                {
+                    let speed = rate.clamp(0.7, 1.2);
+                    body.insert(
+                        "voice_settings".to_string(),
+                        serde_json::json!({ "speed": speed }),
+                    );
+                }
+                for (k, v) in &self.config.extra_body {
+                    body.insert(k.clone(), v.clone());
+                }
+                req = req.json(&serde_json::Value::Object(body));
+                req.send()
+            };
+            resp.map_err(|e| TtsError(format!("HTTP error: {e}")))
         };
 
-        let resp = resp.map_err(|e| TtsError(format!("HTTP error: {e}")))?;
+        let mut synth_url = self.config.synth_url.clone();
+        if wants_timestamps {
+            synth_url.push_str("/with-timestamps");
+        }
+        let mut resp = send_synthesis(&synth_url)?;
+
+        let mut timestamps_degraded = false;
+        if wants_timestamps && !resp.status().is_success() {
+            // The /with-timestamps variant was rejected (likely a model
+            // that doesn't support it). Drop the suffix and fall back to
+            // streamed audio + estimated boundaries. A genuine failure
+            // (auth, quota, bad voice) fails the retry too and surfaces
+            // its error there.
+            timestamps_degraded = true;
+            resp = send_synthesis(&self.config.synth_url)?;
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -2427,7 +2453,11 @@ impl TtsEngine for CloudEngine {
         // silent success.
         let mut audio_total = 0usize;
 
-        if self.config.provider_id == "elevenlabs" && on_boundary.is_some() {
+        // The with-timestamps response is one JSON document (base64 audio
+        // + character alignment). When the variant was rejected above, the
+        // retry returned a plain streamed body — handled by the streaming
+        // branch below with estimated boundaries.
+        if wants_timestamps && !timestamps_degraded {
             let resp_text = resp
                 .text()
                 .map_err(|e| TtsError(format!("Read error: {e}")))?;
@@ -2534,7 +2564,7 @@ impl TtsEngine for CloudEngine {
                     }
                 }
             }
-        } else if let Some(cb) = on_audio.as_mut() {
+        } else if on_audio.is_some() || (timestamps_degraded && on_boundary.is_some()) {
             // Most providers respond with an MP3 body (OpenAI, ElevenLabs,
             // Deepgram, Watson, …); a few return raw PCM natively (Azure via
             // X-Microsoft-OutputFormat, Cartesia). Stream the body as it
@@ -2542,12 +2572,22 @@ impl TtsEngine for CloudEngine {
             // reaches on_audio before the response completes.
             //
             // Estimated word boundaries fire progressively, anchored to
-            // delivered audio, instead of all-at-once afterwards.
-            let plan = on_boundary.is_some().then(|| EstimatePlan::build(&text));
+            // delivered audio, instead of all-at-once afterwards. The plan
+            // is built from the caller-facing text: for ElevenLabs
+            // SpeechMarkdown (and the /with-timestamps fallback), the
+            // processed prompt carries injected tags that must not become
+            // estimated "words". Also entered for a boundaries-only
+            // request when the timestamps variant degraded — otherwise
+            // those callers would get audio but no boundaries at all.
+            let plan = on_boundary
+                .is_some()
+                .then(|| EstimatePlan::build(boundary_search_text));
             let mut on_event = |ev: StreamEvt<'_>| match ev {
                 StreamEvt::Audio(bytes) => {
                     audio_total += bytes.len();
-                    cb(bytes);
+                    if let Some(cb) = on_audio.as_mut() {
+                        cb(bytes);
+                    }
                 }
                 StreamEvt::Boundary(word, start, end, offset, len) => {
                     if let Some(bcb) = on_boundary.as_mut() {

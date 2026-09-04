@@ -331,9 +331,12 @@ fn elevenlabs_v3_speechmarkdown_audio_tags_synthesise() {
 #[test]
 #[ignore]
 fn elevenlabs_v3_timestamps_with_audio_tags() {
-    // Word alignment through /with-timestamps while the text carries
-    // injected audio tags: boundary offsets must still resolve against
-    // the caller's input (words found, offsets >= 0).
+    // Word alignment while the text carries injected audio tags. If the
+    // model supports /with-timestamps, offsets come from the API's
+    // character alignment; if it rejects the variant, speak() degrades
+    // to streamed audio + estimated boundaries — either way boundaries
+    // must fire and offsets must resolve against the caller's input.
+    // (Which path ran is visible in the word count vs. text length.)
     let key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
     if key.is_empty() {
         eprintln!("skipping: ELEVENLABS_API_KEY not set");
