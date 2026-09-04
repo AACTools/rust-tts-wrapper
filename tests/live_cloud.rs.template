@@ -15,9 +15,12 @@
 //!   - Google v1beta1 real timepoints (boundary offset == audio frame offset)
 //!   - Azure WebSocket word-boundary turn protocol
 //!   - ElevenLabs /with-timestamps character alignment
+//!   - ElevenLabs v3 SpeechMarkdown audio-tag dialect end-to-end (synthesis
+//!     + word offsets with injected tags; requires modelId=eleven_v3)
 //!   - Streaming chunk size & count across providers
 //!   - SpeechMarkdown end-to-end per platform (Azure Microsoft SSML,
-//!     Google Assistant SSML, others Alexa SSML)
+//!     Google Assistant SSML, ElevenLabs model-matched prompt dialects,
+//!     others Alexa SSML)
 //!   - check_credentials() returns true with valid keys
 
 #![allow(clippy::all, clippy::pedantic, clippy::float_cmp)]

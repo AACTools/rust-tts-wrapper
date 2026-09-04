@@ -1415,6 +1415,20 @@ fn parse_google_timepoints(
     boundaries
 }
 
+/// Pick the SpeechMarkdown platform selector for a provider/model pair.
+///
+/// ElevenLabs markup is model-dependent: `eleven_v3*` parses no SSML and
+/// needs the audio-tag dialect; every other model (and every other
+/// provider) maps to `provider` unchanged (the caller's provider id is
+/// itself the selector for azure/google/the Alexa fallback).
+fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a str {
+    if provider == "elevenlabs" && model.is_some_and(|m| m.starts_with("eleven_v3")) {
+        "elevenlabs-v3"
+    } else {
+        provider
+    }
+}
+
 /// Parse ElevenLabs alignment payload into `(word, start_sec, end_sec)` tuples.
 ///
 /// ElevenLabs returns per-character timing in `alignment`:
@@ -1845,17 +1859,10 @@ impl TtsEngine for CloudEngine {
         // SpeechMarkdown platform selector: ElevenLabs needs the dialect
         // that matches the requested model (v3 audio tags vs pre-v3
         // <break> markup) — the other dialect gets read aloud or ignored.
-        let smd_platform: &str = if self.config.provider_id == "elevenlabs"
-            && self
-                .config
-                .model_default
-                .as_deref()
-                .is_some_and(|m| m.starts_with("eleven_v3"))
-        {
-            "elevenlabs-v3"
-        } else {
-            self.config.provider_id.as_str()
-        };
+        let smd_platform = elevenlabs_smd_platform(
+            &self.config.provider_id,
+            self.config.model_default.as_deref(),
+        );
         // Caller-facing text for word-boundary offset mapping: when
         // SpeechMarkdown was reformatted (rather than passed through or
         // converted to SSML), injected ElevenLabs tags shift offsets, so
@@ -2381,23 +2388,26 @@ impl TtsEngine for CloudEngine {
                     );
                 }
             }
-            for (k, v) in &self.config.extra_body {
-                body.insert(k.clone(), v.clone());
-            }
             // ElevenLabs: map the wrapper's rate multiplier (1.0 = normal)
             // onto the deterministic voice_settings.speed API parameter
             // (valid range 0.7–1.2; clamped). Only sent for explicit
             // non-default rates. pitch/volume have no API equivalent
-            // (v3 models: use audio tags).
+            // (v3 models: use audio tags). Inserted before extra_body so
+            // a config-supplied voice_settings object (stability,
+            // similarity, …) takes precedence over the derived one.
             if self.config.provider_id == "elevenlabs"
                 && rate > 0.0
                 && (rate - 1.0).abs() > f32::EPSILON
+                && !self.config.extra_body.contains_key("voice_settings")
             {
                 let speed = rate.clamp(0.7, 1.2);
                 body.insert(
                     "voice_settings".to_string(),
                     serde_json::json!({ "speed": speed }),
                 );
+            }
+            for (k, v) in &self.config.extra_body {
+                body.insert(k.clone(), v.clone());
             }
             req = req.json(&serde_json::Value::Object(body));
             req.send()
@@ -5043,34 +5053,27 @@ mod tests {
 
     #[test]
     fn test_elevenlabs_dialect_follows_model() {
-        // The speak() platform selector: eleven_v3* → audio-tag dialect,
-        // anything else → pre-v3 <break> markup. Mirror the exact
-        // predicate here so a refactor can't silently flip it.
-        fn dialect_for(provider: &str, model: Option<&str>) -> String {
-            if provider == "elevenlabs" && model.is_some_and(|m| m.starts_with("eleven_v3")) {
-                "elevenlabs-v3".to_string()
-            } else {
-                provider.to_string()
-            }
-        }
+        // The production predicate used by speak(): eleven_v3* → audio-tag
+        // dialect, anything else → pre-v3 <break> markup. Asserted directly
+        // against the real helper so a flip fails here, not just live.
         assert_eq!(
-            dialect_for("elevenlabs", Some("eleven_v3")),
+            elevenlabs_smd_platform("elevenlabs", Some("eleven_v3")),
             "elevenlabs-v3"
         );
         assert_eq!(
-            dialect_for("elevenlabs", Some("eleven_v3_conversational")),
+            elevenlabs_smd_platform("elevenlabs", Some("eleven_v3_conversational")),
             "elevenlabs-v3"
         );
         assert_eq!(
-            dialect_for("elevenlabs", Some("eleven_multilingual_v2")),
+            elevenlabs_smd_platform("elevenlabs", Some("eleven_multilingual_v2")),
             "elevenlabs"
         );
         assert_eq!(
-            dialect_for("elevenlabs", Some("eleven_flash_v2")),
+            elevenlabs_smd_platform("elevenlabs", Some("eleven_flash_v2")),
             "elevenlabs"
         );
-        assert_eq!(dialect_for("azure", Some("eleven_v3")), "azure");
-        assert_eq!(dialect_for("elevenlabs", None), "elevenlabs");
+        assert_eq!(elevenlabs_smd_platform("azure", Some("eleven_v3")), "azure");
+        assert_eq!(elevenlabs_smd_platform("elevenlabs", None), "elevenlabs");
     }
 
     // ===== Auth-header composition per provider =====
