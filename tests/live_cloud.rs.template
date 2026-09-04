@@ -73,12 +73,12 @@ fn google_real_timepoints_match_words() {
     let engine = create_engine("google", &creds).expect("google engine");
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();
-    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32, _: bool| {
         s.lock().unwrap().words.push((w.into(), st, e));
     };
     let text = "Hello world testing";
     engine
-        .speak(text, Some("en-US-Wavenet-D"), 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .speak(text, Some("en-US-Wavenet-D"), 1.0, 1.0, 1.0, None, Some(&mut cb), None,)
         .expect("google speak");
 
     let words = sink.lock().unwrap().words.clone();
@@ -145,6 +145,7 @@ fn google_streaming_chunks_are_at_most_8kb() {
             1.0,
             Some(&mut cb),
             None,
+            None,
         )
         .expect("speak");
     let sink = sink.lock().unwrap();
@@ -167,12 +168,12 @@ fn azure_ws_real_word_boundaries_fire() {
     let engine = create_engine("azure", &creds).expect("azure");
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();
-    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32, _: bool| {
         s.lock().unwrap().words.push((w.into(), st, e));
     };
     let text = "Azure WebSocket real word boundary test.";
     engine
-        .speak(text, Some("en-US-AriaNeural"), 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .speak(text, Some("en-US-AriaNeural"), 1.0, 1.0, 1.0, None, Some(&mut cb), None,)
         .expect("azure speak");
 
     let words = sink.lock().unwrap().words.clone();
@@ -200,6 +201,7 @@ fn azure_speechmarkdown_to_microsoft_ssml() {
             1.0,
             1.0,
             1.0,
+            None,
             None,
             None,
         )
@@ -236,14 +238,13 @@ fn elevenlabs_real_alignment_groups_into_words() {
     let engine = create_engine("elevenlabs", &creds).expect("elevenlabs");
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();
-    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32| {
+    let mut cb = move |w: &str, st: f32, e: f32, _: i32, _: i32, _: bool| {
         s.lock().unwrap().words.push((w.into(), st, e));
     };
     let text = "Hello world testing";
     engine
-        .speak(text, None, 1.0, 1.0, 1.0, None, Some(&mut cb))
+        .speak(text, None, 1.0, 1.0, 1.0, None, Some(&mut cb), None,)
         .expect("elevenlabs speak");
-
     let words = sink.lock().unwrap().words.clone();
     let expected: Vec<&str> = text.split_whitespace().collect();
     assert_eq!(words.len(), expected.len());
@@ -278,11 +279,85 @@ fn elevenlabs_streaming_audio_chunked() {
             1.0,
             Some(&mut cb),
             None,
+            None,
         )
         .expect("elevenlabs speak");
     let sink = sink.lock().unwrap();
     assert!(sink.total > 0);
     assert!(sink.chunks.iter().all(|&n| n <= 8192));
+}
+
+// ===== ElevenLabs v3 — SpeechMarkdown audio-tag dialect end-to-end =====
+
+#[test]
+#[ignore]
+fn elevenlabs_v3_speechmarkdown_audio_tags_synthesise() {
+    // Requires the eleven_v3 model (set via modelId credential) — audio
+    // tags are v3-exclusive and pre-v3 models read them aloud. Verifies
+    // the dialect reaches the API verbatim (not stripped to plain text)
+    // and that audio comes back.
+    let key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping: ELEVENLABS_API_KEY not set");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}","modelId":"eleven_v3"}}"#);
+    let engine = create_engine("elevenlabs", &creds).expect("elevenlabs");
+    let sink = Arc::new(Mutex::new(AudioSink::new()));
+    let s = sink.clone();
+    let mut cb = move |c: &[u8]| {
+        let mut sink = s.lock().unwrap();
+        sink.total += c.len();
+    };
+    engine
+        .speak(
+            "(Right on time)[excited] [2s] This is a (secret)[whisper].",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+            None,
+        )
+        .expect("elevenlabs v3 speak with audio tags");
+    let sink = sink.lock().unwrap();
+    assert!(sink.total > 0, "no audio returned for v3 audio-tag synthesis");
+}
+
+#[test]
+#[ignore]
+fn elevenlabs_v3_timestamps_with_audio_tags() {
+    // Word alignment through /with-timestamps while the text carries
+    // injected audio tags: boundary offsets must still resolve against
+    // the caller's input (words found, offsets >= 0).
+    let key = std::env::var("ELEVENLABS_API_KEY").unwrap_or_default();
+    if key.is_empty() {
+        eprintln!("skipping: ELEVENLABS_API_KEY not set");
+        return;
+    }
+    let creds = format!(r#"{{"apiKey":"{key}","modelId":"eleven_v3"}}"#);
+    let engine = create_engine("elevenlabs", &creds).expect("elevenlabs");
+    let sink = Arc::new(Mutex::new(BoundarySink::new()));
+    let s = sink.clone();
+    let mut cb = move |w: &str, st: f32, e: f32, off: i32, _: i32, _: bool| {
+        s.lock().unwrap().words.push((w.into(), st, e));
+        assert!(off >= 0, "word {w:?} not found in caller text");
+    };
+    engine
+        .speak(
+            "(Listen carefully)[whisper] because this matters.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            None,
+            Some(&mut cb),
+            None,
+        )
+        .expect("elevenlabs v3 speak with timestamps");
+    let words = sink.lock().unwrap().words.clone();
+    assert!(!words.is_empty(), "no word boundaries returned");
 }
 
 // ===== OpenAI — basic streaming + check_credentials =====
@@ -318,7 +393,7 @@ fn openai_synthesises_with_default_voice() {
         *t.lock().unwrap() += c.len();
     };
     engine
-        .speak("Hello world", None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .speak("Hello world", None, 1.0, 1.0, 1.0, Some(&mut cb), None, None,)
         .expect("openai speak");
     assert!(*total.lock().unwrap() > 0);
 }
@@ -365,7 +440,7 @@ fn cartesia_voice_list_and_synth() {
         *t.lock().unwrap() += c.len();
     };
     engine
-        .speak("Hello world", None, 1.0, 1.0, 1.0, Some(&mut cb), None)
+        .speak("Hello world", None, 1.0, 1.0, 1.0, Some(&mut cb), None, None,)
         .expect("cartesia speak");
     assert!(*total.lock().unwrap() > 0);
 }

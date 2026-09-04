@@ -37,6 +37,11 @@ pub type OnErrorCallback<'a> = &'a mut dyn FnMut(&str);
 /// `platform` picks the SSML flavour:
 ///   - `"azure"` → MicrosoftAzure
 ///   - `"google"` → GoogleAssistant
+///   - `"elevenlabs"` → ElevenLabs pre-v3 prompt markup (`<break>` tags,
+///     no SSML document). Not SSML: `is_ssml` is returned false so engines
+///     pass the markup through instead of stripping it.
+///   - `"elevenlabs-v3"` → Eleven v3 audio-tag dialect (`[whispers]`,
+///     `[pause]`, native slash IPA). Eleven v3 parses no SSML at all.
 ///   - `"sapi"` / `"avsynth"` / anything else → AmazonAlexa (the closest
 ///     generic SSML baseline; SAPI's own parser accepts the subset that
 ///     speechmarkdown-rust emits for Alexa)
@@ -64,6 +69,11 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
         // few elements, which the engine boundary strips.
         "azure" | "edge" => Platform::MicrosoftAzure,
         "google" => Platform::GoogleAssistant,
+        // ElevenLabs prompt markup, not SSML: the dialects must reach the
+        // API verbatim (stripping would drop every break/tag, and v3
+        // models read stray XML aloud).
+        "elevenlabs" => Platform::ElevenLabs,
+        "elevenlabs-v3" => Platform::ElevenLabsV3,
         // floravox parses the generic (Alexa-baseline) SSML dialect
         // natively; the floravox engine normalizes vendor-specific
         // elements (e.g. whisper's <amazon:effect>) on its side — as
@@ -71,8 +81,12 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
         _ => Platform::AmazonAlexa,
     };
 
+    let is_elevenlabs_dialect = matches!(platform, Platform::ElevenLabs | Platform::ElevenLabsV3);
+
     match SpeechMarkdownParser::to_ssml(text, platform) {
-        Ok(ssml) => (ssml, true),
+        // The ElevenLabs dialects are prompt text, not SSML: flag them so
+        // engines send the string as-is rather than treating it as SSML.
+        Ok(ssml) => (ssml, !is_elevenlabs_dialect),
         Err(_) => (text.to_string(), false),
     }
 }

@@ -805,11 +805,20 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 .get("voiceId")
                 .cloned()
                 .unwrap_or_else(|| "21m00Tcm4TlvDq8ikWAM".into());
+            // Model selection matters for the SpeechMarkdown dialect:
+            // eleven_v3* parses no SSML (audio tags only), pre-v3 models
+            // understand <break> but read audio tags aloud. Unrecognized
+            // model IDs surface as API errors rather than being masked.
+            let model = creds
+                .get("modelId")
+                .filter(|m| !m.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "eleven_multilingual_v2".into());
             Some(CloudConfig {
                 synth_url: format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"),
                 auth_header: "xi-api-key".into(),
                 model_param: Some("model_id".into()),
-                model_default: Some("eleven_multilingual_v2".into()),
+                model_default: Some(model),
                 text_field: "text".into(),
                 voices_url: Some("https://api.elevenlabs.io/v1/voices".into()),
                 provider_id: "elevenlabs".into(),
@@ -1833,7 +1842,26 @@ impl TtsEngine for CloudEngine {
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
         _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
-        let (original_text, is_ssml) = preprocess_speech_markdown(text, &self.config.provider_id);
+        // SpeechMarkdown platform selector: ElevenLabs needs the dialect
+        // that matches the requested model (v3 audio tags vs pre-v3
+        // <break> markup) — the other dialect gets read aloud or ignored.
+        let smd_platform: &str = if self.config.provider_id == "elevenlabs"
+            && self
+                .config
+                .model_default
+                .as_deref()
+                .is_some_and(|m| m.starts_with("eleven_v3"))
+        {
+            "elevenlabs-v3"
+        } else {
+            self.config.provider_id.as_str()
+        };
+        // Caller-facing text for word-boundary offset mapping: when
+        // SpeechMarkdown was reformatted (rather than passed through or
+        // converted to SSML), injected ElevenLabs tags shift offsets, so
+        // search the user's original input — the spoken words live there.
+        let user_text = text;
+        let (original_text, is_ssml) = preprocess_speech_markdown(text, smd_platform);
 
         // When the caller passed W3C SSML (via tts_speak_ssml), adapt per engine:
         //  - Azure/Edge: pass through (their WS/REST paths handle SSML natively)
@@ -1882,6 +1910,12 @@ impl TtsEngine for CloudEngine {
             google_ssml_override = None;
             text = original_text;
         }
+
+        // Boundary word search target (see `user_text` above): plain or
+        // dialect-reformatted input maps against what the caller passed;
+        // SSML paths keep searching the processed string (previously
+        // existing behavior).
+        let boundary_search_text: &str = if is_ssml { text.as_str() } else { user_text };
 
         // WebSocket approach: Azure when word boundaries are requested, or
         // Edge always (Edge is WS-only — it has no REST synth endpoint).
@@ -2350,6 +2384,21 @@ impl TtsEngine for CloudEngine {
             for (k, v) in &self.config.extra_body {
                 body.insert(k.clone(), v.clone());
             }
+            // ElevenLabs: map the wrapper's rate multiplier (1.0 = normal)
+            // onto the deterministic voice_settings.speed API parameter
+            // (valid range 0.7–1.2; clamped). Only sent for explicit
+            // non-default rates. pitch/volume have no API equivalent
+            // (v3 models: use audio tags).
+            if self.config.provider_id == "elevenlabs"
+                && rate > 0.0
+                && (rate - 1.0).abs() > f32::EPSILON
+            {
+                let speed = rate.clamp(0.7, 1.2);
+                body.insert(
+                    "voice_settings".to_string(),
+                    serde_json::json!({ "speed": speed }),
+                );
+            }
             req = req.json(&serde_json::Value::Object(body));
             req.send()
         };
@@ -2394,7 +2443,7 @@ impl TtsEngine for CloudEngine {
                     let mut search_from = 0usize;
                     for (word, start, end) in parse_elevenlabs_alignment(alignment) {
                         #[allow(clippy::cast_possible_truncation)]
-                        let char_offset = text[search_from..]
+                        let char_offset = boundary_search_text[search_from..]
                             .find(&word)
                             .map_or(-1, |pos| (search_from + pos) as i32);
 
@@ -4882,7 +4931,7 @@ mod tests {
         for input in &probe_inputs {
             let (azure_ssml, azure_ok) = preprocess_speech_markdown(input, "azure");
             let (google_ssml, google_ok) = preprocess_speech_markdown(input, "google");
-            let (alexa_ssml, alexa_ok) = preprocess_speech_markdown(input, "elevenlabs");
+            let (alexa_ssml, alexa_ok) = preprocess_speech_markdown(input, "openai");
 
             assert!(azure_ok, "azure failed to parse: {input:?}");
             assert!(google_ok, "google failed to parse: {input:?}");
@@ -4905,22 +4954,37 @@ mod tests {
     }
 
     #[test]
+    fn test_speechmarkdown_elevenlabs_dialects() {
+        use crate::engine::preprocess_speech_markdown;
+        // Pre-v3 dialect: <break> prompt markup, not SSML (no <speak>
+        // wrapper, is_ssml false so speak() sends it verbatim).
+        let (out, is_ssml) = preprocess_speech_markdown("Hello [2s] world", "elevenlabs");
+        assert!(!is_ssml, "elevenlabs dialect must not be flagged as SSML");
+        assert_eq!(out, "Hello <break time=\"2s\"/> world");
+
+        // v3 dialect: audio tags; no XML the model would read aloud.
+        let (out, is_ssml) = preprocess_speech_markdown("Hello [2s] world", "elevenlabs-v3");
+        assert!(!is_ssml);
+        assert_eq!(out, "Hello [long pause] world");
+
+        let (out, _) = preprocess_speech_markdown("(secret)[whisper]", "elevenlabs-v3");
+        assert_eq!(out, "[whispers] secret");
+
+        let (out, _) = preprocess_speech_markdown("(speech)/spitʃ/", "elevenlabs-v3");
+        assert_eq!(out, "\"/spitʃ/\"");
+    }
+
+    #[test]
     fn test_speechmarkdown_other_providers_detect_input() {
         use crate::engine::preprocess_speech_markdown;
-        // ElevenLabs, OpenAI, Cartesia, Murf, etc. all go through the
-        // Alexa fallback. They don't actually consume SSML — the result is
-        // discarded by the JSON-body branch in speak() — but detection
-        // must still flag the input as SpeechMarkdown so callers querying
-        // `is_ssml` get a truthful answer.
-        for provider in [
-            "openai",
-            "elevenlabs",
-            "cartesia",
-            "murf",
-            "deepgram",
-            "witai",
-            "xai",
-        ] {
+        // OpenAI, Cartesia, Murf, etc. all go through the Alexa fallback.
+        // They don't actually consume SSML — the result is discarded by the
+        // JSON-body branch in speak() — but detection must still flag the
+        // input as SpeechMarkdown so callers querying `is_ssml` get a
+        // truthful answer. ElevenLabs is NOT in this list: it gets its own
+        // dialects, which are prompt markup, not SSML (see
+        // test_speechmarkdown_elevenlabs_dialects).
+        for provider in ["openai", "cartesia", "murf", "deepgram", "witai", "xai"] {
             let (_ssml, is_ssml) =
                 preprocess_speech_markdown("Hello (world)[emphasis:\"strong\"]", provider);
             assert!(
@@ -4950,6 +5014,63 @@ mod tests {
         let mut url = cfg.synth_url.clone();
         url.push_str("/with-timestamps");
         assert!(url.ends_with("/text-to-speech/21m00Tcm4TlvDq8ikWAM/with-timestamps"));
+    }
+
+    #[test]
+    fn test_elevenlabs_model_id_from_creds() {
+        // Default model stays multilingual_v2 (pre-v3 dialect).
+        let cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_multilingual_v2"));
+
+        // modelId credential overrides it (v3 needs this: audio tags
+        // require eleven_v3, which parses no SSML at all).
+        let mut c = engine_creds("elevenlabs");
+        c.insert("modelId".into(), "eleven_v3".into());
+        let cfg = build_config("elevenlabs", &c).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+
+        let mut c = engine_creds("elevenlabs");
+        c.insert("modelId".into(), "eleven_flash_v2_5".into());
+        let cfg = build_config("elevenlabs", &c).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_flash_v2_5"));
+
+        // Empty modelId falls back to the default.
+        let mut c = engine_creds("elevenlabs");
+        c.insert("modelId".into(), String::new());
+        let cfg = build_config("elevenlabs", &c).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_multilingual_v2"));
+    }
+
+    #[test]
+    fn test_elevenlabs_dialect_follows_model() {
+        // The speak() platform selector: eleven_v3* → audio-tag dialect,
+        // anything else → pre-v3 <break> markup. Mirror the exact
+        // predicate here so a refactor can't silently flip it.
+        fn dialect_for(provider: &str, model: Option<&str>) -> String {
+            if provider == "elevenlabs" && model.is_some_and(|m| m.starts_with("eleven_v3")) {
+                "elevenlabs-v3".to_string()
+            } else {
+                provider.to_string()
+            }
+        }
+        assert_eq!(
+            dialect_for("elevenlabs", Some("eleven_v3")),
+            "elevenlabs-v3"
+        );
+        assert_eq!(
+            dialect_for("elevenlabs", Some("eleven_v3_conversational")),
+            "elevenlabs-v3"
+        );
+        assert_eq!(
+            dialect_for("elevenlabs", Some("eleven_multilingual_v2")),
+            "elevenlabs"
+        );
+        assert_eq!(
+            dialect_for("elevenlabs", Some("eleven_flash_v2")),
+            "elevenlabs"
+        );
+        assert_eq!(dialect_for("azure", Some("eleven_v3")), "azure");
+        assert_eq!(dialect_for("elevenlabs", None), "elevenlabs");
     }
 
     // ===== Auth-header composition per provider =====

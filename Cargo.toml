@@ -147,3 +147,11 @@ strip = true
 all = "warn"
 pedantic = "warn"
 cargo = "warn"
+
+# Local development against the sibling checkout in the AACTools workspace.
+# `[patch]` sections are ignored when rust-tts-wrapper is consumed as a
+# dependency, so this only affects building/testing this repo directly —
+# remove or bump the version requirement after speechmarkdown-rust
+# (>= 0.4.14, with Platform::ElevenLabsV3) is published.
+[patch.crates-io]
+speechmarkdown-rust = { path = "../speechmarkdown-rust" }
