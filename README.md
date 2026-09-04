@@ -50,7 +50,8 @@ cargo test --all-features
 Active development. Engine constructors, the C ABI, and the offline test suite run in CI on Linux, macOS, and Windows. Live cloud API calls are not exercised in CI — see `tests/live_cloud.rs.template` (copy to `tests/live_cloud.rs`, gitignored) and `.env.example` for running them locally with your own credentials. Live SherpaOnnx synthesis IS exercised in CI by the `sherpaonnx-live.yml` workflow (downloads small VITS/Matcha/Kokoro models and runs `tests/sherpaonnx_live.rs`), triggered on PRs touching `src/sherpaonnx_engine.rs` and available as a manual `workflow_dispatch`.
 - **Voice List**: Engines with "API" can enumerate voices from the provider's API.
 - **Word Boundaries**: Google returns real timing via v1beta1 timepoints with SSML marks. All others use word-length-adjusted estimation (150 WPM baseline, configurable).
-- **Speech Markdown**: Auto-detected and converted to platform-specific SSML via [speechmarkdown-rust](https://github.com/AACTools/speechmarkdown-rust). Azure gets Microsoft SSML, Google gets Assistant SSML, others get Alexa SSML.
+- **Speech Markdown**: Auto-detected and converted to platform-specific SSML via [speechmarkdown-rust](https://github.com/AACTools/speechmarkdown-rust). Azure gets Microsoft SSML, Google gets Assistant SSML, ElevenLabs gets model-matched prompt markup (see below), others get Alexa SSML.
+- **ElevenLabs markup**: ElevenLabs parses no SSML documents. Pre-v3 models (`eleven_multilingual_v2`, `flash_v2_5`, `flash_v2`) get `<break time>` prompt markup (≤3s, clamped); `eleven_v3*` (set via the `modelId` credential) gets audio tags (`[whispers]`, `[pause]`, `[long pause]`, native `"/IPA/"`) — the dialect is chosen from the model because v3 reads stray XML aloud and pre-v3 models read audio tags aloud. The `rate` parameter maps to the deterministic `voice_settings.speed` API setting (0.7–1.2).
 
 ## Rust API
 
