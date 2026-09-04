@@ -2573,12 +2573,12 @@ impl TtsEngine for CloudEngine {
             //
             // Estimated word boundaries fire progressively, anchored to
             // delivered audio, instead of all-at-once afterwards. The plan
-            // is built from the caller-facing text: for ElevenLabs
-            // SpeechMarkdown (and the /with-timestamps fallback), the
-            // processed prompt carries injected tags that must not become
-            // estimated "words". Also entered for a boundaries-only
-            // request when the timestamps variant degraded — otherwise
-            // those callers would get audio but no boundaries at all.
+            // is built from the caller-facing text so formatter-injected
+            // tags are not estimated as words (user-authored markup in
+            // the SpeechMarkdown source still is — the estimator has no
+            // markup filter). Also entered for a boundaries-only request
+            // when the timestamps variant degraded — otherwise those
+            // callers would get audio but no boundaries at all.
             let plan = on_boundary
                 .is_some()
                 .then(|| EstimatePlan::build(boundary_search_text));
