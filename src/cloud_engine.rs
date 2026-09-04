@@ -807,13 +807,15 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 .unwrap_or_else(|| "21m00Tcm4TlvDq8ikWAM".into());
             // Model selection matters for the SpeechMarkdown dialect:
             // eleven_v3* parses no SSML (audio tags only), pre-v3 models
-            // understand <break> but read audio tags aloud. Unrecognized
-            // model IDs surface as API errors rather than being masked.
+            // understand <break> but read audio tags aloud. v3 is the
+            // default — the most capable model, and the dialects keep the
+            // markup correct for it. Unrecognized model IDs surface as
+            // API errors rather than being masked.
             let model = creds
                 .get("modelId")
                 .filter(|m| !m.is_empty())
                 .cloned()
-                .unwrap_or_else(|| "eleven_multilingual_v2".into());
+                .unwrap_or_else(|| "eleven_v3".into());
             Some(CloudConfig {
                 synth_url: format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"),
                 auth_header: "xi-api-key".into(),
@@ -5068,16 +5070,26 @@ mod tests {
 
     #[test]
     fn test_elevenlabs_model_id_from_creds() {
-        // Default model stays multilingual_v2 (pre-v3 dialect).
+        // Default model is eleven_v3, and that default must select the
+        // v3 audio-tag dialect — the invariant that makes SpeechMarkdown
+        // correct out of the box.
         let cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
-        assert_eq!(cfg.model_default.as_deref(), Some("eleven_multilingual_v2"));
-
-        // modelId credential overrides it (v3 needs this: audio tags
-        // require eleven_v3, which parses no SSML at all).
-        let mut c = engine_creds("elevenlabs");
-        c.insert("modelId".into(), "eleven_v3".into());
-        let cfg = build_config("elevenlabs", &c).unwrap();
         assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+        assert_eq!(
+            elevenlabs_smd_platform("elevenlabs", cfg.model_default.as_deref()),
+            "elevenlabs-v3"
+        );
+
+        // modelId credential overrides it (e.g. a pre-v3 model when
+        // <break> markup or long-form character limits are wanted).
+        let mut c = engine_creds("elevenlabs");
+        c.insert("modelId".into(), "eleven_multilingual_v2".into());
+        let cfg = build_config("elevenlabs", &c).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_multilingual_v2"));
+        assert_eq!(
+            elevenlabs_smd_platform("elevenlabs", cfg.model_default.as_deref()),
+            "elevenlabs"
+        );
 
         let mut c = engine_creds("elevenlabs");
         c.insert("modelId".into(), "eleven_flash_v2_5".into());
@@ -5088,7 +5100,7 @@ mod tests {
         let mut c = engine_creds("elevenlabs");
         c.insert("modelId".into(), String::new());
         let cfg = build_config("elevenlabs", &c).unwrap();
-        assert_eq!(cfg.model_default.as_deref(), Some("eleven_multilingual_v2"));
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
     }
 
     #[test]

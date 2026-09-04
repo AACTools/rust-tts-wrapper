@@ -1,16 +1,15 @@
-//! Offline test for the ElevenLabs `/with-timestamps` degrade path: when
+//! Offline test for the `ElevenLabs` `/with-timestamps` degrade path: when
 //! the endpoint variant is rejected (a model that doesn't support it),
-//! speak() must retry the plain synthesis endpoint and deliver estimated
+//! `speak()` must retry the plain synthesis endpoint and deliver estimated
 //! boundaries instead of failing the call.
 //!
 //! Uses a `std::net::TcpListener` mock so no network access or API key is
 //! needed. The MP3 fixture is 0.4s of silence, regenerated with:
-//!   ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 0.4 -q:a 9 silence.mp3
+//! `ffmpeg -f lavfi -i anullsrc=r=44100:cl=mono -t 0.4 -q:a 9 silence.mp3`
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
-use rust_tts_wrapper::engine::TtsEngine;
 use rust_tts_wrapper::factory::create_engine;
 
 const SILENCE_MP3: &[u8] = include_bytes!("fixtures/silence.mp3");
@@ -40,8 +39,7 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]
         .lines()
         .find(|l| l.to_ascii_lowercase().starts_with("content-length"))
         .and_then(|l| l.split(':').nth(1))
-        .map(|v| v.trim().parse().expect("content-length"))
-        .unwrap_or(0);
+        .map_or(0, |v| v.trim().parse().expect("content-length"));
     let mut received = read - header_end - 4;
     while received < content_length {
         let n = stream.read(&mut buf[read..]).expect("read body");
