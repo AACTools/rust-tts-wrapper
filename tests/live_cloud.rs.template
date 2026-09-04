@@ -237,7 +237,11 @@ fn elevenlabs_real_alignment_groups_into_words() {
         eprintln!("skipping: ELEVENLABS_API_KEY not set");
         return;
     }
-    let creds = format!(r#"{{"apiKey":"{key}"}}"#);
+    // Pinned to a pre-v3 model: this test verifies the /with-timestamps
+    // JSON alignment path specifically. (The default model is eleven_v3;
+    // if it rejects the variant, speak() degrades to estimated
+    // boundaries — covered separately.)
+    let creds = format!(r#"{{"apiKey":"{key}","modelId":"eleven_multilingual_v2"}}"#);
     let engine = create_engine("elevenlabs", &creds).expect("elevenlabs");
     let sink = Arc::new(Mutex::new(BoundarySink::new()));
     let s = sink.clone();
