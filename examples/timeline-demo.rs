@@ -2,7 +2,7 @@
 //! playback clock to track which word is being spoken — the reader /
 //! highlighter pattern. Runs fully offline using the estimator, but the
 //! same shape works with real boundaries from `synth_with_boundaries`
-//! or the speak() boundary callback.
+//! or the `speak()` boundary callback.
 //!
 //! ```text
 //! cargo run --example timeline-demo
