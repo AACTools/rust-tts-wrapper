@@ -33,7 +33,7 @@ fn main() {
     // 2. Timeline keyed in playback time. 1.5 = playing 50% faster
     //    (e.g. an ffmpeg atempo=1.5 filter); pass 1.0 for normal speed.
     let speed = 1.5;
-    let timeline = PlaybackTimeline::from_boundaries(&boundaries, text, speed);
+    let timeline = PlaybackTimeline::from_word_boundaries(&boundaries, text, speed);
 
     // 3. Playback clock driving highlight lookups while audio plays.
     let mut clock = PlaybackClock::start(speed);
@@ -43,7 +43,7 @@ fn main() {
         sleep(step);
         let elapsed = clock.elapsed_playback_secs();
         let entry = timeline.word_at(elapsed);
-        let offset = timeline.char_offset_at(elapsed);
+        let offset = timeline.byte_offset_at(elapsed);
         match entry {
             Some(e) => println!(
                 "{elapsed:5.2}s  word={:<10} char_offset={offset:<3} {}",
@@ -68,6 +68,6 @@ fn main() {
     println!(
         "after seek to 1.8s: word={:?} char_offset={}",
         timeline.word_at(1.8).map(|e| e.word.clone()),
-        timeline.char_offset_at(1.8)
+        timeline.byte_offset_at(1.8)
     );
 }
