@@ -45,6 +45,7 @@ mod sapi_engine;
 pub mod sherpaonnx_engine;
 #[cfg(all(feature = "system", target_os = "linux"))]
 mod system_engine;
+pub mod timeline;
 pub mod types;
 
 // Re-exports for user-friendly API
