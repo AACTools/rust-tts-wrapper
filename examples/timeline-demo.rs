@@ -46,7 +46,7 @@ fn main() {
         let offset = timeline.byte_offset_at(elapsed);
         match entry {
             Some(e) => println!(
-                "{elapsed:5.2}s  word={:<10} char_offset={offset:<3} {}",
+                "{elapsed:5.2}s  word={:<10} byte_offset={offset:<3} {}",
                 e.word,
                 if e.estimated { "(estimated)" } else { "" }
             ),
@@ -66,7 +66,7 @@ fn main() {
     //    the clock; the timeline immediately reports the new position.
     clock.seek(1.8);
     println!(
-        "after seek to 1.8s: word={:?} char_offset={}",
+        "after seek to 1.8s: word={:?} byte_offset={}",
         timeline.word_at(1.8).map(|e| e.word.clone()),
         timeline.byte_offset_at(1.8)
     );

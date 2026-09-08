@@ -127,9 +127,16 @@ impl PlaybackTimeline {
         // the byte offset of the *source* char it came from. Case folding
         // can change byte length (e.g. 'İ' is 2 bytes, folds to 3), so
         // offsets must never be taken from a separately-lowercased string.
+        // Combining diacritics are dropped from the view (and from the
+        // needle) so that e.g. "İstanbul" matches the engine-normalized
+        // word "istanbul" — the dot that İ lowercases to is ignored.
+        // Composed-vs-decomposed accent differences beyond that (a
+        // composed 'é' needle against NFD text) still miss, and degrade
+        // to hold-last.
         let lowered: Vec<(usize, char)> = text
             .char_indices()
             .flat_map(|(i, c)| c.to_lowercase().map(move |lc| (i, lc)))
+            .filter(|(_, c)| !is_combining_mark(*c))
             .collect();
         let find_lowered = |from: usize, needle: &[char]| -> Option<(usize, usize)> {
             if needle.is_empty() || lowered.len() < needle.len() {
@@ -166,7 +173,12 @@ impl PlaybackTimeline {
             #[allow(clippy::cast_precision_loss)]
             let end_s = (b.offset + b.duration) as f32 / 1000.0;
 
-            let needle: Vec<char> = b.text.to_lowercase().chars().collect();
+            let needle: Vec<char> = b
+                .text
+                .to_lowercase()
+                .chars()
+                .filter(|c| !is_combining_mark(*c))
+                .collect();
             let (byte_offset, byte_len) = if needle.is_empty() {
                 (last_known, -1)
             } else {
@@ -183,12 +195,15 @@ impl PlaybackTimeline {
                     hit
                 } else if let Some((abs, next)) = find_lowered(cursor, &needle) {
                     last_known = abs as i32;
-                    let matched_bytes = match lowered.get(next - 1) {
-                        Some(&(last_src, _)) => next_char_start(text, last_src) - abs,
-                        None => b.text.len(),
-                    };
-                    cursor = next;
-                    (abs as i32, matched_bytes as i32)
+                    // The match may end mid-expansion (a needle shorter
+                    // than the source char's lowercase expansion): advance
+                    // past the whole source char, not just the consumed
+                    // produced chars, so the next search does not restart
+                    // inside this character.
+                    let last_src = lowered[next - 1].0;
+                    let span_end = next_char_start(text, last_src);
+                    cursor = produced_index_after(&lowered, span_end);
+                    (abs as i32, (span_end - abs) as i32)
                 } else {
                     // Word not found: hold the last known position.
                     (last_known, -1)
@@ -258,6 +273,13 @@ impl PlaybackTimeline {
             self.entries.get(idx - 1)
         }
     }
+}
+
+/// Combining diacritical marks (the common U+0300..=U+036F block),
+/// ignored during case-insensitive matching so that accents added by
+/// case folding (Turkish İ) and NFD text do not break word matching.
+fn is_combining_mark(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036F}')
 }
 
 /// Byte offset in `text` for a produced-index cursor into `lowered`.
@@ -495,6 +517,46 @@ mod tests {
         // çağırdı = 11 bytes (ç, ğ and the dotless ı are 2 bytes each).
         assert_eq!(t.entries()[1].byte_len, 11);
         assert_eq!(&text[10..21], "çağırdı");
+    }
+
+    #[test]
+    fn turkish_dotted_i_whole_word_matches_after_mark_stripping() {
+        // The motivating case: engine normalizes "İstanbul" to a plain
+        // lowercase word. The combining dot that İ lowercases to is
+        // ignored, so the whole word matches at byte 0 spanning all 9
+        // bytes.
+        let text = "İstanbul çağırdı";
+        let words = vec![wb("istanbul", 0, 600)];
+        let t = PlaybackTimeline::from_word_boundaries(&words, text, 1.0);
+        assert_eq!(t.entries()[0].byte_offset, 0);
+        assert_eq!(t.entries()[0].byte_len, 9);
+        assert_eq!(&text[0..9], "İstanbul");
+    }
+
+    #[test]
+    fn cursor_advances_past_partial_expansion_match() {
+        // Round-2 repro: needle "i" consumes only one of İ's two produced
+        // chars; the scan must still advance past the whole İ so the next
+        // word resolves at its true offset, not back at byte 0.
+        let text = "İa İa";
+        let words = vec![wb("i", 0, 200), wb("İa", 300, 400)];
+        let t = PlaybackTimeline::from_word_boundaries(&words, text, 1.0);
+        assert_eq!(t.entries()[0].byte_offset, 0);
+        assert_eq!(t.entries()[0].byte_len, 2); // the whole İ
+        assert_eq!(t.entries()[1].byte_offset, 4); // second "İa" (bytes 4..7)
+        assert_eq!(&text[4..7], "İa");
+    }
+
+    #[test]
+    fn composed_accent_needle_vs_nfd_text_misses_safely() {
+        // Documented limitation: a composed 'é' needle against NFD text
+        // (e + combining acute) is not normalized to a match — it degrades
+        // to hold-last rather than panicking or mis-offsetting.
+        let nfd = "cafe\u{0301} tonight";
+        let words = vec![wb("café", 0, 500), wb("tonight", 600, 500)];
+        let t = PlaybackTimeline::from_word_boundaries(&words, nfd, 1.0);
+        assert_eq!(t.entries()[0].byte_offset, -1); // no match known yet
+        assert_eq!(t.entries()[1].byte_offset, 7); // "tonight" (c,a,f,e,·,sp = 7)
     }
 
     #[test]
