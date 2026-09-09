@@ -2182,6 +2182,10 @@ impl TtsEngine for CloudEngine {
                                                         };
                                                         // Advance the running offset past
                                                         // this word + the space that follows.
+                                                        // TODO: assumes single-space
+                                                        // separation; punctuation and
+                                                        // double spaces make the
+                                                        // cumulative estimate drift.
                                                         ws_cumulative_offset += word.len() + 1;
                                                         #[allow(clippy::cast_precision_loss)]
                                                         cb(
@@ -2509,14 +2513,18 @@ impl TtsEngine for CloudEngine {
                 );
                 if let Some(tps) = json.get("timepoints").and_then(|v| v.as_array()) {
                     let boundaries = parse_google_timepoints(tps, &words);
+                    // Google's timepoints carry no text positions: recover
+                    // them with the shared matcher (byte-true, hold-last).
+                    let mut search = crate::word_search::WordSearch::new(&text);
                     for b in &boundaries {
+                        let (char_offset, char_len) = search.find_next(&b.text);
                         #[allow(clippy::cast_precision_loss)]
                         cb(
                             &b.text,
                             b.offset as f32 / 1000.0,
                             (b.offset + b.duration) as f32 / 1000.0,
-                            -1,
-                            -1,
+                            char_offset.max(0),
+                            char_len,
                             false,
                         );
                     }

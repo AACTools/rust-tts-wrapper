@@ -260,6 +260,23 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_misses_hold_without_advancing() {
+        let mut s = WordSearch::new("alpha beta gamma");
+        assert_eq!(s.find_next("alpha"), (0, 5));
+        assert_eq!(s.find_next("xx"), (0, -1));
+        assert_eq!(s.find_next("yy"), (0, -1));
+        assert_eq!(s.find_next("beta"), (6, 4));
+    }
+
+    #[test]
+    fn lowered_match_at_text_end_leaves_sane_cursor() {
+        let mut s = WordSearch::new("Say HELLO");
+        assert_eq!(s.find_next("hello"), (4, 5));
+        // Cursor at end: further searches miss without panicking.
+        assert_eq!(s.find_next("anything"), (4, -1));
+    }
+
+    #[test]
     fn emoji_and_zwj_text_is_safe() {
         let text = "👍🏽 ok";
         let hits = all(text, &["ok"]);

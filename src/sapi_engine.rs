@@ -165,22 +165,15 @@ impl SapiEngine {
                     .map_err(|e| TtsError(format!("SAPI Speak failed: {e}")))?;
                 if let Some(cb) = on_boundary.as_mut() {
                     let visible = strip_ssml_tags(processed_text);
-                    let mut search_from = 0usize;
+                    let mut search = crate::word_search::WordSearch::new(&visible);
                     for b in estimate_word_boundaries(&visible) {
-                        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-                        let char_offset = visible[search_from..]
-                            .find(&b.text)
-                            .map_or(-1, |pos| (search_from + pos) as i32);
-
-                        if char_offset >= 0 {
-                            search_from = char_offset as usize + b.text.len();
-                        }
+                        let (char_offset, char_len) = search.find_next(&b.text);
                         #[allow(clippy::cast_precision_loss)]
                         let start = b.offset as f32 / 1000.0;
                         #[allow(clippy::cast_precision_loss)]
                         let end = (b.offset + b.duration) as f32 / 1000.0;
-                        let char_len = b.text.chars().count() as i32;
-                        cb(&b.text, start, end, char_offset, char_len, true); // estimates
+                        cb(&b.text, start, end, char_offset.max(0), char_len, true);
+                        // estimates
                     }
                 }
                 return Ok(());

@@ -51,25 +51,21 @@ impl EstimatePlan {
     #[must_use]
     pub fn from_estimates(estimated: &[WordBoundary], plain: &str) -> Self {
         let mut events = Vec::with_capacity(estimated.len());
-        let mut search_from = 0usize;
+        // Byte-true positions via the shared matcher: exact →
+        // case/accent-insensitive → hold-last (never a -1 offset, so
+        // consumers can pair offset+length to slice the text safely).
+        let mut search = crate::word_search::WordSearch::new(plain);
         for b in estimated {
-            #[allow(clippy::cast_possible_truncation)]
-            let char_offset = plain[search_from..]
-                .find(&b.text)
-                .map_or(-1, |pos| (search_from + pos) as i32);
-            if char_offset >= 0 {
-                search_from = char_offset as usize + b.text.len();
-            }
+            let (char_offset, char_len) = search.find_next(&b.text);
             #[allow(clippy::cast_precision_loss)]
             let start = b.offset as f32 / 1000.0;
             #[allow(clippy::cast_precision_loss)]
             let end = (b.offset + b.duration) as f32 / 1000.0;
-            let char_len = b.text.chars().count() as i32;
             events.push(EstimateEvent {
                 word: b.text.clone(),
                 start_s: start,
                 end_s: end,
-                char_offset,
+                char_offset: char_offset.max(0),
                 char_len,
             });
         }

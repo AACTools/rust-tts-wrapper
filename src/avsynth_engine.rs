@@ -111,14 +111,17 @@ impl TtsEngine for AvSynthEngine {
         }
 
         if let Some(cb) = on_boundary.as_mut() {
-            for b in &estimate_word_boundaries(text) {
+            let estimated = estimate_word_boundaries(text);
+            let mut search = crate::word_search::WordSearch::new(text);
+            for b in &estimated {
+                let (char_offset, char_len) = search.find_next(&b.text);
                 #[allow(clippy::cast_precision_loss)]
                 cb(
                     &b.text,
                     b.offset as f32 / 1000.0,
                     (b.offset + b.duration) as f32 / 1000.0,
-                    -1,
-                    -1,
+                    char_offset.max(0),
+                    char_len,
                     true, // wpm estimates
                 );
             }

@@ -306,8 +306,9 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
     }
 }
 
-/// Estimate word boundaries using word-length-adjusted timing.
-/// Mirrors Swift's `WordTimingEstimator.estimate(text:wordsPerMinute:)`.
+/// Estimate word boundaries using word-length-adjusted timing with an
+/// inter-sentence pause. Originally mirroring Swift's
+/// `WordTimingEstimator`, since extended (sentence gaps) beyond it.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary> {
@@ -315,7 +316,8 @@ pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary> {
 }
 
 /// Estimate word boundaries with configurable words per minute.
-/// Matches Swift's `WordTimingEstimator.estimate(text:wordsPerMinute:)`.
+/// Abbreviation caveat: token-level detection means "Mr." / "e.g." also
+/// get the sentence gap — an accepted trade-off for an estimator.
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> Vec<WordBoundary> {
