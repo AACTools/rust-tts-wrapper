@@ -1884,7 +1884,9 @@ impl TtsEngine for CloudEngine {
             match self.config.provider_id.as_str() {
                 "azure" | "edge" => {
                     google_ssml_override = None;
-                    text = original_text;
+                    // Clone: original_text is still needed for boundary
+                    // text mapping below.
+                    text = original_text.clone();
                 }
                 "google" => {
                     let (v, inner) = crate::engine::unwrap_voice_tag(&original_text);
@@ -1923,14 +1925,26 @@ impl TtsEngine for CloudEngine {
             }
         } else {
             google_ssml_override = None;
-            text = original_text;
+            // Clone: original_text stays available for boundary mapping.
+            text = original_text.clone();
         }
 
         // Boundary word search target (see `user_text` above): plain or
         // dialect-reformatted input maps against what the caller passed;
         // SSML paths keep searching the processed string (previously
-        // existing behavior).
-        let boundary_search_text: &str = if is_ssml { text.as_str() } else { user_text };
+        // existing behavior). Exception: ElevenLabs SSML input was
+        // translated into prompt markup — the dialect text (and its tag
+        // fragments) must not leak into boundary words or offset
+        // mapping; search the plain spoken text instead.
+        let plain_spoken;
+        let boundary_search_text: &str = if is_ssml && self.config.provider_id == "elevenlabs" {
+            plain_spoken = crate::engine::strip_ssml_to_text(&original_text);
+            plain_spoken.as_str()
+        } else if is_ssml {
+            text.as_str()
+        } else {
+            user_text
+        };
 
         // WebSocket approach: Azure when word boundaries are requested, or
         // Edge always (Edge is WS-only — it has no REST synth endpoint).
@@ -5132,6 +5146,15 @@ mod tests {
         assert_eq!(
             elevenlabs_ssml_to_dialect("no ssml here", "elevenlabs").unwrap(),
             "no ssml here"
+        );
+        // Malformed SSML fails to parse → None → the caller strips.
+        assert!(elevenlabs_ssml_to_dialect("<speak>a & b</speak>", "elevenlabs").is_none());
+        // <voice> has no ElevenLabs equivalent (parity with the old
+        // strip path): the modifier is dropped, the text survives.
+        let voiced = r#"<speak><voice name="Aria">hi</voice></speak>"#;
+        assert_eq!(
+            elevenlabs_ssml_to_dialect(voiced, "elevenlabs-v3").unwrap(),
+            "hi"
         );
     }
 

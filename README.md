@@ -169,7 +169,7 @@ All functions are `extern "C"`, `#[no_mangle]`:
 | `tts_create(engine_id, credentials_json)` | Create engine, returns opaque `tts_ctx*` |
 | `tts_destroy(ctx)` | Free engine context |
 | `tts_speak(ctx, text)` | Speak (returns 0/-1) |
-| `tts_speak_ssml(ctx, ssml)` | Speak pre-built SSML, bypassing SpeechMarkdown + rate/pitch/volume wrapping |
+| `tts_speak_ssml(ctx, ssml)` | Speak pre-built SSML, bypassing rate/pitch/volume wrapping. Engines that parse SSML get it directly; ElevenLabs gets it translated via SpeechMarkdown into its model-matched dialect (it parses no SSML) |
 | `tts_speak_sync(ctx, text)` | Speak (blocking) |
 | `tts_stop(ctx)` | Stop speech |
 | `tts_pause(ctx)` | Pause in-progress speech |

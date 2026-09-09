@@ -177,3 +177,52 @@ fn elevenlabs_ssml_input_is_translated_not_stripped() {
     );
     assert!(total > 0);
 }
+
+#[test]
+fn elevenlabs_ssml_input_degraded_boundaries_are_plain_words() {
+    // SSML input + boundaries on the default eleven_v3 model: the
+    // /with-timestamps variant is rejected, so boundaries come from the
+    // estimator — and must be the plain spoken words, never dialect tag
+    // fragments like "[long" or "pause]".
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        let (mut stream, _) = listener.accept().expect("accept 1");
+        paths.push(
+            respond(
+                &mut stream,
+                "404 Not Found",
+                "application/json",
+                b"{\"detail\":{\"message\":\"not found\"}}",
+            )
+            .0,
+        );
+        let (mut stream, _) = listener.accept().expect("accept 2");
+        paths.push(respond(&mut stream, "200 OK", "audio/mpeg", SILENCE_MP3).0);
+        paths
+    });
+
+    let creds = format!(r#"{{"apiKey":"test-key","synthUrl":"http://{addr}"}}"#);
+    let engine = create_engine("elevenlabs", &creds).expect("elevenlabs engine");
+    let mut words: Vec<String> = Vec::new();
+    let mut on_boundary = |word: &str, _s: f32, _e: f32, _off: i32, _len: i32, _est: bool| {
+        words.push(word.to_string());
+    };
+    engine
+        .speak(
+            "<speak>Hello <break time=\"2s\"/> world</speak>",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            None,
+            Some(&mut on_boundary),
+            None,
+        )
+        .expect("degraded speak with SSML input");
+
+    let paths = server.join().expect("server thread");
+    assert!(paths[0].contains("/with-timestamps"));
+    assert_eq!(words, ["Hello", "world"]);
+}
