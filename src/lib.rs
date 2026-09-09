@@ -338,9 +338,11 @@ pub extern "C" fn tts_speak(ctx: *mut tts_ctx, text: *const c_char) -> i32 {
 
 /// Speak pre-built SSML using the engine in `ctx`.
 ///
-/// The SSML is passed directly to the engine without SpeechMarkdown
-/// conversion or rate/pitch/volume wrapping. Callers are responsible
-/// for embedding all prosody in the SSML.
+/// The SSML bypasses rate/pitch/volume wrapping; callers are
+/// responsible for embedding all prosody in the SSML. Engines that
+/// parse SSML receive it directly; engines that do not (ElevenLabs)
+/// get it translated via SpeechMarkdown into their model-matched
+/// prompt dialect.
 ///
 /// Returns 0 on success, -1 on failure.
 ///
