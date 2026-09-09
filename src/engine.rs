@@ -8,8 +8,9 @@ pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 
 /// Callback for word boundary events.
 /// Signature: (word, start_sec, end_sec, byte_offset, byte_len, estimated)
-/// `byte_offset` is a byte index into the spoken text and `byte_len` a
-/// byte length. When a word cannot be located (normalization mismatch,
+/// `byte_offset` is a byte index into the text as submitted (for
+/// SpeechMarkdown input, the caller's original source — highlighting
+/// targets the caller's string) and `byte_len` a byte length. When a word cannot be located (normalization mismatch,
 /// punctuation artifact), the callback receives the last known offset
 /// held (0 if nothing matched yet) with `byte_len` -1 — not a -1 offset.
 /// `estimated` is true for proportional estimates (unpatched voices,

@@ -20,9 +20,11 @@ pub struct EstimateEvent {
     pub start_s: f32,
     /// Estimate end time in seconds (rate-1.0 baseline).
     pub end_s: f32,
-    /// Byte offset into the spoken plain text (-1 when unresolvable).
+    /// Byte offset into the spoken plain text (0 when unresolvable —
+    /// the plan holds the last known position). Named `char_offset` for
+    /// callback-contract continuity; the value is a byte index.
     pub char_offset: i32,
-    /// Character length of the word.
+    /// Byte length of the word (-1 when unresolvable).
     pub char_len: i32,
 }
 

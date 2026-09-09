@@ -76,9 +76,12 @@ pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void
 /// word holds the last known offset (0 if nothing matched) with
 /// byte_len -1. `estimated` is 1 when the timings are proportional
 /// estimates (unpatched voice, wpm model), 0 when measured (floravox
-/// duration tensor, cloud provider timings). Exception: the Windows SAPI
-/// native-boundary path reports UTF-16 code-unit offsets/lengths (the
-/// units ISpVoice events provide).
+/// duration tensor, cloud provider timings). Exceptions: the Windows
+/// SAPI native-boundary path reports UTF-16 code-unit offsets/lengths
+/// (the units ISpVoice events provide), and the Azure/Edge WebSocket
+/// path passes Azure's own text.Offset/text.Length through unchanged
+/// when Azure supplies them (units per Azure's documentation; the
+/// wrapper's fallback arithmetic when they are absent is UTF-8 bytes).
 pub type CBoundaryCb =
     Option<extern "C" fn(*const c_char, i32, i32, f32, f32, i32, *mut std::ffi::c_void)>;
 /// Mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
