@@ -183,17 +183,20 @@ unsafe impl Sync for BoundaryCallback {}
 unsafe impl Send for VisemeCallback {}
 unsafe impl Sync for VisemeCallback {}
 
-// All ctx-mutex locks in this file use
-// `.unwrap_or_else(PoisonError::into_inner)`: a panic in an engine or
-// callback must not poison the locks and turn every subsequent FFI call
-// into a panic (which is UB across the C boundary). Recovering the inner
-// value is sound for these settings/cache fields.
+// All mutex locks in this file recover from poisoning
+// (`PoisonError::into_inner`): a poisoned lock must not turn every
+// subsequent FFI call into a panic (UB across the C boundary). The
+// realistic poison vector is an allocation failing mid-update (engines
+// and callbacks run after the guards are snapshot and dropped); the
+// guarded fields are all wholesale-replaced values, so recovery cannot
+// expose a half-written state.
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
 fn set_error(msg: &str) {
-    if let Ok(mut guard) = LAST_ERROR.lock() {
-        *guard = Some(safe_cstring(msg));
-    }
+    let mut guard = LAST_ERROR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Some(safe_cstring(msg));
 }
 
 /// Helper macro to wrap FFI functions with panic catching
@@ -1249,13 +1252,14 @@ pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
             }
         }
 
-        // Fallback to global error (for tts_create failures or null context)
-        match LAST_ERROR.lock() {
-            Ok(guard) => match guard.as_ref() {
-                Some(cs) => cs.as_ptr(),
-                None => ptr::null(),
-            },
-            Err(_) => ptr::null(),
+        // Fallback to global error (for tts_create failures or null
+        // context); poison-tolerant like every other lock here.
+        let guard = LAST_ERROR
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match guard.as_ref() {
+            Some(cs) => cs.as_ptr(),
+            None => ptr::null(),
         }
     }))
     .unwrap_or(ptr::null())
@@ -1383,4 +1387,36 @@ pub extern "C" fn tts_free_bytes(bytes: *mut u8, len: usize) {
             std::alloc::dealloc(bytes, layout);
         }
     }));
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    #[test]
+    fn poisoned_lock_does_not_break_subsequent_ffi_calls() {
+        // The FFI-reachable poison-recovery path: poison LAST_ERROR
+        // deliberately, then verify set_error (a write) and
+        // tts_get_last_error (an FFI read) both still work instead of
+        // panicking across the boundary.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = LAST_ERROR.lock().unwrap();
+            panic!("deliberate poison");
+        }));
+        assert!(LAST_ERROR.is_poisoned());
+
+        set_error("still alive");
+        let p = tts_get_last_error(std::ptr::null_mut());
+        assert!(
+            !p.is_null(),
+            "error must be readable through a poisoned lock"
+        );
+        let msg = unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy();
+        assert_eq!(msg, "still alive");
+
+        // Un-poison for other tests.
+        *LAST_ERROR
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
 }

@@ -159,26 +159,22 @@ mod bounds_check_tests {
 }
 
 #[test]
-fn test_setters_on_null_ctx_are_noops() {
-    // Unwrapped setters must tolerate null contexts without panicking
-    // (they predate the uniform catch wrapper).
-    unsafe {
-        rust_tts_wrapper::tts_set_volume(std::ptr::null_mut(), 1.5);
-        rust_tts_wrapper::tts_set_rate(std::ptr::null_mut(), 1.5);
-        rust_tts_wrapper::tts_set_pitch(std::ptr::null_mut(), 1.5);
-    }
-}
+fn test_null_ctx_is_tolerated_across_the_surface() {
+    // Every extern fn null-checks its context/pointers; spot-check a
+    // representative set (all are covered by the uniform catch wrapper).
+    let null = std::ptr::null_mut();
+    rust_tts_wrapper::tts_set_volume(null, 1.5);
+    rust_tts_wrapper::tts_set_rate(null, 1.5);
+    rust_tts_wrapper::tts_set_pitch(null, 1.5);
+    rust_tts_wrapper::tts_set_voice(null, std::ptr::null());
+    rust_tts_wrapper::tts_speak(null, std::ptr::null());
+    rust_tts_wrapper::tts_set_on_audio(null, None, std::ptr::null_mut());
 
-#[test]
-fn test_get_last_error_null_ctx_returns_null_or_global() {
-    // Must not crash on a null context; returns the global error slot
-    // (possibly null) instead.
-    // The contract for a null context: no crash, and the result is
-    // either null ("no error") or a readable C string from the global
-    // slot. Validating readability is the point; the value itself is
-    // environment-dependent.
-    let p = unsafe { rust_tts_wrapper::tts_get_last_error(std::ptr::null_mut()) };
+    // get_last_error on a null context: no crash; null ("no error") or a
+    // readable C string from the global slot.
+    let p = rust_tts_wrapper::tts_get_last_error(null);
     if !p.is_null() {
-        let _ = unsafe { std::ffi::CStr::from_ptr(p) }.to_bytes().len();
+        let bytes = unsafe { std::ffi::CStr::from_ptr(p) }.to_bytes();
+        assert!(bytes.len() < 4096, "error string unreasonably long");
     }
 }

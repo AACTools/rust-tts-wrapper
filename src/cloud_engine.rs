@@ -1417,6 +1417,17 @@ fn parse_google_timepoints(
     boundaries
 }
 
+/// The model that will actually be sent: an `extra_body["model_id"]`
+/// override wins over `model_default` (the JSON-body insert order gives
+/// extra_body the last write).
+fn effective_model(config: &CloudConfig) -> Option<&str> {
+    config
+        .extra_body
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .or(config.model_default.as_deref())
+}
+
 /// Pick the SpeechMarkdown platform selector for a provider/model pair.
 ///
 /// ElevenLabs markup is model-dependent: `eleven_v3*` parses no SSML and
@@ -1857,13 +1868,8 @@ impl TtsEngine for CloudEngine {
         // The effective model honours an extra_body model_id override:
         // the dialect must follow what is actually sent, not just
         // model_default.
-        let effective_model = self
-            .config
-            .extra_body
-            .get("model_id")
-            .and_then(|v| v.as_str())
-            .map_or(self.config.model_default.as_deref(), Some);
-        let smd_platform = elevenlabs_smd_platform(&self.config.provider_id, effective_model);
+        let smd_platform =
+            elevenlabs_smd_platform(&self.config.provider_id, effective_model(&self.config));
         // Caller-facing text for word-boundary offset mapping: when
         // SpeechMarkdown was reformatted (rather than passed through or
         // converted to SSML), injected ElevenLabs tags shift offsets, so
@@ -5174,11 +5180,7 @@ mod tests {
             "model_id".to_string(),
             serde_json::json!("eleven_multilingual_v2"),
         );
-        let effective = cfg
-            .extra_body
-            .get("model_id")
-            .and_then(|v| v.as_str())
-            .map_or(cfg.model_default.as_deref(), Some);
+        let effective = effective_model(&cfg);
         assert_eq!(
             elevenlabs_smd_platform("elevenlabs", effective),
             "elevenlabs",
