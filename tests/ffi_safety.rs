@@ -157,3 +157,28 @@ mod bounds_check_tests {
         }
     }
 }
+
+#[test]
+fn test_setters_on_null_ctx_are_noops() {
+    // Unwrapped setters must tolerate null contexts without panicking
+    // (they predate the uniform catch wrapper).
+    unsafe {
+        rust_tts_wrapper::tts_set_volume(std::ptr::null_mut(), 1.5);
+        rust_tts_wrapper::tts_set_rate(std::ptr::null_mut(), 1.5);
+        rust_tts_wrapper::tts_set_pitch(std::ptr::null_mut(), 1.5);
+    }
+}
+
+#[test]
+fn test_get_last_error_null_ctx_returns_null_or_global() {
+    // Must not crash on a null context; returns the global error slot
+    // (possibly null) instead.
+    // The contract for a null context: no crash, and the result is
+    // either null ("no error") or a readable C string from the global
+    // slot. Validating readability is the point; the value itself is
+    // environment-dependent.
+    let p = unsafe { rust_tts_wrapper::tts_get_last_error(std::ptr::null_mut()) };
+    if !p.is_null() {
+        let _ = unsafe { std::ffi::CStr::from_ptr(p) }.to_bytes().len();
+    }
+}

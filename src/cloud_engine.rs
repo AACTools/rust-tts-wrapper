@@ -1854,10 +1854,16 @@ impl TtsEngine for CloudEngine {
         // SpeechMarkdown platform selector: ElevenLabs needs the dialect
         // that matches the requested model (v3 audio tags vs pre-v3
         // <break> markup) — the other dialect gets read aloud or ignored.
-        let smd_platform = elevenlabs_smd_platform(
-            &self.config.provider_id,
-            self.config.model_default.as_deref(),
-        );
+        // The effective model honours an extra_body model_id override:
+        // the dialect must follow what is actually sent, not just
+        // model_default.
+        let effective_model = self
+            .config
+            .extra_body
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .map_or(self.config.model_default.as_deref(), Some);
+        let smd_platform = elevenlabs_smd_platform(&self.config.provider_id, effective_model);
         // Caller-facing text for word-boundary offset mapping: when
         // SpeechMarkdown was reformatted (rather than passed through or
         // converted to SSML), injected ElevenLabs tags shift offsets, so
@@ -5155,6 +5161,28 @@ mod tests {
         assert_eq!(
             elevenlabs_ssml_to_dialect(voiced, "elevenlabs-v3").unwrap(),
             "hi"
+        );
+    }
+
+    #[test]
+    fn test_elevenlabs_dialect_follows_extra_body_model_id() {
+        // The JSON body lets extra_body override model_id; the SpeechMarkdown
+        // dialect must follow the model that is actually sent.
+        let mut cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+        cfg.extra_body.insert(
+            "model_id".to_string(),
+            serde_json::json!("eleven_multilingual_v2"),
+        );
+        let effective = cfg
+            .extra_body
+            .get("model_id")
+            .and_then(|v| v.as_str())
+            .map_or(cfg.model_default.as_deref(), Some);
+        assert_eq!(
+            elevenlabs_smd_platform("elevenlabs", effective),
+            "elevenlabs",
+            "pre-v3 override must select the <break> dialect"
         );
     }
 

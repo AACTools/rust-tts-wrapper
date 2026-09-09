@@ -183,6 +183,11 @@ unsafe impl Sync for BoundaryCallback {}
 unsafe impl Send for VisemeCallback {}
 unsafe impl Sync for VisemeCallback {}
 
+// All ctx-mutex locks in this file use
+// `.unwrap_or_else(PoisonError::into_inner)`: a panic in an engine or
+// callback must not poison the locks and turn every subsequent FFI call
+// into a panic (which is UB across the C boundary). Recovering the inner
+// value is sound for these settings/cache fields.
 static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
 
 fn set_error(msg: &str) {
@@ -372,26 +377,54 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
         let text_str = unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned();
-        let voice = ctx_ref.voice_id.lock().unwrap().clone();
+        let voice = ctx_ref
+            .voice_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let rate = if raw_ssml {
             1.0
         } else {
-            *ctx_ref.rate.lock().unwrap()
+            *ctx_ref
+                .rate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let pitch = if raw_ssml {
             1.0
         } else {
-            *ctx_ref.pitch.lock().unwrap()
+            *ctx_ref
+                .pitch
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
         let volume = if raw_ssml {
             1.0
         } else {
-            *ctx_ref.volume.lock().unwrap()
+            *ctx_ref
+                .volume
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
         };
 
-        let audio = { *ctx_ref.on_audio.lock().unwrap() };
-        let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
-        let mark = { *ctx_ref.on_mark.lock().unwrap() };
+        let audio = {
+            *ctx_ref
+                .on_audio
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let boundary = {
+            *ctx_ref
+                .on_boundary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let mark = {
+            *ctx_ref
+                .on_mark
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
 
         let mut on_audio_closure: Option<BoxedAudioCb> = match audio.cb {
             Some(cb) => Some(Box::new(move |bytes: &[u8]| {
@@ -436,9 +469,24 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
             b
         });
 
-        let start_cb = { *ctx_ref.on_start.lock().unwrap() };
-        let end_cb = { *ctx_ref.on_end.lock().unwrap() };
-        let error_cb = { *ctx_ref.on_error.lock().unwrap() };
+        let start_cb = {
+            *ctx_ref
+                .on_start
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let end_cb = {
+            *ctx_ref
+                .on_end
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let error_cb = {
+            *ctx_ref
+                .on_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
 
         if let Some(cb) = start_cb.cb {
             cb(start_cb.userdata);
@@ -446,7 +494,12 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
 
         #[cfg(feature = "cloud")]
         {
-            let vis = { *ctx_ref.on_viseme.lock().unwrap() };
+            let vis = {
+                *ctx_ref
+                    .on_viseme
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            };
             let vbox: Option<Box<dyn FnMut(i32, f32)>> = vis.cb.map(|cb| {
                 let ud = vis.userdata;
                 Box::new(move |id: i32, off: f32| {
@@ -483,8 +536,10 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
             }
             Err(e) => {
                 let msg = e.to_string();
-                *ctx_ref.last_error.lock().unwrap() =
-                    CString::new(msg.clone()).unwrap_or_else(|_| CString::new("error").unwrap());
+                *ctx_ref
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = safe_cstring(msg.clone());
                 if let Some(cb) = error_cb.cb {
                     if let Ok(c_msg) = CString::new(msg) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
@@ -515,14 +570,42 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         let text_str = unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned();
-        let voice = ctx_ref.voice_id.lock().unwrap().clone();
-        let rate = *ctx_ref.rate.lock().unwrap();
-        let pitch = *ctx_ref.pitch.lock().unwrap();
-        let volume = *ctx_ref.volume.lock().unwrap();
+        let voice = ctx_ref
+            .voice_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let rate = *ctx_ref
+            .rate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pitch = *ctx_ref
+            .pitch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let volume = *ctx_ref
+            .volume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        let audio = { *ctx_ref.on_audio.lock().unwrap() };
-        let boundary = { *ctx_ref.on_boundary.lock().unwrap() };
-        let mark = { *ctx_ref.on_mark.lock().unwrap() };
+        let audio = {
+            *ctx_ref
+                .on_audio
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let boundary = {
+            *ctx_ref
+                .on_boundary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let mark = {
+            *ctx_ref
+                .on_mark
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
 
         let mut on_mark_closure: Option<BoxedMarkCb> = mark.cb.map(|cb| {
             let ud = mark.userdata;
@@ -568,9 +651,24 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
         });
 
         // Snapshot lifecycle callbacks atomically.
-        let start_cb = { *ctx_ref.on_start.lock().unwrap() };
-        let end_cb = { *ctx_ref.on_end.lock().unwrap() };
-        let error_cb = { *ctx_ref.on_error.lock().unwrap() };
+        let start_cb = {
+            *ctx_ref
+                .on_start
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let end_cb = {
+            *ctx_ref
+                .on_end
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
+        let error_cb = {
+            *ctx_ref
+                .on_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        };
 
         // Fire on_start before synthesis.
         if let Some(cb) = start_cb.cb {
@@ -579,7 +677,12 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
 
         #[cfg(feature = "cloud")]
         {
-            let vis = { *ctx_ref.on_viseme.lock().unwrap() };
+            let vis = {
+                *ctx_ref
+                    .on_viseme
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            };
             let vbox: Option<Box<dyn FnMut(i32, f32)>> = vis.cb.map(|cb| {
                 let ud = vis.userdata;
                 Box::new(move |id: i32, off: f32| {
@@ -616,8 +719,10 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
             }
             Err(e) => {
                 let msg = e.to_string();
-                *ctx_ref.last_error.lock().unwrap() =
-                    CString::new(msg.clone()).unwrap_or_else(|_| CString::new("error").unwrap());
+                *ctx_ref
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = safe_cstring(msg.clone());
                 if let Some(cb) = error_cb.cb {
                     if let Ok(c_msg) = CString::new(msg) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
@@ -727,8 +832,10 @@ fn tts_get_voices_inner(
             0
         }
         Err(e) => {
-            *ctx_ref.last_error.lock().unwrap() =
-                CString::new(e.to_string()).unwrap_or_else(|_| CString::new("error").unwrap());
+            *ctx_ref
+                .last_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = safe_cstring(e.to_string());
             -1
         }
     }
@@ -789,7 +896,10 @@ pub extern "C" fn tts_set_voice(ctx: *mut tts_ctx, voice_id: *const c_char) {
         let id = unsafe { CStr::from_ptr(voice_id) }
             .to_string_lossy()
             .into_owned();
-        *ctx_ref.voice_id.lock().unwrap() = Some(id);
+        *ctx_ref
+            .voice_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id);
     }));
 }
 
@@ -804,7 +914,10 @@ pub extern "C" fn tts_set_rate(ctx: *mut tts_ctx, rate: f32) {
         if ctx.is_null() {
             return;
         }
-        *unsafe { &*ctx }.rate.lock().unwrap() = rate;
+        *unsafe { &*ctx }
+            .rate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = rate;
     }));
 }
 
@@ -819,7 +932,10 @@ pub extern "C" fn tts_set_pitch(ctx: *mut tts_ctx, pitch: f32) {
         if ctx.is_null() {
             return;
         }
-        *unsafe { &*ctx }.pitch.lock().unwrap() = pitch;
+        *unsafe { &*ctx }
+            .pitch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = pitch;
     }));
 }
 
@@ -830,12 +946,16 @@ pub extern "C" fn tts_set_pitch(ctx: *mut tts_ctx, pitch: f32) {
 /// `ctx` must be valid.
 #[no_mangle]
 pub extern "C" fn tts_set_volume(ctx: *mut tts_ctx, volume: f32) {
-    if ctx.is_null() {
-        return;
-    }
-    *unsafe { &*ctx }.volume.lock().unwrap() = volume;
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if ctx.is_null() {
+            return;
+        }
+        *unsafe { &*ctx }
+            .volume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = volume;
+    }));
 }
-
 /// Set the callback for streaming audio chunks.
 ///
 /// # Safety
@@ -853,7 +973,10 @@ pub extern "C" fn tts_set_on_audio(
         let ctx_ref = unsafe { &*ctx };
         // Single critical section: a reader can never observe a new cb
         // paired with stale userdata.
-        *ctx_ref.on_audio.lock().unwrap() = AudioCallback { cb, userdata };
+        *ctx_ref
+            .on_audio
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = AudioCallback { cb, userdata };
     }));
 }
 
@@ -876,7 +999,10 @@ pub extern "C" fn tts_set_on_boundary(
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_boundary.lock().unwrap() = BoundaryCallback { cb, userdata };
+        *ctx_ref
+            .on_boundary
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = BoundaryCallback { cb, userdata };
     }));
 }
 
@@ -893,7 +1019,10 @@ pub extern "C" fn tts_set_on_mark(ctx: *mut tts_ctx, cb: CMarkCb, userdata: *mut
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_mark.lock().unwrap() = MarkCallback { cb, userdata };
+        *ctx_ref
+            .on_mark
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = MarkCallback { cb, userdata };
     }));
 }
 
@@ -913,7 +1042,10 @@ pub extern "C" fn tts_set_on_viseme(
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_viseme.lock().unwrap() = VisemeCallback { cb, userdata };
+        *ctx_ref
+            .on_viseme
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = VisemeCallback { cb, userdata };
     }));
 }
 
@@ -932,7 +1064,10 @@ pub extern "C" fn tts_set_on_start(
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_start.lock().unwrap() = VoidCallback { cb, userdata };
+        *ctx_ref
+            .on_start
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = VoidCallback { cb, userdata };
     }));
 }
 
@@ -947,7 +1082,10 @@ pub extern "C" fn tts_set_on_end(ctx: *mut tts_ctx, cb: CVoidCb, userdata: *mut 
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_end.lock().unwrap() = VoidCallback { cb, userdata };
+        *ctx_ref
+            .on_end
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = VoidCallback { cb, userdata };
     }));
 }
 
@@ -969,16 +1107,21 @@ pub extern "C" fn tts_set_on_error(
             return;
         }
         let ctx_ref = unsafe { &*ctx };
-        *ctx_ref.on_error.lock().unwrap() = ErrorCallback { cb, userdata };
+        *ctx_ref
+            .on_error
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = ErrorCallback { cb, userdata };
     }));
 }
 
 /// Return the number of registered engines.
 #[no_mangle]
 pub extern "C" fn tts_get_engine_count() -> i32 {
-    factory::engine_count() as i32
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        factory::engine_count() as i32
+    }))
+    .unwrap_or(0)
 }
-
 /// Get the list of available engine descriptors.
 ///
 /// On success, writes a heap-allocated array to `*out_engines` and its length
@@ -1090,31 +1233,33 @@ pub extern "C" fn tts_free_engines(engines: *mut types::tts_engine_info, count: 
 /// `ctx` may be null (returns global error), or a valid context pointer.
 #[no_mangle]
 pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
-    // If context provided and valid, return per-context error.
-    //
-    // The CString is stored in the ctx (Mutex<CString>) so the returned
-    // pointer's backing allocation lives until the next error replaces it.
-    // The caller must copy if they need the string beyond the next
-    // synth/speak call on this ctx.
-    if !ctx.is_null() {
-        let ctx_ref = unsafe { &*ctx };
-        if let Ok(guard) = ctx_ref.last_error.lock() {
-            if !guard.is_empty() {
-                return guard.as_ptr();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // If context provided and valid, return per-context error.
+        //
+        // The CString is stored in the ctx (Mutex<CString>) so the returned
+        // pointer's backing allocation lives until the next error replaces it.
+        // The caller must copy if they need the string beyond the next
+        // synth/speak call on this ctx.
+        if !ctx.is_null() {
+            let ctx_ref = unsafe { &*ctx };
+            if let Ok(guard) = ctx_ref.last_error.lock() {
+                if !guard.is_empty() {
+                    return guard.as_ptr();
+                }
             }
         }
-    }
 
-    // Fallback to global error (for tts_create failures or null context)
-    match LAST_ERROR.lock() {
-        Ok(guard) => match guard.as_ref() {
-            Some(cs) => cs.as_ptr(),
-            None => ptr::null(),
-        },
-        Err(_) => ptr::null(),
-    }
+        // Fallback to global error (for tts_create failures or null context)
+        match LAST_ERROR.lock() {
+            Ok(guard) => match guard.as_ref() {
+                Some(cs) => cs.as_ptr(),
+                None => ptr::null(),
+            },
+            Err(_) => ptr::null(),
+        }
+    }))
+    .unwrap_or(ptr::null())
 }
-
 /// Pause in-progress speech.
 ///
 /// # Safety
@@ -1167,10 +1312,23 @@ pub extern "C" fn tts_synth_to_bytes(
         let text_str = unsafe { CStr::from_ptr(text) }
             .to_string_lossy()
             .into_owned();
-        let voice = ctx_ref.voice_id.lock().unwrap().clone();
-        let rate = *ctx_ref.rate.lock().unwrap();
-        let pitch = *ctx_ref.pitch.lock().unwrap();
-        let volume = *ctx_ref.volume.lock().unwrap();
+        let voice = ctx_ref
+            .voice_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let rate = *ctx_ref
+            .rate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pitch = *ctx_ref
+            .pitch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let volume = *ctx_ref
+            .volume
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let engine = &ctx_ref.engine;
         match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
@@ -1196,8 +1354,11 @@ pub extern "C" fn tts_synth_to_bytes(
                 0
             }
             Err(e) => {
-                *ctx_ref.last_error.lock().unwrap() =
-                    CString::new(e.to_string()).unwrap_or_else(|_| CString::new("error").unwrap());
+                *ctx_ref
+                    .last_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    safe_cstring(e.to_string());
                 -1
             }
         }
