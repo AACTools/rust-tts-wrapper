@@ -23,7 +23,12 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// Minimal HTTP/1.1 responder: drains exactly one request (headers plus
 /// Content-Length body) and writes `status` with `body`. Returns the
 /// request line so tests can assert on the path.
-fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]) -> String {
+fn respond(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+) -> (String, String) {
     let mut buf = vec![0u8; 16_384];
     let mut read = 0usize;
     let header_end = loop {
@@ -56,7 +61,10 @@ fn respond(stream: &mut TcpStream, status: &str, content_type: &str, body: &[u8]
         .expect("write headers");
     stream.write_all(body).expect("write body");
     stream.flush().expect("flush");
-    headers.lines().next().unwrap_or_default().to_string()
+    let request_line = headers.lines().next().unwrap_or_default().to_string();
+    let req_body =
+        String::from_utf8_lossy(&buf[header_end + 4..header_end + 4 + content_length]).to_string();
+    (request_line, req_body)
 }
 
 #[test]
@@ -67,15 +75,18 @@ fn elevenlabs_timestamps_rejection_degrades_to_estimated_boundaries() {
         let mut paths = Vec::new();
         // First attempt: the /with-timestamps variant is rejected.
         let (mut stream, _) = listener.accept().expect("accept 1");
-        paths.push(respond(
-            &mut stream,
-            "404 Not Found",
-            "application/json",
-            b"{\"detail\":{\"message\":\"not found\"}}",
-        ));
+        paths.push(
+            respond(
+                &mut stream,
+                "404 Not Found",
+                "application/json",
+                b"{\"detail\":{\"message\":\"not found\"}}",
+            )
+            .0,
+        );
         // Retry: plain synthesis endpoint with an MP3 body.
         let (mut stream, _) = listener.accept().expect("accept 2");
-        paths.push(respond(&mut stream, "200 OK", "audio/mpeg", SILENCE_MP3));
+        paths.push(respond(&mut stream, "200 OK", "audio/mpeg", SILENCE_MP3).0);
         paths
     });
 
@@ -118,4 +129,51 @@ fn elevenlabs_timestamps_rejection_degrades_to_estimated_boundaries() {
         paths[1]
     );
     assert_eq!(words, ["Hello", "boundary", "fallback"]);
+}
+
+#[test]
+fn elevenlabs_ssml_input_is_translated_not_stripped() {
+    // The tts_speak_ssml path on ElevenLabs: W3C SSML must arrive at the
+    // API as the model-matched dialect (default model eleven_v3 → audio
+    // tags), not stripped to plain text and not as raw XML.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        respond(&mut stream, "200 OK", "audio/mpeg", SILENCE_MP3).1
+    });
+
+    let creds = format!(r#"{{"apiKey":"test-key","synthUrl":"http://{addr}"}}"#);
+    let engine = create_engine("elevenlabs", &creds).expect("elevenlabs engine");
+    let mut total = 0usize;
+    let mut on_audio = |chunk: &[u8]| {
+        total += chunk.len();
+    };
+    engine
+        .speak(
+            "<speak>Hello <break time=\"2s\"/> <prosody rate=\"slow\">world</prosody></speak>",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut on_audio),
+            None,
+            None,
+        )
+        .expect("speak with SSML input");
+
+    let body = server.join().expect("server thread");
+    assert!(
+        body.contains("[long pause]"),
+        "break must become a v3 pause tag; body: {body}"
+    );
+    assert!(
+        body.contains("[drawn out] world"),
+        "slow prosody must become a tempo tag; body: {body}"
+    );
+    assert!(
+        !body.contains("<break"),
+        "raw SSML must not reach the API; body: {body}"
+    );
+    assert!(total > 0);
 }

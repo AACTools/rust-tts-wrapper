@@ -1431,6 +1431,18 @@ fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a st
     }
 }
 
+/// Translate W3C (or Alexa/Azure-flavoured) SSML into an ElevenLabs
+/// dialect prompt: SSML → SpeechMarkdown → the model-matched dialect.
+/// Returns `None` when the input does not parse; callers then fall back
+/// to plain-text stripping.
+#[cfg(feature = "speechmarkdown")]
+fn elevenlabs_ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
+    use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
+    let platform = Platform::from_platform_str(smd_platform)?;
+    let smd = SpeechMarkdownParser::to_smd(ssml).ok()?;
+    SpeechMarkdownParser::to_ssml(&smd, platform).ok()
+}
+
 /// Parse ElevenLabs alignment payload into `(word, start_sec, end_sec)` tuples.
 ///
 /// ElevenLabs returns per-character timing in `alignment`:
@@ -1893,7 +1905,20 @@ impl TtsEngine for CloudEngine {
                 }
                 _ => {
                     google_ssml_override = None;
-                    text = crate::engine::strip_ssml_to_text(&original_text);
+                    // ElevenLabs parses no SSML: translate into the
+                    // model-matched dialect (breaks, whisper, styles
+                    // survive) rather than stripping to plain text.
+                    #[cfg(feature = "speechmarkdown")]
+                    if self.config.provider_id == "elevenlabs" {
+                        text = elevenlabs_ssml_to_dialect(&original_text, smd_platform)
+                            .unwrap_or_else(|| crate::engine::strip_ssml_to_text(&original_text));
+                    } else {
+                        text = crate::engine::strip_ssml_to_text(&original_text);
+                    }
+                    #[cfg(not(feature = "speechmarkdown"))]
+                    {
+                        text = crate::engine::strip_ssml_to_text(&original_text);
+                    }
                 }
             }
         } else {
@@ -5080,6 +5105,34 @@ mod tests {
         c.insert("modelId".into(), String::new());
         let cfg = build_config("elevenlabs", &c).unwrap();
         assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+    }
+
+    #[test]
+    fn test_elevenlabs_ssml_translates_to_dialects() {
+        // W3C/Alexa/Azure-flavoured SSML → SpeechMarkdown → the
+        // model-matched ElevenLabs dialect (used by the tts_speak_ssml
+        // path instead of stripping).
+        let alexa = r#"<speak>Hello <break time="2s"/> world</speak>"#;
+        assert_eq!(
+            elevenlabs_ssml_to_dialect(alexa, "elevenlabs").unwrap(),
+            "Hello <break time=\"2s\"/> world"
+        );
+        let v3 = r#"<speak><amazon:effect name="whispered">secret</amazon:effect></speak>"#;
+        assert_eq!(
+            elevenlabs_ssml_to_dialect(v3, "elevenlabs-v3").unwrap(),
+            "[whispers] secret"
+        );
+        let azure = r#"<speak><mstts:express-as style="cheerful">hi</mstts:express-as></speak>"#;
+        assert_eq!(
+            elevenlabs_ssml_to_dialect(azure, "elevenlabs-v3").unwrap(),
+            "[cheerful] hi"
+        );
+        // Plain text parses as bare SpeechMarkdown and round-trips
+        // unchanged (no translation needed).
+        assert_eq!(
+            elevenlabs_ssml_to_dialect("no ssml here", "elevenlabs").unwrap(),
+            "no ssml here"
+        );
     }
 
     #[test]
