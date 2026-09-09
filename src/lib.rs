@@ -1414,9 +1414,11 @@ mod poison_tests {
         let msg = unsafe { std::ffi::CStr::from_ptr(p) }.to_string_lossy();
         assert_eq!(msg, "still alive");
 
-        // Un-poison for other tests.
+        // Reset for other tests: clear the value AND the poison flag
+        // (into_inner recovery alone would leave the flag set).
         *LAST_ERROR
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        LAST_ERROR.clear_poison();
     }
 }
