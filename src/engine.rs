@@ -7,8 +7,11 @@ use std::fmt;
 pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 
 /// Callback for word boundary events.
-/// Signature: (word, start_sec, end_sec, char_offset, char_len, estimated)
-/// char_offset/char_len are -1 when the engine doesn't report them.
+/// Signature: (word, start_sec, end_sec, byte_offset, byte_len, estimated)
+/// `byte_offset` is a byte index into the spoken text and `byte_len` a
+/// byte length. When a word cannot be located (normalization mismatch,
+/// punctuation artifact), the callback receives the last known offset
+/// held (0 if nothing matched yet) with `byte_len` -1 — not a -1 offset.
 /// `estimated` is true for proportional estimates (unpatched voices,
 /// sherpa-onnx's wpm model) and false for measured timings (floravox
 /// duration tensor, cloud provider timings).
@@ -316,17 +319,26 @@ pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary> {
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> Vec<WordBoundary> {
+    // Extra pause after a sentence ends, before the next one starts —
+    // speakers breathe between sentences, and the flat per-word model
+    // runs words together across sentence boundaries.
+    const SENTENCE_GAP_MS: u64 = 350;
+
     let words: Vec<&str> = text.split_whitespace().filter(|w| !w.is_empty()).collect();
     if words.is_empty() {
         return Vec::new();
     }
 
     let ms_per_word = 60_000.0 / words_per_minute;
-
-    let mut boundaries = Vec::with_capacity(words.len());
+    let mut boundaries: Vec<WordBoundary> = Vec::with_capacity(words.len());
     let mut current_ms: u64 = 0;
+    let mut prev_word = "";
 
     for word in &words {
+        if current_ms > 0 && ends_sentence(prev_word) {
+            current_ms += SENTENCE_GAP_MS;
+        }
+        prev_word = word;
         let length_factor = (word.len() as f64 / 5.0).clamp(0.5, 2.0);
         let duration = (ms_per_word * length_factor) as u64;
         let duration = duration.max(1);
@@ -343,8 +355,58 @@ pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> V
     boundaries
 }
 
+/// Whether `word` ends a sentence for estimation purposes: terminal
+/// sentence punctuation (possibly before a closing quote or bracket).
+/// Semicolons, colons and commas stay inline — they read as short beats,
+/// not sentence breaks.
+fn ends_sentence(word: &str) -> bool {
+    let trimmed = word.trim_end_matches(['"', '\'', ')', ']', '”', '’']);
+    trimmed.ends_with('.')
+        || trimmed.ends_with('!')
+        || trimmed.ends_with('?')
+        || trimmed.ends_with('…')
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn estimator_adds_sentence_gap_between_sentences() {
+        let b = estimate_word_boundaries("One. Two words here.");
+        assert_eq!(b.len(), 4);
+        assert_eq!(b[0].offset, 0);
+        // Without a gap, word 2 would start exactly after word 1's
+        // duration; with it, at least SENTENCE_GAP_MS later.
+        assert!(b[1].offset >= b[0].offset + b[0].duration + 350);
+        // No gap inside the second sentence (word 3 follows word 2
+        // directly).
+        assert_eq!(b[2].offset, b[1].offset + b[1].duration);
+    }
+
+    #[test]
+    fn estimator_no_gap_without_sentence_punctuation() {
+        let b = estimate_word_boundaries("one two three");
+        for w in b.windows(2) {
+            assert_eq!(w[1].offset, w[0].offset + w[0].duration);
+        }
+    }
+
+    #[test]
+    fn estimator_gap_applies_before_closing_quote() {
+        let b = estimate_word_boundaries("He said \"stop.\" Then left.");
+        // "Then" follows the quoted sentence end: gap applied.
+        let then = &b[3];
+        let stop = &b[2];
+        assert!(then.offset >= stop.offset + stop.duration + 350);
+    }
+
+    #[test]
+    fn estimator_inline_punctuation_gets_no_gap() {
+        let b = estimate_word_boundaries("first, second; third:");
+        for w in b.windows(2) {
+            assert_eq!(w[1].offset, w[0].offset + w[0].duration);
+        }
+    }
+
     use super::*;
 
     #[test]

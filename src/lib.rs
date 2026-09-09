@@ -47,6 +47,7 @@ pub mod sherpaonnx_engine;
 mod system_engine;
 pub mod timeline;
 pub mod types;
+pub mod word_search;
 
 // Re-exports for user-friendly API
 pub use engine::TtsEngine;

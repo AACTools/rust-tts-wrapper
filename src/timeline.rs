@@ -111,9 +111,10 @@ impl PlaybackTimeline {
 
     /// Build from `Vec<WordBoundary>` (as returned by
     /// `synth_with_boundaries`), recovering each word's byte offset in
-    /// `text` by scanning forward — case-insensitively on a miss, and
-    /// holding the last known position when a word cannot be found at all
-    /// (punctuation artifacts, normalization differences).
+    /// `text` with a [`crate::word_search::WordSearch`]: exact match,
+    /// then case-insensitive with combining diacritics ignored, then
+    /// hold-last on a miss (punctuation artifacts, normalization
+    /// differences).
     ///
     /// # Panics (debug builds only)
     /// Panics via `debug_assert!` when the boundaries are not in
@@ -122,45 +123,8 @@ impl PlaybackTimeline {
     #[must_use]
     pub fn from_word_boundaries(boundaries: &[WordBoundary], text: &str, speed: f32) -> Self {
         let speed = if speed > 0.0 { speed } else { 1.0 };
-
-        // Lowercased view of `text` where every produced char maps back to
-        // the byte offset of the *source* char it came from. Case folding
-        // can change byte length (e.g. 'İ' is 2 bytes, folds to 3), so
-        // offsets must never be taken from a separately-lowercased string.
-        // Combining diacritics are dropped from the view (and from the
-        // needle) so that e.g. "İstanbul" matches the engine-normalized
-        // word "istanbul" — the dot that İ lowercases to is ignored.
-        // Composed-vs-decomposed accent differences beyond that (a
-        // composed 'é' needle against NFD text) still miss, and degrade
-        // to hold-last.
-        let lowered: Vec<(usize, char)> = text
-            .char_indices()
-            .flat_map(|(i, c)| c.to_lowercase().map(move |lc| (i, lc)))
-            .filter(|(_, c)| !is_combining_mark(*c))
-            .collect();
-        let find_lowered = |from: usize, needle: &[char]| -> Option<(usize, usize)> {
-            if needle.is_empty() || lowered.len() < needle.len() {
-                return None;
-            }
-            let mut k = from.min(lowered.len() - needle.len() + 1);
-            while k + needle.len() <= lowered.len() {
-                if lowered[k..k + needle.len()]
-                    .iter()
-                    .map(|(_, c)| *c)
-                    .eq(needle.iter().copied())
-                {
-                    // Byte offset of the first source char, and the
-                    // produced-index just past the match.
-                    return Some((lowered[k].0, k + needle.len()));
-                }
-                k += 1;
-            }
-            None
-        };
-
+        let mut search = crate::word_search::WordSearch::new(text);
         let mut entries = Vec::with_capacity(boundaries.len());
-        let mut cursor = 0usize; // produced-index scan cursor
-        let mut last_known = -1i32; // last matched byte offset
         let mut prev_offset = 0u64;
         for b in boundaries {
             debug_assert!(
@@ -173,42 +137,7 @@ impl PlaybackTimeline {
             #[allow(clippy::cast_precision_loss)]
             let end_s = (b.offset + b.duration) as f32 / 1000.0;
 
-            let needle: Vec<char> = b
-                .text
-                .to_lowercase()
-                .chars()
-                .filter(|c| !is_combining_mark(*c))
-                .collect();
-            let (byte_offset, byte_len) = if needle.is_empty() {
-                (last_known, -1)
-            } else {
-                // Case-sensitive match first (cheapest, byte-exact).
-                let exact = text[cursor_byte(text, &lowered, cursor)..]
-                    .find(&b.text)
-                    .map(|pos| {
-                        let abs = cursor_byte(text, &lowered, cursor) + pos;
-                        (abs as i32, b.text.len() as i32)
-                    });
-                if let Some(hit) = exact {
-                    last_known = hit.0;
-                    cursor = produced_index_after(&lowered, hit.0 as usize + b.text.len());
-                    hit
-                } else if let Some((abs, next)) = find_lowered(cursor, &needle) {
-                    last_known = abs as i32;
-                    // The match may end mid-expansion (a needle shorter
-                    // than the source char's lowercase expansion): advance
-                    // past the whole source char, not just the consumed
-                    // produced chars, so the next search does not restart
-                    // inside this character.
-                    let last_src = lowered[next - 1].0;
-                    let span_end = next_char_start(text, last_src);
-                    cursor = produced_index_after(&lowered, span_end);
-                    (abs as i32, (span_end - abs) as i32)
-                } else {
-                    // Word not found: hold the last known position.
-                    (last_known, -1)
-                }
-            };
+            let (byte_offset, byte_len) = search.find_next(&b.text);
             entries.push(TimelineEntry {
                 playback_start: start_s / speed,
                 playback_end: end_s / speed,
@@ -272,41 +201,6 @@ impl PlaybackTimeline {
         } else {
             self.entries.get(idx - 1)
         }
-    }
-}
-
-/// Combining diacritical marks (the common U+0300..=U+036F block),
-/// ignored during case-insensitive matching so that accents added by
-/// case folding (Turkish İ) and NFD text do not break word matching.
-fn is_combining_mark(c: char) -> bool {
-    matches!(c, '\u{0300}'..='\u{036F}')
-}
-
-/// Byte offset in `text` for a produced-index cursor into `lowered`.
-fn cursor_byte(text: &str, lowered: &[(usize, char)], cursor: usize) -> usize {
-    match lowered.get(cursor) {
-        Some(&(b, _)) => b,
-        None => text.len(),
-    }
-}
-
-/// Produced-index of the first lowered char whose source byte offset is
-/// at or after `byte` (the scan position after a match ending at `byte`).
-fn produced_index_after(lowered: &[(usize, char)], byte: usize) -> usize {
-    lowered.partition_point(|(b, _)| *b < byte)
-}
-
-/// Byte offset of the next char boundary at or after `from` (the char
-/// starting at `from`, or the end of the text).
-fn next_char_start(text: &str, from: usize) -> usize {
-    if from >= text.len() {
-        text.len()
-    } else {
-        let mut i = from + 1;
-        while i < text.len() && !text.is_char_boundary(i) {
-            i += 1;
-        }
-        i
     }
 }
 
