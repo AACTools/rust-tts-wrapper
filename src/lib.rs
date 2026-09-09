@@ -47,6 +47,7 @@ pub mod sherpaonnx_engine;
 mod system_engine;
 pub mod timeline;
 pub mod types;
+pub mod word_search;
 
 // Re-exports for user-friendly API
 pub use engine::TtsEngine;
@@ -69,10 +70,18 @@ type BoxedEngine = Arc<dyn TtsEngine>;
 /// Opaque context holding an engine instance and its per-instance settings.
 pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void)>;
 /// Word-boundary callback:
-/// cb(word, char_offset, char_len, start_s, end_s, estimated, userdata).
-/// char_offset/char_len are -1 when unknown. `estimated` is 1 when the
-/// timings are proportional estimates (unpatched voice, wpm model), 0
-/// when measured (floravox duration tensor, cloud provider timings).
+/// cb(word, byte_offset, byte_len, start_s, end_s, estimated, userdata).
+/// byte_offset is a UTF-8 byte index into the spoken text, byte_len a
+/// byte length — pair them to slice the text safely. An unlocatable
+/// word holds the last known offset (0 if nothing matched) with
+/// byte_len -1. `estimated` is 1 when the timings are proportional
+/// estimates (unpatched voice, wpm model), 0 when measured (floravox
+/// duration tensor, cloud provider timings). Exceptions: the Windows
+/// SAPI native-boundary path reports UTF-16 code-unit offsets/lengths
+/// (the units ISpVoice events provide), and the Azure/Edge WebSocket
+/// path passes Azure's own text.Offset/text.Length through unchanged
+/// when Azure supplies them (units per Azure's documentation; the
+/// wrapper's fallback arithmetic when they are absent is UTF-8 bytes).
 pub type CBoundaryCb =
     Option<extern "C" fn(*const c_char, i32, i32, f32, f32, i32, *mut std::ffi::c_void)>;
 /// Mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
@@ -847,10 +856,10 @@ pub extern "C" fn tts_set_on_audio(
 }
 
 /// Set the word-boundary callback:
-/// cb(word, char_offset, char_len, start_s, end_s, estimated, userdata).
-/// char_offset/char_len are -1 when unknown. `estimated` is 1 when the
-/// timings are proportional estimates (unpatched voice, wpm model), 0
-/// when measured (floravox duration tensor, cloud provider timings).
+/// cb(word, byte_offset, byte_len, start_s, end_s, estimated, userdata).
+/// byte_offset/byte_len are UTF-8 bytes into the spoken text; an
+/// unlocatable word holds the last known offset with byte_len -1 (see
+/// CBoundaryCb for the full contract and the SAPI UTF-16 exception).
 ///
 /// # Safety
 /// `ctx` must be valid.

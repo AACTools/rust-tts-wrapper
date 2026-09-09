@@ -183,7 +183,7 @@ All functions are `extern "C"`, `#[no_mangle]`:
 | `tts_set_pitch(ctx, pitch)` | Set pitch (1.0 = normal) |
 | `tts_set_volume(ctx, volume)` | Set volume (1.0 = normal) |
 | `tts_set_on_audio(ctx, cb, userdata)` | Set streaming audio callback |
-| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback: cb(word, char_offset, char_len, start_s, end_s, estimated, userdata) |
+| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback: cb(word, byte_offset, byte_len, start_s, end_s, estimated, userdata). Offsets/lengths are bytes into the spoken text; an unlocatable word holds the last known offset with length -1 |
 | `tts_set_on_viseme(ctx, cb, userdata)` | Set viseme callback for lip-sync |
 | `tts_set_on_start(ctx, cb, userdata)` | Set speech-started callback |
 | `tts_set_on_end(ctx, cb, userdata)` | Set speech-completed callback |
@@ -289,7 +289,7 @@ from tts_wrapper import TTSClient
 
 client = TTSClient("openai", {"apiKey": "your-key"})
 client.on_audio(lambda chunk: print(f"{len(chunk)} bytes"))
-# word, char_offset, char_len, start_s, end_s, estimated
+# word, byte_offset, byte_len, start_s, end_s, estimated
 client.on_boundary(lambda w, off, ln, s, e, est: print(f"{w}: {s:.3f}-{e:.3f}{'~' if est else ''}"))
 client.set_voice("alloy")
 client.speak_sync("Hello world")

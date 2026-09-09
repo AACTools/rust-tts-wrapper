@@ -365,8 +365,8 @@ impl FloravoxEngine {
                     &w.text,
                     s,
                     e,
-                    w.char_offset as i32,
-                    w.char_len as i32,
+                    w.byte_offset as i32,
+                    w.byte_len as i32,
                     w.estimated,
                 );
             }

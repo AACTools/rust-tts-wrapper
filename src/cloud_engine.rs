@@ -1826,25 +1826,6 @@ fn azure_ws_parse_viseme(item: &serde_json::Value) -> Option<(i32, f32)> {
     Some((viseme_id, offset_sec))
 }
 
-/// Search for `word` in `text` starting from `search_from`, returning the
-/// character offset and length relative to the source text. Advances
-/// `search_from` past the match so subsequent calls find the next occurrence.
-/// Used by the Azure WS boundary handler to compute plain-text-relative
-/// offsets when Azure's metadata doesn't provide them (or provides SSML-
-/// relative offsets that are wrong for the caller).
-#[cfg(feature = "cloud")]
-fn ws_boundary_search_text(text: &str, word: &str, search_from: &mut usize) -> (i32, i32) {
-    #[allow(clippy::cast_possible_truncation)]
-    let char_offset = text[*search_from..]
-        .find(word)
-        .map_or(-1, |pos| (*search_from + pos) as i32);
-    if char_offset >= 0 {
-        *search_from = char_offset as usize + word.len();
-    }
-    let char_len = word.chars().count() as i32;
-    (char_offset, char_len)
-}
-
 impl TtsEngine for CloudEngine {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn speak(
@@ -2194,10 +2175,17 @@ impl TtsEngine for CloudEngine {
                                                         let final_len = if char_len >= 0 {
                                                             char_len
                                                         } else {
-                                                            word.chars().count() as i32
+                                                            // Bytes, matching
+                                                            // ws_cumulative_offset's byte
+                                                            // arithmetic above.
+                                                            word.len() as i32
                                                         };
                                                         // Advance the running offset past
                                                         // this word + the space that follows.
+                                                        // TODO: assumes single-space
+                                                        // separation; punctuation and
+                                                        // double spaces make the
+                                                        // cumulative estimate drift.
                                                         ws_cumulative_offset += word.len() + 1;
                                                         #[allow(clippy::cast_precision_loss)]
                                                         cb(
@@ -2482,18 +2470,13 @@ impl TtsEngine for CloudEngine {
 
             if let Some(cb) = on_boundary.as_mut() {
                 if let Some(alignment) = json.get("alignment").and_then(|v| v.as_object()) {
-                    let mut search_from = 0usize;
+                    // Word positions via the shared matcher: exact →
+                    // case/accent-insensitive → hold-last (offsets are
+                    // byte-based; a held miss reports length -1).
+                    let mut search = crate::word_search::WordSearch::new(boundary_search_text);
                     for (word, start, end) in parse_elevenlabs_alignment(alignment) {
-                        #[allow(clippy::cast_possible_truncation)]
-                        let char_offset = boundary_search_text[search_from..]
-                            .find(&word)
-                            .map_or(-1, |pos| (search_from + pos) as i32);
-
-                        if char_offset >= 0 {
-                            search_from = char_offset as usize + word.len();
-                        }
-                        let char_len = word.chars().count() as i32;
-                        cb(&word, start, end, char_offset, char_len, false);
+                        let (offset, len) = search.find_next(&word);
+                        cb(&word, start, end, offset.max(0), len, false);
                     }
                 }
             }
@@ -2530,36 +2513,32 @@ impl TtsEngine for CloudEngine {
                 );
                 if let Some(tps) = json.get("timepoints").and_then(|v| v.as_array()) {
                     let boundaries = parse_google_timepoints(tps, &words);
+                    // Google's timepoints carry no text positions: recover
+                    // them with the shared matcher (byte-true, hold-last).
+                    let mut search = crate::word_search::WordSearch::new(&text);
                     for b in &boundaries {
+                        let (char_offset, char_len) = search.find_next(&b.text);
                         #[allow(clippy::cast_precision_loss)]
                         cb(
                             &b.text,
                             b.offset as f32 / 1000.0,
                             (b.offset + b.duration) as f32 / 1000.0,
-                            -1,
-                            -1,
+                            char_offset.max(0),
+                            char_len,
                             false,
                         );
                     }
                 } else {
                     let estimated = estimate_word_boundaries(&text);
-                    let mut search_from = 0usize;
+                    let mut search = crate::word_search::WordSearch::new(&text);
                     for b in &estimated {
-                        #[allow(clippy::cast_possible_truncation)]
-                        let char_offset = text[search_from..]
-                            .find(&b.text)
-                            .map_or(-1, |pos| (search_from + pos) as i32);
-
-                        if char_offset >= 0 {
-                            search_from = char_offset as usize + b.text.len();
-                        }
-                        let char_len = b.text.chars().count() as i32;
+                        let (char_offset, char_len) = search.find_next(&b.text);
                         #[allow(clippy::cast_precision_loss)]
                         cb(
                             &b.text,
                             b.offset as f32 / 1000.0,
                             (b.offset + b.duration) as f32 / 1000.0,
-                            char_offset,
+                            char_offset.max(0),
                             char_len,
                             false,
                         );
