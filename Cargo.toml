@@ -1,0 +1,149 @@
+[package]
+name = "rust-tts-wrapper"
+version = "0.5.0"
+edition = "2021"
+license = "MIT"
+description = "Cross-platform TTS wrapper with C API — mirrors js-tts-wrapper / SwiftTTSWrapper"
+repository = "https://github.com/AACTools/rust-tts-wrapper"
+keywords = ["tts", "text-to-speech", "speech", "accessibility", "assistive-technology"]
+categories = ["accessibility", "api-bindings", "multimedia::audio"]
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+
+[[example]]
+name = "quick-start"
+path = "examples/quick-start.rs"
+
+[[example]]
+name = "floravox-demo"
+required-features = ["floravox"]
+
+[[example]]
+name = "floravox-stream-demo"
+required-features = ["floravox"]
+
+[[example]]
+name = "engine-bench"
+required-features = ["floravox"]
+
+[[example]]
+name = "word-boundary-demo"
+path = "examples/word-boundary-demo.rs"
+
+[[example]]
+name = "streaming-audio-demo"
+path = "examples/streaming-audio-demo.rs"
+
+[[example]]
+name = "advanced-features-demo"
+path = "examples/advanced-features-demo.rs"
+
+[[example]]
+name = "simple-test"
+path = "examples/simple-test.rs"
+
+[features]
+default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
+system = ["speech-dispatcher"]
+cloud = ["reqwest", "dep:serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "symphonia", "sha2"]
+sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
+tungstenite = ["dep:tungstenite"]
+uuid = ["dep:uuid"]
+url = ["dep:url"]
+# SpeechMarkdown → SSML preprocessing. Auto-enabled by every engine that
+# can consume SSML (cloud, sapi, avsynth). Turn it off explicitly with
+# `--no-default-features --features ...` if you want a smaller binary.
+speechmarkdown = ["dep:speechmarkdown-rust"]
+avsynth = ["speechmarkdown"]
+sapi = ["windows", "speechmarkdown"]
+# Human-readable locale display names (e.g. "Afrikaans (South Africa)" from
+# "af-ZA") via ICU4X. Used by all voice mappers so consumers get consistent
+# names regardless of engine.
+display_names = ["dep:icu_displaynames", "dep:icu_locid"]
+# floravox offline engine (piper-family voices, SSML, measured boundaries).
+# `floravox-g2p/onnx` pulls the ByT5 OOV engine (shares the ort runtime
+# already linked by floravox-core).
+floravox = [
+  "dep:floravox-core",
+  "dep:floravox-ssml",
+  "dep:floravox-g2p",
+  "floravox-g2p/onnx",
+  "dep:serde_json",
+  "floravox-g2p/misaki",
+  "floravox-g2p/uroman",
+]
+# floravox with runtime-loaded onnxruntime (libonnxruntime.so/.dll from the
+# official ONNX Runtime release) instead of ort's static artifact — for
+# targets without ort prebuilts (32-bit/x86 Android) and integrators who
+# must control the onnxruntime build (Windows <10 1903; floravox#1).
+floravox-dynamic = ["floravox", "floravox-core/onnx-dynamic"]
+# Voice-model-registry routing: lang code -> published lexicon bundle
+# (gruut-derived MIT lexicons + trained Phonetisaurus models).
+floravox-lexicons = ["floravox", "dep:voicegarden-lexicons"]
+
+[dependencies]
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
+# Exact pin: the i686-windows publish job links a prebuilt static lib
+# downloaded from the k2-fsa release of THIS version (see publish.yml
+# "Download sherpa-onnx x86 prebuilt"). A minor drift (crate 1.13.4 with
+# sys 1.13.5 doesn't even compile, and a newer crate references C-API
+# symbols an older prebuilt lib lacks → LNK2019). Bump both together.
+sherpa-onnx = { version = "=1.13.5", optional = true }
+# The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
+sherpa-onnx-models = { version = "0.3", optional = true }
+# Pin sys to match the main crate (cargo update can drift them apart).
+sherpa-onnx-sys = { version = "=1.13.5", optional = true }
+base64 = { version = "0.22", optional = true }
+speechmarkdown-rust = { version = "0.4.16", optional = true }
+anyhow = "1"
+tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"], optional = true }
+uuid = { version = "1.23.2", features = ["v4"], optional = true }
+url = { version = "2.5.8", optional = true }
+# MP3 → PCM16 decode so cloud engines deliver uniform PCM like the local ones.
+# Pure-Rust symphonia (mp3 codec only) — avoids the C/minimp3 SIMD portability
+# issue that breaks cross-builds to aarch64-pc-windows-msvc.
+symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3"] }
+# SHA-256 for the Edge (Read Aloud) Sec-MS-GEC auth token.
+sha2 = { version = "0.10", optional = true }
+# Locale display names via ICU4X (compiled_data bundles the name table).
+icu_displaynames = { version = "0.11", optional = true, features = ["compiled_data"] }
+icu_locid = { version = "1.0.0-beta1", optional = true }
+# floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha,
+# Kokoro) with measured word timings (vs sherpa-onnx's estimated ones).
+floravox-core = { version = "0.8.5", optional = true }
+floravox-ssml = { version = "0.8.5", optional = true }
+floravox-g2p = { version = "0.8.5", optional = true, default-features = false }
+# Published lexicon bundles (gruut-derived, MIT) + per-language
+# Phonetisaurus models, fetched and cached by lang code.
+voicegarden-lexicons = { version = "0.3.0", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# speech-dispatcher is the Linux system TTS daemon; the crate's bindgen step
+# requires libclang and the daemon isn't available on Windows/macOS, so it is
+# gated to Linux.
+speech-dispatcher = { version = "0.16", optional = true }
+
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1"
+
+[build-dependencies]
+cbindgen = "0.28"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
+cargo = "warn"

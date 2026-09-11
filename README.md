@@ -1,0 +1,388 @@
+# rust-tts-wrapper
+
+Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
+
+## Engines (23 total)
+
+| Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
+|--------|------|-------------|-----------|------------|-----------------|-----------------|
+| System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
+| Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
+| floravox | Local (piper/MMS VITS, Matcha, Kokoro) | None (optional G2P: `lang`, `misaki`, …) | Event chunks | Scans `modelsDir` | **Measured** (duration-patched voices; audio-scaled estimates otherwise) | Generic SSML |
+| Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
+| Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
+| Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
+| OpenAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| ElevenLabs | Cloud | API Key | Streamed (JSON w/ timestamps) | API | Estimated | Platform-aware |
+| Cartesia | Cloud | API Key | Streamed | API | Estimated | Platform-aware |
+| Deepgram | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| PlayHT | Cloud | API Key + User ID | Streamed | — | Estimated | Platform-aware |
+| Fish Audio | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Hume AI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Mistral | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Murf | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Resemble AI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Unreal Speech | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| UpliftAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
+| Amazon Polly | Cloud | Key + Secret + Region | Streamed | — | Estimated | Platform-aware |
+| IBM Watson | Cloud | Key + Region + Instance | Chunked | — | Estimated | Platform-aware |
+| Wit.ai | Cloud | Token | Chunked | — | Estimated | Platform-aware |
+| xAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
+| ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
+
+- **Streaming**: Audio is delivered through the `on_audio` callback in chunks, as it becomes available. REST engines stream the response body as bytes arrive over the network (MP3 decoded to PCM16 mono incrementally on a background reader thread; raw-PCM providers pass straight through); Azure and Edge deliver real-time over WebSockets; Sherpa-ONNX delivers each sentence batch as it is synthesised (via the generate progress callback — a single-sentence utterance still completes before delivery). Exceptions: Google and ElevenLabs `with-timestamps` return one JSON document with base64 audio, so they can only deliver after the response completes (an API limitation, not buffering). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
+- **Native engine varies by platform**: the table shows `system` (Linux speech-dispatcher); macOS uses `avsynth` (AVSpeechSynthesizer) and Windows uses `sapi`. "23 total" counts one native engine + Sherpa-ONNX + floravox + the 20 cloud engines, per platform.
+
+## Formatting & Testing
+
+```bash
+# Format and lint (required before commit)
+cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
+
+# Run tests
+cargo test --all-features
+```
+
+**CI requires:** rustfmt check, clippy clean, and tests pass.
+
+## Status
+
+Active development. Engine constructors, the C ABI, and the offline test suite run in CI on Linux, macOS, and Windows. Live cloud API calls are not exercised in CI — see `tests/live_cloud.rs.template` (copy to `tests/live_cloud.rs`, gitignored) and `.env.example` for running them locally with your own credentials. Live SherpaOnnx synthesis IS exercised in CI by the `sherpaonnx-live.yml` workflow (downloads small VITS/Matcha/Kokoro models and runs `tests/sherpaonnx_live.rs`), triggered on PRs touching `src/sherpaonnx_engine.rs` and available as a manual `workflow_dispatch`.
+- **Voice List**: Engines with "API" can enumerate voices from the provider's API.
+- **Word Boundaries**: Google returns real timing via v1beta1 timepoints with SSML marks. All others use word-length-adjusted estimation (150 WPM baseline, configurable).
+- **Speech Markdown**: Auto-detected and converted to platform-specific SSML via [speechmarkdown-rust](https://github.com/AACTools/speechmarkdown-rust). Azure gets Microsoft SSML, Google gets Assistant SSML, ElevenLabs gets model-matched prompt markup (see below), others get Alexa SSML.
+- **Playback timeline** (`timeline` module): turn word boundaries into a `(playback_time → byte_offset)` timeline for reader-style highlighting — `PlaybackTimeline` (built from `synth_with_boundaries` output or boundary-callback tuples; keyed in playback time so a tempo/speed factor is compensated) plus `PlaybackClock` (pause/resume/seek wall-clock). Binary-search lookups hold the last position across gaps. See `examples/timeline-demo.rs` for the full pattern.
+- **ElevenLabs markup**: ElevenLabs parses no SSML documents. The default model is `eleven_v3`, so SpeechMarkdown renders as audio tags (`[whispers]`, `[pause]`, `[long pause]`, native `"/IPA/"`); set the `modelId` credential to a pre-v3 model (`eleven_multilingual_v2`, `flash_v2_5`, `flash_v2`) to get `<break time>` prompt markup (≤3s, clamped) instead. The dialect is chosen from the model because v3 reads stray XML aloud and pre-v3 models read audio tags aloud. The `rate` parameter maps to the deterministic `voice_settings.speed` API setting (0.7–1.2).
+
+## Rust API
+
+### `TtsEngine` Trait
+
+```rust
+pub trait TtsEngine: Send + Sync + Debug {
+    // Speaking
+    fn speak(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32,
+             on_audio: Option<OnAudioCallback>, on_boundary: Option<OnBoundaryCallback>) -> TtsResult<()>;
+    fn speak_with_options(&self, text: &str, options: Option<&SpeakOptions>,
+                          on_audio: Option<OnAudioCallback>, on_boundary: Option<OnBoundaryCallback>) -> TtsResult<()>;
+    fn speak_sync(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32,
+                  on_audio: Option<OnAudioCallback>, on_boundary: Option<OnBoundaryCallback>) -> TtsResult<()>;
+
+    // Synthesis (no playback)
+    fn synth_to_bytes(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32) -> TtsResult<Vec<u8>>;
+    fn synth_to_bytes_with_options(&self, text: &str, options: Option<&SpeakOptions>) -> TtsResult<Vec<u8>>;
+    fn synth_with_boundaries(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32) -> TtsResult<(Vec<u8>, Vec<WordBoundary>)>;
+
+    // Control
+    fn stop(&self) -> TtsResult<()>;
+    fn pause(&self) -> TtsResult<()>;
+    fn resume(&self) -> TtsResult<()>;
+
+    // Introspection
+    fn get_voices(&self) -> TtsResult<Vec<Voice>>;
+    fn engine_id(&self) -> &'static str;
+    fn check_credentials(&self) -> TtsResult<bool>;
+}
+```
+
+### Callback Types
+
+```rust
+pub type OnAudioCallback<'a>    = &'a mut dyn FnMut(&[u8]);
+pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32);  // word, start_s, end_s
+pub type OnStartCallback<'a>    = &'a mut dyn FnMut();
+pub type OnEndCallback<'a>      = &'a mut dyn FnMut();
+pub type OnErrorCallback<'a>    = &'a mut dyn FnMut(&str);
+```
+
+### Core Types
+
+```rust
+pub struct Voice {
+    pub id: String,
+    pub name: String,
+    pub gender: Gender,             // Male | Female | Unknown
+    pub provider: String,
+    pub language_codes: Vec<LanguageCode>,
+}
+
+pub struct LanguageCode {
+    pub bcp47: String,              // "en-US"
+    pub iso639_3: String,           // "eng"
+    pub display: String,            // "English (United States)"
+}
+
+pub struct WordBoundary {
+    pub text: String,
+    pub offset: u64,                // milliseconds
+    pub duration: u64,              // milliseconds
+}
+
+pub struct SpeakOptions {
+    pub rate: Option<f32>,
+    pub speech_rate: Option<SpeechRate>,      // XSlow | Slow | Medium | Fast | XFast
+    pub pitch: Option<f32>,
+    pub speech_pitch: Option<SpeechPitch>,    // XLow | Low | Medium | High | XHigh
+    pub volume: Option<f32>,
+    pub voice: Option<String>,
+    pub format: Option<AudioFormat>,          // Mp3 | Wav | Ogg | Opus | Aac | Flac | Pcm
+    pub use_speech_markdown: bool,
+    pub use_word_boundary: bool,
+    pub raw_ssml: bool,
+    pub extra: HashMap<String, String>,
+}
+
+pub enum Gender { Male, Female, Unknown }
+pub enum AudioFormat { Mp3, Wav, Ogg, Opus, Aac, Flac, Pcm }
+pub enum SpeechRate { XSlow, Slow, Medium, Fast, XFast }
+pub enum SpeechPitch { XLow, Low, Medium, High, XHigh }
+```
+
+### Utility Functions
+
+```rust
+// Word boundary estimation (matches Swift WordTimingEstimator)
+pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary>;
+pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> Vec<WordBoundary>;
+
+// Speech Markdown preprocessing
+pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool);
+
+// Gender normalization
+pub fn normalize_gender(value: &str) -> Gender;
+```
+
+### Factory
+
+```rust
+pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>>;
+pub fn engine_count() -> usize;
+pub fn engine_list() -> Vec<EngineDescriptor>;
+```
+
+## C API
+
+All functions are `extern "C"`, `#[no_mangle]`:
+
+| Function | Description |
+|----------|-------------|
+| `tts_create(engine_id, credentials_json)` | Create engine, returns opaque `tts_ctx*` |
+| `tts_destroy(ctx)` | Free engine context |
+| `tts_speak(ctx, text)` | Speak (returns 0/-1) |
+| `tts_speak_ssml(ctx, ssml)` | Speak pre-built SSML, bypassing rate/pitch/volume wrapping. Engines that parse SSML get it directly; ElevenLabs gets it translated via SpeechMarkdown into its model-matched dialect (it parses no SSML) |
+| `tts_speak_sync(ctx, text)` | Speak (blocking) |
+| `tts_stop(ctx)` | Stop speech |
+| `tts_pause(ctx)` | Pause in-progress speech |
+| `tts_resume(ctx)` | Resume paused speech |
+| `tts_synth_to_bytes(ctx, text, out_bytes, out_len)` | Synth to buffer (returns 0/-1) |
+| `tts_free_bytes(bytes, len)` | Free buffer from tts_synth_to_bytes |
+| `tts_get_voices(ctx, out_voices, out_count)` | Get voice list |
+| `tts_free_voices(voices, count)` | Free voice array |
+| `tts_set_voice(ctx, voice_id)` | Set voice |
+| `tts_set_rate(ctx, rate)` | Set rate (1.0 = normal) |
+| `tts_set_pitch(ctx, pitch)` | Set pitch (1.0 = normal) |
+| `tts_set_volume(ctx, volume)` | Set volume (1.0 = normal) |
+| `tts_set_on_audio(ctx, cb, userdata)` | Set streaming audio callback |
+| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback: cb(word, byte_offset, byte_len, start_s, end_s, estimated, userdata). Offsets/lengths are bytes into the spoken text; an unlocatable word holds the last known offset with length -1 |
+| `tts_set_on_viseme(ctx, cb, userdata)` | Set viseme callback for lip-sync |
+| `tts_set_on_start(ctx, cb, userdata)` | Set speech-started callback |
+| `tts_set_on_end(ctx, cb, userdata)` | Set speech-completed callback |
+| `tts_set_on_error(ctx, cb, userdata)` | Set error callback |
+| `tts_get_engine_count()` | Count registered engines |
+| `tts_get_engines(out_engines, out_count)` | Get engine descriptors |
+| `tts_free_engines(engines, count)` | Free engine info array |
+| `tts_get_last_error(ctx)` | Get last error message |
+
+### C Example
+
+```c
+#include "tts_wrapper.h"
+#include <stdio.h>
+
+void on_audio(const uint8_t* chunk, uintptr_t size, void* userdata) {
+    printf("Audio chunk: %zu bytes\n", size);
+}
+
+void on_boundary(const char* word, int32_t offset, int32_t len,
+                 float start, float end, int32_t estimated, void* userdata) {
+    printf("Word '%s' %d+%d %.3f-%.3f %s\n", word, offset, len, start, end,
+           estimated ? "(estimated)" : "(measured)");
+}
+
+int main() {
+    tts_ctx* ctx = tts_create("openai", "{\"apiKey\":\"your-key\"}");
+    tts_set_on_audio(ctx, on_audio, NULL);
+    tts_set_on_boundary(ctx, on_boundary, NULL);
+    tts_set_voice(ctx, "alloy");
+    tts_speak_sync(ctx, "Hello world");
+    tts_destroy(ctx);
+}
+```
+
+### Rust Example
+
+```rust
+use rust_tts_wrapper::{factory, types::SpeakOptions};
+
+let engine = factory::create_engine("openai", r#"{"apiKey":"key"}"#).unwrap();
+
+// Simple speak
+engine.speak("Hello", Some("alloy"), 1.0, 1.0, 1.0, None, None).unwrap();
+
+// With callbacks
+let mut audio_cb = |chunk: &[u8]| println!("{} bytes", chunk.len());
+let mut boundary_cb = |word: &str, s: f32, e: f32| println!("{}: {:.3}-{:.3}", word, s, e);
+engine.speak_sync("Hello world", Some("alloy"), 1.0, 1.0, 1.0,
+    Some(&mut audio_cb), Some(&mut boundary_cb)).unwrap();
+
+// With SpeakOptions
+let opts = SpeakOptions { voice: Some("alloy".into()), ..Default::default() };
+engine.speak_with_options("Hello", Some(&opts), None, None).unwrap();
+
+// Synth to bytes
+let audio = engine.synth_to_bytes("Hello", Some("alloy"), 1.0, 1.0, 1.0).unwrap();
+
+// Get voices
+for v in engine.get_voices().unwrap() {
+    println!("{} ({}) - {}", v.name, v.gender, v.primary_language());
+}
+
+// Check credentials
+assert!(engine.check_credentials().unwrap());
+```
+
+## Build
+
+```bash
+cargo build --all-features
+```
+
+### Features
+
+- `system` — speech-dispatcher (Linux system TTS)
+- `avsynth` — AVSpeechSynthesizer (macOS system TTS)
+- `sapi` — SAPI (Windows system TTS)
+- `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
+- `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
+- `floravox` — [floravox](https://github.com/AACTools/floravox) offline TTS for piper/MMS VITS, Matcha (+vocoder), and Kokoro voices: native SSML (`<break>`, `<prosody rate>`, `<mark>`, `<phoneme>`), and **measured** word boundaries from the model's duration tensor (patched voices) instead of estimates. Voices are model dirs under `~/.rust-tts-wrapper/floravox/` (configurable via `modelsDir`; also `modelId`). G2P credentials: `lang` (fetches the published per-language bundle — gruut lexicon + trained Phonetisaurus — via [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons), needs the `floravox-lexicons` feature), `misaki` (`"us"`/`"gb"`, document-level English pre-pass), `chars` (`"true"` for MMS-style character voices, or an ISO 639-3 code to romanize first), plus explicit `lexicon`/`phonetisaurus`/`byt5Encoder`/`byt5Decoder` paths. Links cleanly alongside `sherpaonnx` (shared onnxruntime). See `examples/floravox-demo.rs`.
+
+### Lint & Test
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-features -- -D warnings
+cargo test --all-features
+```
+
+## Bindings
+
+Every binding wraps the flat C ABI in `include/tts_wrapper.h`; see
+**[bindings/README.md](bindings/README.md)** for the full guide (loading
+conventions, test matrix, which package to use). All five suites — Rust
+ABI conformance, a C harness compiled with `-Wall -Wextra -Werror`, Node,
+.NET and Swift — run in CI on every push (`.github/workflows/bindings.yml`).
+
+### Python (`bindings/python/tts_wrapper.py`)
+
+```python
+from tts_wrapper import TTSClient
+
+client = TTSClient("openai", {"apiKey": "your-key"})
+client.on_audio(lambda chunk: print(f"{len(chunk)} bytes"))
+# word, byte_offset, byte_len, start_s, end_s, estimated
+client.on_boundary(lambda w, off, ln, s, e, est: print(f"{w}: {s:.3f}-{e:.3f}{'~' if est else ''}"))
+client.set_voice("alloy")
+client.speak_sync("Hello world")
+client.stop()
+```
+
+### .NET (`bindings/dotnet/` — NuGet: `RustTtsWrapper.Bindings`)
+
+```csharp
+using RustTtsWrapper;
+
+using var client = new TtsClient("openai", new() { ["apiKey"] = "your-key" });
+client.SetOnBoundary((word, offset, len, start, end, estimated) =>
+    Console.WriteLine($"{word}: {start:F3}-{end:F3} {(estimated ? "estimated" : "measured")}"));
+client.SetVoice("alloy");
+client.SpeakSync("Hello world");
+```
+
+**NuGet contents per RID** (since 0.5.3): `win-x64` bundles one DLL with
+`sapi` + `cloud` + `sherpaonnx` + `floravox-lexicons` (lexicon/Phonetisaurus/
+ByT5 G2P bundles, measured boundaries, SSML marks). `win-x86` bundles
+`sapi` + `cloud` + `sherpaonnx` only — ort needs onnxruntime API 27 and
+Microsoft's last x86 onnxruntime is API 22, so floravox cannot load there;
+treat `tts_create("floravox", …)` failure as a fallback-to-sherpaonnx signal.
+
+### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
+
+```swift
+let client = try TtsClient(engineId: "openai", credentials: ["apiKey": "your-key"])
+client.setOnBoundary { word, offset, len, start, end, estimated in
+    print("\(word): \(start)-\(end) \(estimated ? "estimated" : "measured")")
+}
+client.setVoice("alloy")
+try client.speakSync("Hello world")
+```
+
+### Node (`bindings/nodejs/` — npm: `@aactools/tts-wrapper`)
+
+```js
+const { TtsClient } = require("@aactools/tts-wrapper");
+
+const client = new TtsClient({ engineId: "openai", credentials: { apiKey: "your-key" } });
+client.on("boundary", ({ word, startSec, endSec, estimated }) =>
+  console.log(`${word}: ${startSec}-${endSec} ${estimated ? "estimated" : "measured"}`));
+client.setVoice("alloy");
+client.speakSync("Hello world");
+client.close();
+```
+
+### C (`bindings/c/` — reference harness)
+
+`bindings/c/tts_abi_harness.c` exercises the whole ABI against the
+cdylib; `make -C bindings/c test` builds, compiles the header with
+`-Wall -Wextra -Werror` and runs it.
+
+## Architecture
+
+```
+               TtsEngine (trait)
+                     |
+      +--------------+--------------+
+      |              |              |
+  SystemEngine   CloudEngine   SherpaOnnxEngine
+  (speech-       (20 cloud      (1300+ local
+  dispatcher)    providers)     models)
+```
+
+Cloud engines use provider-specific `CloudConfig`:
+- **Azure**: SSML XML body with prosody tags, XML escaping
+- **Google**: JSON body with base64 audio, v1beta1 timepoint support
+- **All others**: Standard JSON bodies
+
+## Sherpa-ONNX Models
+
+1300+ models from the [sherpa-onnx-models](https://crates.io/crates/sherpa-onnx-models) registry crate (canonical: [AACTools/sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts-models); updates are dependency bumps). Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
+
+### Updating the registry
+
+The registry ships as the
+[`sherpa-onnx-models`](https://crates.io/crates/sherpa-onnx-models) crate,
+published from [`AACTools/sherpa-onnx-tts-models`](https://github.com/AACTools/sherpa-onnx-tts-models)
+(tag `crate-v*`). Refresh it like any dependency:
+
+```bash
+cargo update -p sherpa-onnx-models   # within the pinned 0.x line
+# or bump the version in Cargo.toml for a new line
+```
+
+The registry's enriched fields (`license`, `sha256`, `voice_names`,
+`min_sherpa_onnx_version`, `deprecated`, …) are currently ignored by
+`parse_model` but carried through for future opt-in — the sync is
+backwards-compatible.
+
+## License
+
+MIT

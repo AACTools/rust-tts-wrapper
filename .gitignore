@@ -1,0 +1,21 @@
+/target
+**/*.orig
+Cargo.lock
+
+# Example output artifacts (generated when running examples locally)
+/examples/output/
+
+# Local-only live cloud tests (never commit credentials)
+/tests/live_cloud.rs
+*.live.env
+/run-live-tests.sh
+.env
+.env.*
+!.env.example
+
+# Language-binding build artifacts
+node_modules/
+**/bin/
+**/obj/
+
+.voicegarden-lexicons/

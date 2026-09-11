@@ -1,0 +1,4 @@
+module CRustTtsWrapper {
+    header "tts_wrapper.h"
+    export *
+}

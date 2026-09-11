@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (Linux features)
+        run: cargo clippy --no-default-features --features system,cloud -- -D warnings
+
+      - name: Build (Linux features)
+        run: cargo build --no-default-features --features system,cloud
+
+      - name: Run tests
+        run: cargo test --no-default-features --features system,cloud
+
+      - name: Build cloud-only
+        run: cargo build --no-default-features --features cloud
+
+      - name: Upload C header
+        uses: actions/upload-artifact@v4
+        with:
+          name: tts_wrapper_header
+          path: include/tts_wrapper.h
+
+  macos-build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy (macOS features)
+        run: cargo clippy --no-default-features --features avsynth,cloud -- -D warnings
+
+      - name: Build (macOS features)
+        run: cargo build --no-default-features --features avsynth,cloud
+
+      - name: Run tests
+        run: cargo test --no-default-features --features avsynth,cloud
+
+  mobile-cross-compile:
+    # Android + iOS are release platforms now (publish.yml ships .so/.a for
+    # them) — catch breakage at PR time. ring/rustls need the NDK clang on
+    # Linux; iOS needs Apple clang (macos runner).
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            targets: "aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android"
+            android: true
+          - os: macos-latest
+            targets: "aarch64-apple-ios aarch64-apple-ios-sim"
+            android: false
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: nttld/setup-ndk@v1
+        if: matrix.android
+        with:
+          ndk-version: r27b
+          add-to-path: false
+      - name: Build all Android targets (cloud + floravox, NDK r27)
+        if: matrix.android
+        shell: bash
+        run: |
+          NDK="$ANDROID_NDK_HOME"
+          echo "NDK: $NDK"
+          test -d "$NDK" || { echo "NDK not found"; exit 1; }
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          set -e
+          for T in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do
+            case $T in
+              armv7-linux-androideabi) TRIPLE=armv7a-linux-androideabi ;;
+              *) TRIPLE=$T ;;
+            esac
+            TUP=$(echo $T | tr a-z- A-Z_)
+            # cloud (static ort where a prebuilt exists)
+            env CARGO_TARGET_${TUP}_LINKER="$TC/${TRIPLE}24-clang" \
+                CC_$T="$TC/${TRIPLE}24-clang" AR_$T="$TC/llvm-ar" \
+                cargo build --release --target $T --no-default-features --features cloud
+            # floravox: static NNAPI on arm64, dynamic onnxruntime elsewhere
+            case $T in
+              aarch64-linux-android) FV=floravox ;;
+              *) FV=floravox-dynamic ;;
+            esac
+            env CARGO_TARGET_${TUP}_LINKER="$TC/${TRIPLE}24-clang" \
+                CC_$T="$TC/${TRIPLE}24-clang" AR_$T="$TC/llvm-ar" \
+                cargo build --release --target $T --no-default-features --features "$FV,cloud"
+          done
+      - name: Build all iOS targets (cloud + floravox, staticlib)
+        if: "!matrix.android"
+        run: |
+          for T in aarch64-apple-ios aarch64-apple-ios-sim; do
+            cargo build --release --target $T --no-default-features --features cloud
+            cargo build --release --target $T --no-default-features --features floravox,cloud
+          done
+
+  windows-build:
+    runs-on: windows-latest
+    continue-on-error: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Clippy (Windows features)
+        run: cargo clippy --no-default-features --features sapi,cloud -- -D warnings
+
+      - name: Build (Windows features)
+        run: cargo build --no-default-features --features sapi,cloud
+
+      - name: Run tests
+        run: cargo test --no-default-features --features sapi,cloud

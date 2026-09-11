@@ -1,0 +1,556 @@
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: Sync version
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Update Cargo.toml version
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: version-sync
+          path: Cargo.toml
+
+  test:
+    name: Test
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: version-sync
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Clippy (Linux features)
+        run: cargo clippy --no-default-features --features system,cloud -- -D warnings
+      - name: Test (Linux features)
+        run: cargo test --no-default-features --features system,cloud
+      - name: Clippy (Linux + sherpaonnx)
+        continue-on-error: true  # sherpa-onnx 504 download issue (see TODO.md)
+        run: cargo clippy --no-default-features --features system,cloud,sherpaonnx -- -D warnings
+      - name: Build system-only
+        run: cargo build --no-default-features --features system
+      - name: Build cloud-only
+        run: cargo build --no-default-features --features cloud
+
+  test-windows:
+    # The Windows NuGet DLLs carry sherpaonnx + floravox-lexicons together
+    # (see the build matrix). Test that exact combination — it is the
+    # configuration every .NET consumer actually loads.
+    name: Test (Windows NuGet features)
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: version-sync
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test (sapi,cloud,sherpaonnx,floravox-lexicons)
+        env:
+          RTW_SKIP_EDGE_LIVE: "1"
+        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,floravox-lexicons
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: [test, test-windows]
+    # Per-matrix-entry: sherpa-onnx builds may fail due to upstream 504
+    # download issues (see TODO.md). Core builds are strict.
+    continue-on-error: ${{ matrix.allow_failure == true }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # --- Core builds (strict: failures block the release) ---
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud"
+            label: "system-cloud-x86_64-linux"
+            lib_ext: so
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-aarch64-linux"
+            lib_ext: so
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud"
+            label: "avsynth-cloud-x86_64-macos"
+            lib_ext: dylib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud"
+            label: "avsynth-cloud-aarch64-macos"
+            lib_ext: dylib
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud"
+            label: "sapi-cloud-x86_64-windows"
+            lib_ext: dll
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud"
+            label: "sapi-cloud-aarch64-windows"
+            lib_ext: dll
+
+          # --- Sherpa-onnx builds (non-blocking: 504 download may fail) ---
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud,sherpaonnx"
+            label: "system-cloud-sherpaonnx-x86_64-linux"
+            lib_ext: so
+            allow_failure: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,sherpaonnx"
+            label: "avsynth-cloud-sherpaonnx-x86_64-macos"
+            lib_ext: dylib
+            allow_failure: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,sherpaonnx"
+            label: "avsynth-cloud-sherpaonnx-aarch64-macos"
+            lib_ext: dylib
+            allow_failure: true
+          # --- Sherpa-onnx NuGet builds (Windows) ---
+          # These two feed the .NET NuGet package. x64 carries the full local
+          # stack: sherpa-onnx (legacy voices) + floravox with published
+          # lexicon/G2P bundles (piper-family voices, measured boundaries,
+          # SSML marks). x86 stays sherpa-only: ort's API level (27) exceeds
+          # the last Microsoft x86 onnxruntime (1.22 / API 22), so floravox
+          # cannot load there — consumers must fall back to sherpaonnx.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,sherpaonnx,floravox-lexicons"
+            label: "sapi-cloud-sherpaonnx-x86_64-windows"
+            lib_ext: dll
+            # Strict: the NuGet package ships this DLL, so a sherpa-onnx build
+            # failure must block the release rather than shipping without it.
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,sherpaonnx"
+            label: "sapi-cloud-sherpaonnx-i686-windows"
+            lib_ext: dll
+
+          # --- Mobile: Android (all four ABIs, cloud-only) ---
+          # rustls everywhere (no OpenSSL), so these are pure-Rust builds
+          # against the NDK clang. API 24+ (Android 7.0) floor.
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-aarch64-linux-android"
+            lib_ext: so
+            android: true
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-armv7-linux-android"
+            lib_ext: so
+            android: true
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-x86_64-linux-android"
+            lib_ext: so
+            android: true
+          - target: i686-linux-android
+            os: ubuntu-latest
+            features: "cloud"
+            label: "cloud-i686-linux-android"
+            lib_ext: so
+            android: true
+
+          # --- Mobile: iOS (staticlib; App Store forbids dylibs) ---
+          - target: aarch64-apple-ios
+            os: macos-latest
+            features: "cloud"
+            label: "cloud-aarch64-apple-ios"
+            lib_ext: a
+            ios: true
+          - target: aarch64-apple-ios-sim
+            os: macos-latest
+            features: "cloud"
+            label: "cloud-aarch64-apple-ios-sim"
+            lib_ext: a
+            ios: true
+
+          # --- floravox local engine, desktop ---
+          # Windows static builds carry the DirectML floor (Win10 1903+);
+          # i686 has no ort prebuilt, so it links onnxruntime at runtime.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud,floravox"
+            label: "floravox-system-cloud-x86_64-linux"
+            lib_ext: so
+          # Intel Macs: no ort prebuilt — onnxruntime loads at runtime.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,floravox-dynamic"
+            label: "floravox-dynamic-avsynth-cloud-x86_64-macos"
+            lib_ext: dylib
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,floravox"
+            label: "floravox-avsynth-cloud-aarch64-macos"
+            lib_ext: dylib
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox"
+            label: "floravox-sapi-cloud-x86_64-windows"
+            lib_ext: dll
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox"
+            label: "floravox-sapi-cloud-aarch64-windows"
+            lib_ext: dll
+          - target: i686-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox-dynamic"
+            label: "floravox-dynamic-sapi-cloud-i686-windows"
+            lib_ext: dll
+
+          # --- floravox local engine, mobile ---
+          # arm64 android: ort ships an NNAPI static prebuilt.
+          # 32-bit/x86 android: no prebuilts — onnxruntime loads at
+          # runtime from the Microsoft onnxruntime-android release.
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            features: "floravox,cloud"
+            label: "floravox-cloud-aarch64-linux-android"
+            lib_ext: so
+            android: true
+          - target: armv7-linux-androideabi
+            os: ubuntu-latest
+            features: "floravox-dynamic,cloud"
+            label: "floravox-dynamic-cloud-armv7-linux-android"
+            lib_ext: so
+            android: true
+          - target: x86_64-linux-android
+            os: ubuntu-latest
+            features: "floravox-dynamic,cloud"
+            label: "floravox-dynamic-cloud-x86_64-linux-android"
+            lib_ext: so
+            android: true
+          - target: i686-linux-android
+            os: ubuntu-latest
+            features: "floravox-dynamic,cloud"
+            label: "floravox-dynamic-cloud-i686-linux-android"
+            lib_ext: so
+            android: true
+          - target: aarch64-apple-ios
+            os: macos-latest
+            features: "floravox,cloud"
+            label: "floravox-cloud-aarch64-apple-ios"
+            lib_ext: a
+            ios: true
+          - target: aarch64-apple-ios-sim
+            os: macos-latest
+            features: "floravox,cloud"
+            label: "floravox-cloud-aarch64-apple-ios-sim"
+            lib_ext: a
+            ios: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: version-sync
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        if: matrix.cross == true
+        run: cargo install cross --locked
+      - name: Install native deps (Linux x86_64)
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Download sherpa-onnx x86 prebuilt (32-bit Windows only)
+        # sherpa-onnx-sys doesn't auto-detect win-x86, so download the
+        # prebuilt static libs for the pinned crate version and point the
+        # build at them via SHERPA_ONNX_LIB_DIR.
+        #
+        # KEEP IN SYNC with the exact `sherpa-onnx` pin in Cargo.toml:
+        # builds resolve fresh (Cargo.lock is gitignored and the version
+        # job rewrites Cargo.toml), so a version mismatch means either a
+        # compile error (crate/sys pair drift) or LNK2019 (crate newer
+        # than the lib, e.g. 1.13.5's SherpaOnnxGetOnnxruntimeVersionStr
+        # missing from the 1.13.4 lib).
+        if: matrix.target == 'i686-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/sherpa-onnx-v1.13.5-win-x86-static-MD-Release-lib.tar.bz2"
+          Invoke-WebRequest -Uri $url -OutFile sherpa-x86.tar.bz2
+          mkdir sherpa-x86-libs | Out-Null
+          tar -xjf sherpa-x86.tar.bz2 -C sherpa-x86-libs --strip-components=1
+          "SHERPA_ONNX_LIB_DIR=$PWD/sherpa-x86-libs/lib" >> $env:GITHUB_ENV
+          Write-Host "SHERPA_ONNX_LIB_DIR set to $PWD/sherpa-x86-libs/lib"
+          ls sherpa-x86-libs/lib/
+      - uses: nttld/setup-ndk@v1
+        if: matrix.android == true
+        with:
+          ndk-version: r27b
+          add-to-path: false
+      - name: Set up Android NDK toolchain
+        if: matrix.android == true
+        run: |
+          echo "NDK=$ANDROID_NDK_HOME" >> "$GITHUB_ENV"
+          echo "Using NDK: $ANDROID_NDK_HOME"
+          test -d "$ANDROID_NDK_HOME" || { echo "NDK not found"; exit 1; }
+      - name: Build release (Android)
+        if: matrix.android == true
+        shell: bash
+        run: |
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          TUP=$(echo ${{ matrix.target }} | tr a-z- A-Z_)
+          # rustup target should already be installed via toolchain step
+          case ${{ matrix.target }} in
+            armv7-linux-androideabi) CLANG_TRIPLE=armv7a-linux-androideabi ;;
+            *) CLANG_TRIPLE=${{ matrix.target }} ;;
+          esac
+          # NOTE: CC/AR names must go through the `env` command — target
+          # triples contain dashes, which `export` rejects as identifiers.
+          env CARGO_TARGET_${TUP}_LINKER="$TC/${CLANG_TRIPLE}24-clang" \
+              CC_${{ matrix.target }}="$TC/${CLANG_TRIPLE}24-clang" \
+              AR_${{ matrix.target }}="$TC/llvm-ar" \
+              cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+      - name: Build release (cargo)
+        if: matrix.cross != true && matrix.android != true
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+      - name: Build release (cross)
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+      - name: Rename artifacts
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          LABEL="${{ matrix.label }}"
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp rust_tts_wrapper.dll "rust_tts_wrapper-${LABEL}.dll" 2>/dev/null || true
+            cp rust_tts_wrapper.lib "rust_tts_wrapper-${LABEL}.lib" 2>/dev/null || true
+          else
+            cp librust_tts_wrapper.${{ matrix.lib_ext }} "librust_tts_wrapper-${LABEL}.${{ matrix.lib_ext }}" 2>/dev/null || true
+            cp librust_tts_wrapper.a "librust_tts_wrapper-${LABEL}.a" 2>/dev/null || true
+          fi
+      - name: Upload shared library
+        if: matrix.ios != true
+        uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.${{ matrix.lib_ext }}
+      - name: Upload static library (non-Windows)
+        if: runner.os != 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.a
+      - name: Upload import library (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-${{ matrix.label }}
+          path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.lib
+
+  xcframework:
+    name: Apple XCFramework
+    needs: build
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - name: RustTtsWrapper
+            suffix: cloud
+          - name: RustTtsWrapperFloravox
+            suffix: floravox-cloud
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: static-${{ matrix.suffix }}-aarch64-apple-ios
+          path: ios-device
+      - uses: actions/download-artifact@v4
+        with:
+          name: static-${{ matrix.suffix }}-aarch64-apple-ios-sim
+          path: ios-sim
+      - name: Create ${{ matrix.name }}.xcframework
+        run: |
+          mkdir -p headers
+          cp include/tts_wrapper.h headers/
+          # Give each slice its own directory (xcodebuild requires distinct
+          # paths and renames the lib per slice).
+          mkdir -p device sim
+          cp ios-device/librust_tts_wrapper-${{ matrix.suffix }}-aarch64-apple-ios.a device/librust_tts_wrapper.a
+          cp headers/tts_wrapper.h device/
+          cp ios-sim/librust_tts_wrapper-${{ matrix.suffix }}-aarch64-apple-ios-sim.a sim/librust_tts_wrapper.a
+          cp headers/tts_wrapper.h sim/
+          rm -rf ${{ matrix.name }}.xcframework
+          xcodebuild -create-xcframework \
+            -library device/librust_tts_wrapper.a -headers device \
+            -library sim/librust_tts_wrapper.a -headers sim \
+            -output ${{ matrix.name }}.xcframework
+          ditto -c -k --sequesterRsrc --keepParent ${{ matrix.name }}.xcframework ${{ matrix.name }}.xcframework.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcframework-${{ matrix.name }}
+          path: ${{ matrix.name }}.xcframework.zip
+
+  nuget:
+    name: Pack & Publish .NET NuGet
+    needs: build
+    runs-on: windows-latest
+    # Don't block the release if NuGet packing fails — it's additive.
+    continue-on-error: true
+    # Trusted Publishing: NuGet.org verifies the GitHub OIDC token instead
+    # of requiring an API key. The environment name must match what was
+    # configured on nuget.org's Trusted Publishing page.
+    environment: nuget
+    permissions:
+      id-token: write  # Required for OIDC token exchange
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-sapi-cloud-sherpaonnx-x86_64-windows
+          path: native-x64
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-sapi-cloud-sherpaonnx-i686-windows
+          path: native-x86
+      - name: Place native DLLs for packaging
+        shell: pwsh
+        run: |
+          $dll64 = Get-ChildItem native-x64/*.dll | Select-Object -First 1
+          $dll32 = Get-ChildItem native-x86/*.dll | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path target/release | Out-Null
+          if ($dll64) {
+            Copy-Item $dll64.FullName target/release/rust_tts_wrapper.dll
+            Write-Host "Placed $($dll64.Name) -> target/release/rust_tts_wrapper.dll (x64)"
+          } else {
+            Write-Host "WARNING: No x64 DLL found"
+          }
+          if ($dll32) {
+            Copy-Item $dll32.FullName target/release/rust_tts_wrapper.x86.dll
+            Write-Host "Placed $($dll32.Name) -> target/release/rust_tts_wrapper.x86.dll (x86)"
+          } else {
+            Write-Host "WARNING: No x86 DLL found - packing x64-only"
+          }
+      - uses: actions/setup-dotnet@v4
+        with:
+          # .NET 9 SDK is required for OIDC Trusted Publishing support
+          # in `dotnet nuget push`. The project still targets net8.0.
+          dotnet-version: '9.0.x'
+      - name: Pack
+        # Pass the version from the git tag (e.g. v0.2.3 → 0.2.3)
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart("v")
+          Write-Host "Packing version $version"
+          dotnet pack bindings/dotnet/RustTtsWrapper.Bindings.csproj -c Release -p:Version=$version
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: bindings/dotnet/bin/Release/*.nupkg
+      - name: Publish to NuGet
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        # Supports both Trusted Publishing (OIDC) and API key auth.
+        # If NUGET_API_KEY secret is set, use it. Otherwise rely on
+        # OIDC Trusted Publishing (requires nuget.org configuration).
+        run: |
+          $pkg = Get-ChildItem bindings/dotnet/bin/Release/*.nupkg | Select-Object -First 1
+          if (-not $pkg) { Write-Host "No .nupkg found"; exit 0 }
+          Write-Host "Publishing $($pkg.Name)"
+          $apiKey = '${{ secrets.NUGET_API_KEY }}'
+          if ($apiKey) {
+            Write-Host "Using API key authentication"
+            dotnet nuget push $pkg.FullName --api-key $apiKey --source https://api.nuget.org/v3/index.json --skip-duplicate
+          } else {
+            Write-Host "Using Trusted Publishing (OIDC) — no API key set"
+            dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
+          }
+
+  npm:
+    name: Publish @aactools/tts-wrapper to npm
+    needs: build
+    runs-on: ubuntu-latest
+    # No-op until the NPM_TOKEN secret is configured (publishes the
+    # koffi-based Node binding; the package itself is pure JS).
+    # NOTE: hashFiles() is NOT allowed in a job-level `if` (it broke the
+    # whole workflow file — every publish since 6b28b04 silently never ran).
+    # The bindings check happens inside the step instead.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Check token + publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: bindings/nodejs
+        run: |
+          if [ ! -f package.json ]; then
+            echo "no nodejs bindings - skipping npm publish"
+            exit 0
+          fi
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN secret not set - skipping npm publish (run 'npm publish --access public' locally or add the secret)"
+            exit 0
+          fi
+          npm install --no-fund --no-audit
+          npm test
+          npm publish --access public
+
+  release:
+    name: GitHub Release
+    needs: [build, xcframework, npm]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: "{lib-*,static-*}"
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: "xcframework-*"
+      - name: Organize release assets
+        run: |
+          mkdir -p release-assets
+          cp artifacts/* release-assets/ 2>/dev/null || true
+          cp include/tts_wrapper.h release-assets/
+          ls -la release-assets/
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: release-assets/*
+          # CHANGED: fail if no artifacts were uploaded — catches broken
+          # builds that previously shipped with zero artifacts.
+          fail_on_unmatched_files: true
