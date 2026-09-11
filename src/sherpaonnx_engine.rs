@@ -2408,12 +2408,7 @@ mod tests {
         assert!(models.len() > 1700, "registry shrank: {}", models.len());
         // engines covers every model and matches the family rule
         for m in models.values() {
-            let expected = if matches!(m.model_type.as_str(), "vits" | "mms" | "matcha" | "kokoro")
-            {
-                "floravox"
-            } else {
-                "sherpa-onnx"
-            };
+            let expected = "sherpa-onnx";
             assert_eq!(m.engines, expected, "{}", m.id);
         }
         // a known MMS entry (no explicit model_type in raw data) parses
@@ -2422,7 +2417,7 @@ mod tests {
             .values()
             .find(|m| m.id.starts_with("mms_"))
             .expect("MMS entries present");
-        assert_eq!(mms.engines, "floravox");
+        assert_eq!(mms.engines, "sherpa-onnx");
     }
 
     #[test]

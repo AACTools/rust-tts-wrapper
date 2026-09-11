@@ -14,14 +14,12 @@ pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 /// punctuation artifact), the callback receives the last known offset
 /// held (0 if nothing matched yet) with `byte_len` -1 — not a -1 offset.
 /// `estimated` is true for proportional estimates (unpatched voices,
-/// sherpa-onnx's wpm model) and false for measured timings (floravox
 /// duration tensor, cloud provider timings).
 pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32, i32, bool);
 
 /// Callback for SSML mark/bookmark events.
 /// Signature: (name, start_sec, end_sec, char_offset)
 /// char_offset is -1 when the engine doesn't report it. Engines that
-/// support native `<mark>` (floravox) fire this at the measured (or
 /// estimated) audio position; consumers map it to their bookmark event
 /// (SAPI `SPEI_TTS_BOOKMARK`, SSIP index marks).
 pub type OnMarkCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32);
@@ -78,8 +76,7 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
         // models read stray XML aloud).
         "elevenlabs" => Platform::ElevenLabs,
         "elevenlabs-v3" => Platform::ElevenLabsV3,
-        // floravox parses the generic (Alexa-baseline) SSML dialect
-        // natively; the floravox engine normalizes vendor-specific
+
         // elements (e.g. whisper's <amazon:effect>) on its side — as
         // does everything else via the default.
         _ => Platform::AmazonAlexa,

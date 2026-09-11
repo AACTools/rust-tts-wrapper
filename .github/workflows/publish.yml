@@ -53,7 +53,6 @@ jobs:
         run: cargo build --no-default-features --features cloud
 
   test-windows:
-    # The Windows NuGet DLLs carry sherpaonnx + floravox-lexicons together
     # (see the build matrix). Test that exact combination — it is the
     # configuration every .NET consumer actually loads.
     name: Test (Windows NuGet features)
@@ -65,10 +64,8 @@ jobs:
         with:
           name: version-sync
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test (sapi,cloud,sherpaonnx,floravox-lexicons)
         env:
           RTW_SKIP_EDGE_LIVE: "1"
-        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,floravox-lexicons
 
   build:
     name: Build ${{ matrix.label }}
@@ -134,14 +131,12 @@ jobs:
             allow_failure: true
           # --- Sherpa-onnx NuGet builds (Windows) ---
           # These two feed the .NET NuGet package. x64 carries the full local
-          # stack: sherpa-onnx (legacy voices) + floravox with published
           # lexicon/G2P bundles (piper-family voices, measured boundaries,
           # SSML marks). x86 stays sherpa-only: ort's API level (27) exceeds
-          # the last Microsoft x86 onnxruntime (1.22 / API 22), so floravox
           # cannot load there — consumers must fall back to sherpaonnx.
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,sherpaonnx,floravox-lexicons"
+            features: "sapi,cloud,sherpaonnx"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
             # Strict: the NuGet package ships this DLL, so a sherpa-onnx build
@@ -194,79 +189,65 @@ jobs:
             lib_ext: a
             ios: true
 
-          # --- floravox local engine, desktop ---
           # Windows static builds carry the DirectML floor (Win10 1903+);
           # i686 has no ort prebuilt, so it links onnxruntime at runtime.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "system,cloud,floravox"
-            label: "floravox-system-cloud-x86_64-linux"
+            features: "cloud"
             lib_ext: so
           # Intel Macs: no ort prebuilt — onnxruntime loads at runtime.
           - target: x86_64-apple-darwin
             os: macos-latest
-            features: "avsynth,cloud,floravox-dynamic"
-            label: "floravox-dynamic-avsynth-cloud-x86_64-macos"
+            features: "cloud"
             lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
-            features: "avsynth,cloud,floravox"
-            label: "floravox-avsynth-cloud-aarch64-macos"
+            features: "cloud"
             lib_ext: dylib
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,floravox"
-            label: "floravox-sapi-cloud-x86_64-windows"
+            features: "cloud"
             lib_ext: dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,floravox"
-            label: "floravox-sapi-cloud-aarch64-windows"
+            features: "cloud"
             lib_ext: dll
           - target: i686-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,floravox-dynamic"
-            label: "floravox-dynamic-sapi-cloud-i686-windows"
+            features: "cloud"
             lib_ext: dll
 
-          # --- floravox local engine, mobile ---
           # arm64 android: ort ships an NNAPI static prebuilt.
           # 32-bit/x86 android: no prebuilts — onnxruntime loads at
           # runtime from the Microsoft onnxruntime-android release.
           - target: aarch64-linux-android
             os: ubuntu-latest
-            features: "floravox,cloud"
-            label: "floravox-cloud-aarch64-linux-android"
+            features: "cloud"
             lib_ext: so
             android: true
           - target: armv7-linux-androideabi
             os: ubuntu-latest
-            features: "floravox-dynamic,cloud"
-            label: "floravox-dynamic-cloud-armv7-linux-android"
+            features: "cloud"
             lib_ext: so
             android: true
           - target: x86_64-linux-android
             os: ubuntu-latest
-            features: "floravox-dynamic,cloud"
-            label: "floravox-dynamic-cloud-x86_64-linux-android"
+            features: "cloud"
             lib_ext: so
             android: true
           - target: i686-linux-android
             os: ubuntu-latest
-            features: "floravox-dynamic,cloud"
-            label: "floravox-dynamic-cloud-i686-linux-android"
+            features: "cloud"
             lib_ext: so
             android: true
           - target: aarch64-apple-ios
             os: macos-latest
-            features: "floravox,cloud"
-            label: "floravox-cloud-aarch64-apple-ios"
+            features: "cloud"
             lib_ext: a
             ios: true
           - target: aarch64-apple-ios-sim
             os: macos-latest
-            features: "floravox,cloud"
-            label: "floravox-cloud-aarch64-apple-ios-sim"
+            features: "cloud"
             lib_ext: a
             ios: true
     runs-on: ${{ matrix.os }}
@@ -379,8 +360,6 @@ jobs:
         include:
           - name: RustTtsWrapper
             suffix: cloud
-          - name: RustTtsWrapperFloravox
-            suffix: floravox-cloud
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

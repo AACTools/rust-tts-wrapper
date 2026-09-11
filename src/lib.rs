@@ -37,8 +37,6 @@ pub mod boundaries;
 mod cloud_engine;
 pub mod engine;
 pub mod factory;
-#[cfg(feature = "floravox")]
-pub mod floravox_engine;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
@@ -75,7 +73,6 @@ pub type CAudioCb = Option<extern "C" fn(*const u8, usize, *mut std::ffi::c_void
 /// byte length — pair them to slice the text safely. An unlocatable
 /// word holds the last known offset (0 if nothing matched) with
 /// byte_len -1. `estimated` is 1 when the timings are proportional
-/// estimates (unpatched voice, wpm model), 0 when measured (floravox
 /// duration tensor, cloud provider timings). Exceptions: the Windows
 /// SAPI native-boundary path reports UTF-16 code-unit offsets/lengths
 /// (the units ISpVoice events provide), and the Azure/Edge WebSocket
@@ -1011,7 +1008,6 @@ pub extern "C" fn tts_set_on_boundary(
 
 /// Set the mark/bookmark callback: cb(name, char_offset, start_s, end_s, userdata).
 /// Fires for `<mark>`/`<bookmark>` SSML tags at their measured audio
-/// position on engines that report them (floravox).
 ///
 /// # Safety
 /// `ctx` must be valid.
