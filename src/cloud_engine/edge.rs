@@ -1,4 +1,3 @@
-#![allow(clippy::wildcard_imports)] // shared-import pattern for the split modules
 use super::*;
 
 /// Microsoft Edge "Read Aloud" constants. The trusted client token is the
@@ -6,14 +5,18 @@ use super::*;
 /// derived from it and the current time (see `edge_sec_ms_gec`).
 #[cfg(feature = "cloud")]
 pub(crate) const EDGE_TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+
 #[cfg(feature = "cloud")]
 pub(crate) const EDGE_VOICE_LIST_URL: &str = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
+
 #[cfg(feature = "cloud")]
 pub(crate) const EDGE_DEFAULT_VOICE: &str = "en-US-AriaNeural";
+
 /// Edge's WS endpoint 403-rejects bare handshakes — it expects the Edge
 /// browser's Read Aloud User-Agent (and the Read Aloud extension Origin).
 #[cfg(feature = "cloud")]
 pub(crate) const EDGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0";
+
 #[cfg(feature = "cloud")]
 pub(crate) const EDGE_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 
@@ -78,6 +81,7 @@ static WS_POOL: std::sync::LazyLock<std::sync::Mutex<HashMap<String, Vec<PooledC
 // the portable, const-stable from_secs.
 #[allow(clippy::duration_suboptimal_units)]
 pub(crate) const WS_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3 * 60);
+
 /// Max connections cached per URL — bounds memory for busy callers.
 #[cfg(feature = "cloud")]
 pub(crate) const WS_POOL_MAX_PER_URL: usize = 4;
@@ -108,4 +112,79 @@ pub(crate) fn ws_checkin(url: String, socket: WsStream) {
             born_at: std::time::Instant::now(),
         });
     }
+}
+
+/// Parse one `WordBoundary` metadata item from an Azure WS `audio.metadata`
+/// frame into `(word, offset_ms, duration_ms)`. Returns `None` if the item
+/// is malformed or has no usable text.
+///
+/// Azure encodes offsets in 100-nanosecond ticks; we convert to milliseconds
+/// here so the caller doesn't have to.
+#[must_use]
+pub(crate) fn azure_ws_parse_word_boundary(
+    item: &serde_json::Value,
+) -> Option<(&str, u64, u64, i32, i32)> {
+    let data = item.get("Data")?;
+    let offset_ticks = data
+        .get("Offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let duration_ticks = data
+        .get("Duration")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    // Azure has shipped three different shapes for the boundary text:
+    //   1. {"Data": {"text": {"Text": "Hello"}}}   (current)
+    //   2. {"Data": {"Text": {"Text": "Hello"}}}   (legacy capital-T)
+    //   3. {"Data": {"text": "Hello"}}             (flat string)
+    // Resolve in that order.
+    let word = data
+        .get("text")
+        .and_then(|v| v.as_object())
+        .and_then(|o| o.get("Text")?.as_str())
+        .or_else(|| {
+            data.get("Text")
+                .and_then(|v| v.as_object())
+                .and_then(|o| o.get("Text")?.as_str())
+        })
+        .or_else(|| data.get("text").and_then(|v| v.as_str()))
+        .filter(|s| !s.is_empty())?;
+
+    // Extract character offset and length from the nested text object (when
+    // present). Azure WS sends: {"text": {"Text": "word", "Offset": 4, "Length": 5}}
+    let text_obj = data.get("text").and_then(|v| v.as_object());
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let char_offset = text_obj
+        .and_then(|o| o.get("Offset"))
+        .and_then(serde_json::Value::as_i64)
+        .map_or(-1, |v| v as i32);
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let char_len = text_obj
+        .and_then(|o| o.get("Length"))
+        .and_then(serde_json::Value::as_i64)
+        .map_or(-1, |v| v as i32);
+
+    // Ticks → ms: 1 ms = 10,000 ticks.
+    let offset_ms = (offset_ticks.max(0) / 10_000) as u64;
+    let duration_ms = (duration_ticks.max(0) / 10_000) as u64;
+    Some((word, offset_ms, duration_ms, char_offset, char_len))
+}
+
+/// Parse one `Viseme` metadata item into `(viseme_id, offset_sec)`.
+#[must_use]
+pub(crate) fn azure_ws_parse_viseme(item: &serde_json::Value) -> Option<(i32, f32)> {
+    let data = item.get("Data")?;
+    let viseme_id = data
+        .get("VisemeId")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0) as i32;
+    let offset_ticks = data
+        .get("Offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    // Ticks → seconds: 1 s = 10,000,000 ticks.
+    #[allow(clippy::cast_precision_loss)]
+    let offset_sec = (offset_ticks as f64 / 10_000_000.0) as f32;
+    Some((viseme_id, offset_sec))
 }

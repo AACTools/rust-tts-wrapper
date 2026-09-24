@@ -1,4 +1,3 @@
-#![allow(clippy::wildcard_imports)] // shared-import pattern for the split modules
 use super::*;
 
 /// Configuration for a single cloud TTS provider.
@@ -281,7 +280,7 @@ pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<
                     // string "apikey" (lowercase, one word) as the username.
                     // Using "apiKey" (camelCase) here returns HTTP 401 from
                     // every Watson endpoint.
-                    crate::cloud_engine::base64_encode(&format!("apikey:{}", creds.get("apiKey").cloned().unwrap_or_default()))
+                    base64_encode(&format!("apikey:{}", creds.get("apiKey").cloned().unwrap_or_default()))
                 ),
                 voice_param: "voice".into(),
                 text_field: "text".into(),
@@ -337,4 +336,15 @@ pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<
         }),
         _ => None,
     }
+}
+
+/// The model that will actually be sent: an `extra_body["model_id"]`
+/// override wins over `model_default` (the JSON-body insert order gives
+/// extra_body the last write).
+pub(crate) fn effective_model(config: &CloudConfig) -> Option<&str> {
+    config
+        .extra_body
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .or(config.model_default.as_deref())
 }
