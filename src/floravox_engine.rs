@@ -221,10 +221,12 @@ impl FloravoxEngine {
     /// in voice discovery — the wasm seam, see the module docs.
     fn resolve_model(&self, voice: Option<&str>) -> TtsResult<PathBuf> {
         let requested = {
+            // A poisoned guard still holds valid data — recover it rather
+            // than failing every subsequent call forever.
             let guard = self
                 .model_id
                 .lock()
-                .map_err(|_| TtsError("model_id lock poisoned".into()))?;
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             voice.map_or_else(|| guard.clone(), str::to_string)
         };
         if requested.is_empty() {
@@ -267,10 +269,12 @@ impl FloravoxEngine {
             self.chars_romanize,
             self.speaker
         );
+        // Poisoned-mutex recovery: the map is structurally valid even
+        // after a panic in a previous build, so locking resumes.
         let mut guard = self
             .synth
             .lock()
-            .map_err(|_| TtsError("synth lock poisoned".into()))?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Note: the lock is held across `load_voice` (a multi-second ONNX
         // load), so concurrent first-synthesis of the same voice
         // serializes; later calls hit the cache without contention.
@@ -278,7 +282,11 @@ impl FloravoxEngine {
             return Ok(Arc::clone(s));
         }
         if guard.len() >= SYNTH_CACHE_CAP {
-            guard.clear();
+            // Evict one arbitrary entry (HashMap order): a user cycling
+            // >CAP voices pays reloads, but never a wholesale wipe.
+            if let Some(k) = guard.keys().next().cloned() {
+                guard.remove(&k);
+            }
         }
         let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
@@ -322,9 +330,12 @@ impl FloravoxEngine {
     /// Shared pump: streams audio + events from a synthesis, feeding the
     /// callbacks. Returns collected `(pcm bytes, boundaries)`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn pump(
         &self,
         stream: floravox_core::synth::StreamingSynthesis,
+        generation: u64,
+        boundary_text: &str,
         volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback<'_>>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
@@ -338,10 +349,32 @@ impl FloravoxEngine {
         } = stream;
         let mut bytes = Vec::new();
         let mut boundaries = Vec::new();
-        let my_generation = self.stop_generation.load(Ordering::SeqCst);
+        // floravox's spans index the text WE sent (SpeechMarkdown-expanded,
+        // rate-wrapped); the contract says offsets index the CALLER'S
+        // string. Remap every word through the shared matcher (exact ->
+        // case/accent -> hold-last), exactly like the cloud engines.
+        let mut search = crate::word_search::WordSearch::new(boundary_text);
 
         let mut handle_event = |ev: SynthesisEvent| {
             let out = map_event(ev);
+
+            // Marks first: they have no word in the transcript, so both
+            // callbacks hold the last known offset with byte_len -1 (the
+            // crate contract forbids a -1 *offset*).
+            if let Some((name, s, e, _floravox_offset)) = &out.mark {
+                let (char_offset, char_len) = search.find_next("");
+                if let Some(cb) = on_mark.as_mut() {
+                    cb(name, *s, *e, char_offset);
+                }
+                if let Some(cb) = on_boundary.as_mut() {
+                    cb(name, *s, *e, char_offset, char_len, false);
+                }
+                if let Some(b) = &out.boundary {
+                    boundaries.push(b.clone());
+                }
+                return;
+            }
+
             if let Some(b) = &out.boundary {
                 if let Some(cb) = on_boundary.as_mut() {
                     #[allow(clippy::cast_precision_loss)]
@@ -349,22 +382,18 @@ impl FloravoxEngine {
                         b.offset as f32 / 1000.0,
                         (b.offset + b.duration) as f32 / 1000.0,
                     );
-                    // byte span travels beside the boundary (WordBoundary
-                    // itself carries only ms timing); -1/-1 = unlocatable.
-                    let (bo, bl) = out.byte.unwrap_or((-1, -1));
-                    cb(&b.text, s, e, bo, bl, b.estimated);
+                    // floravox's spans index the engine-facing string
+                    // (SMD-expanded, rate-wrapped); remap onto the
+                    // caller's string per the crate contract.
+                    let (char_offset, char_len) = search.find_next(&b.text);
+                    cb(&b.text, s, e, char_offset, char_len, b.estimated);
                 }
                 boundaries.push(b.clone());
-            }
-            if let Some((name, s, e, char_offset)) = &out.mark {
-                if let Some(cb) = on_mark.as_mut() {
-                    cb(name, *s, *e, *char_offset);
-                }
             }
         };
 
         loop {
-            if self.stop_generation.load(Ordering::SeqCst) != my_generation {
+            if self.stop_generation.load(Ordering::SeqCst) != generation {
                 // A newer stop() (or a newer utterance's stop of all
                 // in-flight speech) supersedes this pump. Dropping the
                 // receivers cancels the synthesis worker (floravox-core
@@ -390,10 +419,8 @@ impl FloravoxEngine {
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    // Audio done; drain the remaining events, then surface
-                    // the worker outcome — an inference failure must not
-                    // masquerade as success with empty audio (floravox
-                    // issue #9 semantics).
+                    // Audio done; drain the remaining events, then check
+                    // the worker outcome below.
                     for ev in events {
                         handle_event(ev);
                     }
@@ -466,8 +493,10 @@ fn wrap_rate(text: &str, rate: f32) -> String {
     let is_ssml = text.trim_start().to_ascii_lowercase().starts_with("<speak");
     if is_ssml {
         // Insert an outer prosody around the inner content.
-        match text.find('>') {
-            Some(end_open) if text[..end_open].contains("<speak") => {
+        let speak_open = text.to_ascii_lowercase().find("<speak");
+        match speak_open.and_then(|start| text[start..].find('>')) {
+            Some(rel_end) => {
+                let end_open = speak_open.expect("matched above") + rel_end;
                 let inner = &text[end_open + 1..];
                 let close = inner.rfind("</speak>").unwrap_or(inner.len());
                 format!(
@@ -551,6 +580,7 @@ fn find_onnx(cand: &Path) -> Option<PathBuf> {
 }
 
 /// One discovered voice on disk.
+#[derive(Debug)]
 struct DiscoveredVoice {
     id: String,
     name: String,
@@ -678,11 +708,11 @@ fn bcp47_from(espeak_voice: &str, dataset: &str) -> (String, &'static str) {
 /// shapes. Pure — unit-testable without a voice or channels.
 struct MappedEvent {
     /// Wrapper boundary (ms offsets; `estimated` passed through
-    /// untouched — never re-estimated here).
+    /// untouched — never re-estimated here). Byte spans are remapped
+    /// onto the caller's text by the pump's WordSearch, because
+    /// floravox's own spans index the engine-facing (expanded/wrapped)
+    /// string, not what the caller submitted.
     boundary: Option<WordBoundary>,
-    /// `(byte_offset, byte_len)` for the boundary callback (the wrapper
-    /// boundary type carries only ms timing).
-    byte: Option<(i32, i32)>,
     /// `(name, start_s, end_s, char_offset)` for the mark callback.
     mark: Option<(String, f32, f32, i32)>,
 }
@@ -708,7 +738,6 @@ fn map_event(ev: SynthesisEvent) -> MappedEvent {
                 duration: w.ms_end.saturating_sub(w.ms_start),
                 estimated: w.estimated,
             }),
-            byte: Some((i32n(w.byte_offset as i64), i32n(w.byte_len as i64))),
             mark: None,
         },
         SynthesisEvent::MarkReached {
@@ -723,12 +752,10 @@ fn map_event(ev: SynthesisEvent) -> MappedEvent {
                 duration: 0,
                 estimated: false,
             }),
-            byte: None,
             mark: Some((name, sec(ms), sec(ms), i32n(char_offset))),
         },
         _ => MappedEvent {
             boundary: None,
-            byte: None,
             mark: None,
         },
     }
@@ -747,13 +774,25 @@ impl TtsEngine for FloravoxEngine {
         on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
         on_mark: Option<crate::engine::OnMarkCallback<'_>>,
     ) -> TtsResult<()> {
+        // Capture before any setup: a stop() landing during a multi-second
+        // ONNX load must still cancel the utterance it was pressed for.
+        let generation = self.stop_generation.load(Ordering::SeqCst);
         let input = prepare_input(text, rate);
         let synth = self.synthesizer(voice)?;
         let stream = synth
             .synthesize_stream(&input)
             .map_err(|e| TtsError(format!("floravox synthesis: {e:#}")))?;
-        self.pump(stream, volume, on_audio, on_boundary, on_mark, false)
-            .map(|_| ())
+        self.pump(
+            stream,
+            generation,
+            text,
+            volume,
+            on_audio,
+            on_boundary,
+            on_mark,
+            false,
+        )
+        .map(|_| ())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -828,8 +867,9 @@ impl TtsEngine for FloravoxEngine {
         "floravox"
     }
 
-    /// floravox reports *measured* word timings from the model's duration
-    /// tensor (patched voices) — never the default length-based estimates.
+    /// floravox word timings by tier: measured (duration-patched voices),
+    /// student sidecar, or proportional estimates — the `estimated` flag
+    /// on each boundary reports which tier produced it.
     fn synth_with_boundaries(
         &self,
         text: &str,
@@ -838,12 +878,13 @@ impl TtsEngine for FloravoxEngine {
         _pitch: f32,
         volume: f32,
     ) -> TtsResult<(Vec<u8>, Vec<WordBoundary>)> {
+        let generation = self.stop_generation.load(Ordering::SeqCst);
         let input = prepare_input(text, rate);
         let synth = self.synthesizer(voice)?;
         let stream = synth
             .synthesize_stream(&input)
             .map_err(|e| TtsError(format!("floravox synthesis: {e:#}")))?;
-        self.pump(stream, volume, None, None, None, true)
+        self.pump(stream, generation, text, volume, None, None, None, true)
     }
 }
 
@@ -932,7 +973,6 @@ mod tests {
         assert_eq!(b.text, "hello");
         assert_eq!((b.offset, b.duration), (200, 200));
         assert!(!b.estimated, "measured flag preserved");
-        assert_eq!(out.byte, Some((6, 5)));
         assert!(out.mark.is_none());
     }
 
@@ -982,7 +1022,6 @@ mod tests {
         );
         assert!(!b.estimated, "sample-accurate mark is measured");
         assert_eq!(out.mark, Some(("chapter".into(), 2.0, 2.0, -1)));
-        assert_eq!(out.byte, None);
     }
 
     #[test]
@@ -996,7 +1035,7 @@ mod tests {
             SynthesisEvent::BreakStarted { ms: 100, sample: 1 },
         ] {
             let out = map_event(ev);
-            assert!(out.boundary.is_none() && out.byte.is_none() && out.mark.is_none());
+            assert!(out.boundary.is_none() && out.mark.is_none());
         }
     }
 
@@ -1005,6 +1044,72 @@ mod tests {
         let engine = FloravoxEngine::new(r#"{"modelId": "x"}"#);
         assert_eq!(engine.engine_id(), "floravox");
         assert!(format!("{engine:?}").contains("FloravoxEngine"));
+    }
+
+    #[test]
+    fn find_onnx_direct_file_dir_and_vocoder_exclusion() {
+        let dir = tempfile::tempdir().unwrap();
+        // Direct .onnx file passes through.
+        let f = dir.path().join("v.onnx");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(find_onnx(&f).as_deref(), Some(f.as_path()));
+        // Directory with a single acoustic onnx resolves; vocoder names
+        // are excluded (matcha pairs acoustic + vocoder).
+        let sub = dir.path().join("voice");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("hifigan_v2.onnx"), b"x").unwrap();
+        std::fs::write(sub.join("model.onnx"), b"x").unwrap();
+        assert_eq!(
+            find_onnx(&sub).as_deref(),
+            Some(sub.join("model.onnx").as_path())
+        );
+        // Two acoustic candidates -> ambiguous -> None.
+        std::fs::write(sub.join("other.onnx"), b"x").unwrap();
+        assert_eq!(find_onnx(&sub), None);
+    }
+
+    #[test]
+    fn scan_voices_subdirs_with_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let v1 = base.join("en_US-lessac");
+        std::fs::create_dir(&v1).unwrap();
+        std::fs::write(v1.join("en_US-lessac.onnx"), b"x").unwrap();
+        std::fs::write(
+            v1.join("en_US-lessac.onnx.json"),
+            r#"{"espeak": {"voice": "en-us"}, "audio": {"sample_rate": 22050}}"#,
+        )
+        .unwrap();
+        // Corrupt config: still listed, via the raw-id fallback.
+        let v2 = base.join("broken");
+        std::fs::create_dir(&v2).unwrap();
+        std::fs::write(v2.join("broken.onnx"), b"x").unwrap();
+        std::fs::write(v2.join("broken.onnx.json"), b"{ not json").unwrap();
+
+        let voices = scan_voices(base);
+        assert_eq!(voices.len(), 2, "both voices listed: {voices:?}");
+        let lessac = voices.iter().find(|v| v.id == "en_US-lessac").unwrap();
+        assert_eq!(lessac.bcp47, "en-US");
+        assert_eq!(lessac.iso639_3, "eng");
+        let broken = voices.iter().find(|v| v.id == "broken").unwrap();
+        assert!(
+            broken.bcp47.is_empty(),
+            "metadata fallback keeps it listable"
+        );
+    }
+
+    #[test]
+    fn scan_voices_flat_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(base.join("gu_huwaida.onnx"), b"x").unwrap();
+        std::fs::write(base.join("gu_huwaida.onnx.json"), b"{}").unwrap();
+        // A vocoder beside it is never mistaken for the acoustic model.
+        std::fs::write(base.join("vocos_24khz.onnx"), b"x").unwrap();
+
+        let voices = scan_voices(base);
+        assert_eq!(voices.len(), 1, "flat layout: {voices:?}");
+        assert_eq!(voices[0].id, base.file_name().unwrap().to_string_lossy());
     }
 
     #[test]
