@@ -1,6 +1,6 @@
 [package]
 name = "rust-tts-wrapper"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 license = "MIT"
 description = "Cross-platform TTS wrapper with C API — mirrors js-tts-wrapper / SwiftTTSWrapper"
