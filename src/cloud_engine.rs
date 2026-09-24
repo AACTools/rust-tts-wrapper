@@ -1533,16 +1533,30 @@ fn build_gemini_request(
     })
 }
 
+/// Outcome of scanning an Interactions API response for audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GeminiAudioBlock {
+    /// The last audio block, decoded from base64.
+    Present(Vec<u8>),
+    /// No audio block in the response (text-only reply, refusal).
+    Absent,
+    /// An audio block existed but its base64 payload was corrupt.
+    Corrupt,
+}
+
 /// Extract the last audio block (decoded from base64) from an Interactions
 /// API response.
 ///
 /// REST shape: `steps[*].content[*]` blocks with `type == "audio"` carry
 /// `data` (base64) and `mime_type` (`audio/wav`). The last audio block
-/// matches the SDK's `output_audio` convenience property. Returns `None`
-/// when the response carries no audio block.
-fn parse_gemini_interaction_audio(json: &serde_json::Value) -> Option<Vec<u8>> {
+/// matches the SDK's `output_audio` convenience property. Base64
+/// corruption is reported distinctly from absence so the caller can
+/// produce an accurate diagnostic.
+fn parse_gemini_interaction_audio(json: &serde_json::Value) -> GeminiAudioBlock {
     use base64::Engine;
-    let steps = json.get("steps").and_then(|v| v.as_array())?;
+    let Some(steps) = json.get("steps").and_then(|v| v.as_array()) else {
+        return GeminiAudioBlock::Absent;
+    };
     let mut last: Option<&str> = None;
     for step in steps {
         let Some(content) = step.get("content").and_then(|v| v.as_array()) else {
@@ -1556,16 +1570,29 @@ fn parse_gemini_interaction_audio(json: &serde_json::Value) -> Option<Vec<u8>> {
             }
         }
     }
-    last.and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+    match last {
+        Some(data) => base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_or(GeminiAudioBlock::Corrupt, GeminiAudioBlock::Present),
+        None => GeminiAudioBlock::Absent,
+    }
 }
 
 /// Parse the sample rate from a RIFF/WAVE `fmt ` header (bytes 24–28,
 /// little-endian u32). Returns 24_000 (the documented Gemini output rate)
-/// for anything non-conforming.
+/// for anything non-conforming — including a magic-valid header whose
+/// rate field is zero or implausible, which would otherwise divide the
+/// boundary scaler by zero.
 fn wav_sample_rate(wav: &[u8]) -> u32 {
-    if wav.len() > 28 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" && &wav[12..16] == b"fmt "
+    if wav.len() > 28
+        && &wav[0..4] == b"RIFF"
+        && &wav[8..12] == b"WAVE"
+        && &wav[12..16] == b"fmt "
     {
-        return u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+        let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+        if (8_000..=192_000).contains(&rate) {
+            return rate;
+        }
     }
     24_000
 }
@@ -1574,7 +1601,6 @@ fn wav_sample_rate(wav: &[u8]) -> u32 {
 /// duration. The estimator assumes 150 wpm; for providers that return the
 /// complete buffer without timestamps (Gemini), scaling the estimates to
 /// the real duration keeps events roughly aligned with playback.
-#[cfg(feature = "cloud")]
 #[allow(clippy::cast_precision_loss)]
 fn fire_scaled_estimates(
     cb: &mut crate::engine::OnBoundaryCallback<'_>,
@@ -1615,9 +1641,7 @@ fn fire_scaled_estimates(
 /// itself the selector for azure/google/gemini/the Alexa fallback);
 /// ElevenLabs markup is model-dependent: `eleven_v3*` parses no SSML and
 /// needs the audio-tag dialect, every other ElevenLabs model understands
-/// `<break>` — and the dialects keep the markup correct per model.
-/// Unrecognized ElevenLabs model IDs surface as API errors rather than
-/// being masked.
+/// `<break>`.
 fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a str {
     if provider == "elevenlabs" && model.is_some_and(|m| m.starts_with("eleven_v3")) {
         "elevenlabs-v3"
@@ -2658,9 +2682,8 @@ impl TtsEngine for CloudEngine {
                 req.send()
             } else if self.config.provider_id == "gemini" {
                 // Gemini Interactions API: turn-based JSON body with
-                // speech_metadata style annotations. extra_body merges
-                // top-level so callers can pin generationConfig fields.
-                let mut body = build_gemini_request(
+                // speech_metadata style annotations.
+                let body = build_gemini_request(
                     &text,
                     &voice_to_use,
                     rate,
@@ -2669,11 +2692,6 @@ impl TtsEngine for CloudEngine {
                     effective_model(&self.config),
                     self.credentials.get("style").map(String::as_str),
                 );
-                if let Some(obj) = body.as_object_mut() {
-                    for (k, v) in &self.config.extra_body {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                }
                 req = req.json(&body);
                 req.send()
             } else {
@@ -2803,38 +2821,48 @@ impl TtsEngine for CloudEngine {
             let json: serde_json::Value = serde_json::from_str(&resp_text)
                 .map_err(|e| TtsError(format!("JSON parse: {e}")))?;
 
-            if let Some(wav) = parse_gemini_interaction_audio(&json) {
-                let sample_rate = wav_sample_rate(&wav);
-                let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
-                if pcm.is_empty() {
-                    // An audio block was present but symphonia could not
-                    // probe/decode it — an error, not a silent success.
-                    return Err(TtsError(format!(
-                        "gemini audio block failed to decode ({} wav bytes)",
-                        wav.len()
-                    )));
-                }
-                audio_total += pcm.len();
-                if let Some(cb) = on_audio.as_mut() {
-                    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
-                        cb(chunk);
+            match parse_gemini_interaction_audio(&json) {
+                GeminiAudioBlock::Present(wav) => {
+                    let sample_rate = wav_sample_rate(&wav);
+                    let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
+                    if pcm.is_empty() {
+                        // An audio block was present but symphonia could
+                        // not probe/decode it — an error, not a silent
+                        // success.
+                        return Err(TtsError(format!(
+                            "gemini audio block failed to decode ({} wav bytes)",
+                            wav.len()
+                        )));
+                    }
+                    audio_total += pcm.len();
+                    if let Some(cb) = on_audio.as_mut() {
+                        for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+                            cb(chunk);
+                        }
+                    }
+                    if let Some(cb) = on_boundary.as_mut() {
+                        fire_scaled_estimates(cb, boundary_search_text, &pcm, sample_rate);
                     }
                 }
-                if let Some(cb) = on_boundary.as_mut() {
-                    fire_scaled_estimates(cb, boundary_search_text, &pcm, sample_rate);
+                GeminiAudioBlock::Corrupt => {
+                    return Err(TtsError(
+                        "gemini audio block base64 payload was corrupt".into(),
+                    ));
                 }
-            } else {
-                // 2xx without an audio block: a safety refusal, a filtered
-                // prompt, or an in-band error. Surface whatever detail the
-                // interaction carries instead of a bare "no audio".
-                let detail = json
-                    .get("error")
-                    .and_then(|e| e.get("message"))
-                    .and_then(|m| m.as_str())
-                    .map_or_else(String::new, |m| format!(": {m}"));
-                return Err(TtsError(format!(
-                    "gemini synthesis returned no audio{detail}"
-                )));
+                GeminiAudioBlock::Absent => {
+                    // 2xx without an audio block: a safety refusal, a
+                    // filtered prompt, or an in-band error. Surface
+                    // whatever detail the interaction carries instead of
+                    // a bare "no audio".
+                    let detail = json
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .map_or_else(String::new, |m| format!(": {m}"));
+                    return Err(TtsError(format!(
+                        "gemini synthesis returned no audio{detail}"
+                    )));
+                }
             }
         } else if self.config.provider_id == "google" && (on_boundary.is_some() || on_audio.is_some())
         {
@@ -5680,22 +5708,46 @@ mod tests {
                 ]
             }]
         });
-        let audio = parse_gemini_interaction_audio(&json).unwrap();
-        assert_eq!(audio, wav.to_vec());
+        assert_eq!(
+            parse_gemini_interaction_audio(&json),
+            GeminiAudioBlock::Present(wav.to_vec())
+        );
+    }
+
+    #[test]
+    fn test_gemini_interaction_audio_corrupt_base64() {
+        // An audio block whose payload is not valid base64 must be
+        // reported as corrupt (not silently conflated with absence).
+        let json = serde_json::json!({
+            "steps": [{ "content": [
+                { "type": "audio", "mime_type": "audio/wav", "data": "!!!not base64!!!" }
+            ]}]
+        });
+        assert_eq!(
+            parse_gemini_interaction_audio(&json),
+            GeminiAudioBlock::Corrupt
+        );
     }
 
     #[test]
     fn test_gemini_interaction_audio_none_when_absent() {
-        assert!(parse_gemini_interaction_audio(&serde_json::json!({})).is_none());
-        assert!(parse_gemini_interaction_audio(&serde_json::json!({
-            "steps": [{ "type": "model_output", "content": [] }]
-        }))
-        .is_none());
+        assert_eq!(
+            parse_gemini_interaction_audio(&serde_json::json!({})),
+            GeminiAudioBlock::Absent
+        );
+        assert_eq!(
+            parse_gemini_interaction_audio(&serde_json::json!({
+                "steps": [{ "type": "model_output", "content": [] }]
+            })),
+            GeminiAudioBlock::Absent
+        );
         // An error payload must not panic or yield audio.
-        assert!(parse_gemini_interaction_audio(&serde_json::json!({
-            "error": { "code": 400, "message": "bad" }
-        }))
-        .is_none());
+        assert_eq!(
+            parse_gemini_interaction_audio(&serde_json::json!({
+                "error": { "code": 400, "message": "bad" }
+            })),
+            GeminiAudioBlock::Absent
+        );
     }
 
     #[test]
@@ -5834,21 +5886,18 @@ mod tests {
         assert_eq!(wav_sample_rate(&[]), 24_000);
     }
 
+    type BoundaryEvent = (String, f32, f32, i32, i32, bool);
+
     #[test]
     fn test_fire_scaled_estimates_scales_to_duration() {
         // 2 s of silence at 24 kHz. The 150-wpm estimator will produce
         // events for the words; scaling must stretch them to the real
         // duration, and every event is flagged estimated=true.
         let pcm = vec![0u8; 2 * 24_000 * 2];
-        let mut events: Vec<(String, f32, f32, i32, i32, bool)> = Vec::new();
+        let mut events: Vec<BoundaryEvent> = Vec::new();
         {
-            let mut cb: &mut dyn FnMut(&str, f32, f32, i32, i32, bool) = &mut |
-                word: &str,
-                start: f32,
-                end: f32,
-                offset: i32,
-                len: i32,
-                est: bool| {
+            let mut cb: crate::engine::OnBoundaryCallback<'_> = &mut |
+                word: &str, start: f32, end: f32, offset: i32, len: i32, est: bool| {
                 events.push((word.to_string(), start, end, offset, len, est));
             };
             fire_scaled_estimates(&mut cb, "one two three four five six seven", &pcm, 24_000);
@@ -5867,7 +5916,7 @@ mod tests {
     fn test_fire_scaled_estimates_empty_pcm() {
         // No audio: must not panic, must not fire.
         let mut fired = 0;
-        let mut cb: &mut dyn FnMut(&str, f32, f32, i32, i32, bool) =
+        let mut cb: crate::engine::OnBoundaryCallback<'_> =
             &mut |_w: &str, _s: f32, _e: f32, _o: i32, _l: i32, _est: bool| {
                 fired += 1;
             };

@@ -1,6 +1,5 @@
-//! Live Gemini 3.8 TTS test — requires GEMINI_API_KEY env var.
+//! Live `Gemini 3.8` TTS test — requires `GEMINI_API_KEY` env var.
 //! `GEMINI_API_KEY=... cargo run --example gemini_live --no-default-features --features cloud,display_names`
-use rust_tts_wrapper::engine::TtsEngine;
 
 fn main() {
     let key = std::env::var("GEMINI_API_KEY").expect("set GEMINI_API_KEY");
@@ -49,7 +48,7 @@ fn main() {
     println!(
         "boundaries: {} (first 4: {:?})",
         boundaries.len(),
-        boundaries.get(..4).unwrap_or(&vec![])
+        boundaries.get(..4).unwrap_or(&[])
     );
     println!("OK — Gemini 3.8 TTS fully working through rust-tts-wrapper");
 }
