@@ -182,6 +182,11 @@ pub struct FloravoxEngine {
     /// pump, and `stop` cancels every in-flight utterance — which is the
     /// trait contract ("stop any in-progress speech").
     stop_generation: AtomicU64,
+    /// Last successful voice resolution: `(selector, onnx path)`.
+    /// `resolve_model` probes up to three filesystem candidates per call;
+    /// repeated same-voice calls (the common case) skip that with one
+    /// cheap `exists` staleness check.
+    last_resolution: Mutex<Option<(String, PathBuf)>>,
     /// Cached synthesizers keyed by the voice + phonemizer options they
     /// were built with (rebuilding reloads the ONNX session — seconds —
     /// so per-voice caching matters). Soft-capped: exceeding
@@ -241,6 +246,36 @@ impl FloravoxEngine {
         Self::from_parsed(Config::parse(credentials_json))
     }
 
+    /// Point the engine straight at a voice: a `.onnx` file, its stem, or
+    /// a directory holding one (the floravox-core family auto-detection
+    /// applies). Equivalent to `new` + `modelId`, without credentials
+    /// JSON.
+    #[must_use]
+    pub fn from_model(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref();
+        let model_id = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let models_dir = path
+            .parent()
+            .map_or_else(default_models_dir, std::path::Path::to_path_buf);
+        Self::from_parsed(Config {
+            models_dir: Some(models_dir),
+            model_id: Some(model_id),
+            ..Config::default()
+        })
+    }
+
+    /// Load the ONNX session for a voice ahead of the first utterance
+    /// (multi-second on first use). Optional — `speak` loads lazily.
+    ///
+    /// # Errors
+    /// Propagates voice-resolution and model-load failures.
+    pub fn warm_up(&self, voice: Option<&str>) -> TtsResult<()> {
+        self.synthesizer(voice).map(|_| ())
+    }
+
     /// Constructor from an already-parsed config (test seam).
     fn from_parsed(cfg: Config) -> Self {
         Self {
@@ -269,6 +304,7 @@ impl FloravoxEngine {
             lang: cfg.lang,
             byt5_encoder: cfg.byt5_encoder,
             byt5_decoder: cfg.byt5_decoder,
+            last_resolution: Mutex::new(None),
             stop_generation: std::sync::atomic::AtomicU64::new(0),
             synth: Mutex::new(HashMap::new()),
         }
@@ -295,6 +331,19 @@ impl FloravoxEngine {
                     .into(),
             ));
         }
+        // Hot path: the same voice resolves to the same file — one
+        // staleness `stat` instead of up to three candidate probes.
+        {
+            let last = self
+                .last_resolution
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some((sel, path)) = last.as_ref() {
+                if sel == &requested && path.exists() {
+                    return Ok(path.clone());
+                }
+            }
+        }
         let direct = PathBuf::from(&requested);
         let candidates: Vec<PathBuf> = if direct.exists() {
             vec![direct]
@@ -308,6 +357,9 @@ impl FloravoxEngine {
         };
         for cand in candidates {
             if let Some(p) = find_onnx(&cand) {
+                if let Ok(mut last) = self.last_resolution.lock() {
+                    *last = Some((requested, p.clone()));
+                }
                 return Ok(p);
             }
         }
@@ -584,8 +636,8 @@ impl FloravoxEngine {
                 if let Some(cb) = on_boundary.as_mut() {
                     cb(name, *s, *e, char_offset, char_len, false);
                 }
-                if let Some(b) = &out.boundary {
-                    boundaries.push(b.clone());
+                if let Some(b) = out.boundary {
+                    boundaries.push(b);
                 }
                 return;
             }
@@ -622,9 +674,16 @@ impl FloravoxEngine {
                 handle_event(ev);
             }
             match audio.recv_timeout(POLL) {
-                Ok(chunk) => {
-                    let scaled = apply_volume(&chunk.samples, volume);
-                    let pcm = samples_to_le_bytes(&scaled);
+                Ok(mut chunk) => {
+                    // Single pass: scale in place (owned chunk from the
+                    // channel), convert to PCM in one allocation.
+                    if (volume - 1.0).abs() > f32::EPSILON {
+                        let vol = volume.clamp(0.0, 4.0);
+                        for s in &mut chunk.samples {
+                            *s = (*s * vol).clamp(-1.0, 1.0);
+                        }
+                    }
+                    let pcm = samples_to_le_bytes(&chunk.samples);
                     if collect {
                         bytes.extend_from_slice(&pcm);
                     }
@@ -675,15 +734,11 @@ fn default_models_dir() -> PathBuf {
         )
 }
 
-/// Scale f32 samples by a volume factor (clamped).
-fn apply_volume(samples: &[f32], volume: f32) -> Vec<f32> {
-    if (volume - 1.0).abs() < f32::EPSILON {
-        return samples.to_vec();
-    }
-    samples
-        .iter()
-        .map(|&s| (s * volume.clamp(0.0, 4.0)).clamp(-1.0, 1.0))
-        .collect()
+/// Scale one sample by a volume factor (clamped). Kept as a helper so
+/// the clamping policy has a single testable home.
+#[must_use]
+fn clamp_scale(s: f32, volume: f32) -> f32 {
+    (s * volume.clamp(0.0, 4.0)).clamp(-1.0, 1.0)
 }
 
 /// f32 mono samples → 16-bit little-endian PCM bytes.
@@ -1120,9 +1175,11 @@ mod tests {
 
     #[test]
     fn volume_scaling_clamps() {
-        assert!((apply_volume(&[0.5], 2.0)[0] - 1.0).abs() < 1e-6);
-        assert!(apply_volume(&[0.5], 0.0)[0].abs() < 1e-6);
-        assert!((apply_volume(&[0.5], 1.0)[0] - 0.5).abs() < 1e-6);
+        assert!((clamp_scale(0.5, 2.0) - 1.0).abs() < 1e-6);
+        assert!(clamp_scale(0.5, 0.0).abs() < 1e-6);
+        assert!((clamp_scale(0.5, 1.0) - 0.5).abs() < 1e-6);
+        // Out-of-range volume clamps to the 0..=4 window.
+        assert!((clamp_scale(1.0, 99.0) - 1.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1586,6 +1643,32 @@ mod tests {
         assert_eq!(bcp47_from("de-de", "en_US-lessac-low").0, "de-DE");
         // 3-letter region is not a region code.
         assert_eq!(bcp47_from("", "hif_Foo-bar").0, "hif");
+    }
+
+    #[test]
+    fn from_model_points_at_parent_and_stem() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = dir.path().join("en-lessac.onnx");
+        std::fs::write(&voice, b"x").unwrap();
+        let engine = FloravoxEngine::from_model(&voice);
+        assert_eq!(engine.model_id.lock().unwrap().as_str(), "en-lessac");
+        assert_eq!(engine.models_dir, dir.path());
+        // And it resolves straight back.
+        assert_eq!(engine.resolve_model(None).unwrap(), voice);
+    }
+
+    #[test]
+    fn from_model_directory_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let voice = dir.path().join("kokoro-multi");
+        std::fs::create_dir(&voice).unwrap();
+        std::fs::write(voice.join("model.onnx"), b"x").unwrap();
+        let engine = FloravoxEngine::from_model(&voice);
+        assert_eq!(engine.model_id.lock().unwrap().as_str(), "kokoro-multi");
+        assert_eq!(
+            engine.resolve_model(None).unwrap(),
+            voice.join("model.onnx")
+        );
     }
 
     #[test]

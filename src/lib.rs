@@ -1,9 +1,10 @@
 //! # rust-tts-wrapper
 //!
 //! Cross-platform TTS (Text-to-Speech) wrapper with a C ABI.
-//! Mirrors [`js-tts-wrapper`] and `SwiftTTSWrapper`, supporting 21+ engines:
-//! system (speech-dispatcher), Sherpa-ONNX (1300+ local models), and 19 cloud
-//! providers. macOS adds AvSynth; Windows adds SAPI.
+//! Mirrors [`js-tts-wrapper`] and `SwiftTTSWrapper`, supporting 25 engines:
+//! system (speech-dispatcher), AVSpeech (macOS), SAPI (Windows),
+//! Sherpa-ONNX + floravox (local ONNX voices — 1300+ models / ~1,100
+//! languages), and 20 cloud providers.
 //!
 //! [`js-tts-wrapper`]: https://github.com/AACTools/js-tts-wrapper
 //!

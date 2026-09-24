@@ -124,6 +124,30 @@ fn speechmarkdown_matches_ssml_expansion() {
 }
 
 #[test]
+#[ignore = "needs FLORAVOX_TEST_VOICE (real ONNX voice on disk)"]
+fn warm_up_loads_session_then_speak_is_fast() {
+    let Some(voice) = test_voice() else {
+        eprintln!("FLORAVOX_TEST_VOICE not set — skipping");
+        return;
+    };
+    let engine = engine_for(&voice);
+    engine
+        .warm_up(None)
+        .expect("warm_up loads the ONNX session");
+    let start = std::time::Instant::now();
+    engine
+        .speak("Warm.", None, 1.0, 1.0, 1.0, None, None, None)
+        .expect("speak after warm_up");
+    // First-speak after warm-up skips the model load; generous bound to
+    // stay robust on slow CI boxes while still catching a re-load.
+    assert!(
+        start.elapsed().as_secs() < 30,
+        "post-warm-up speak took {:?} — session not cached?",
+        start.elapsed()
+    );
+}
+
+#[test]
 #[ignore = "needs FLORAVOX_TEST_VOICE + a sibling .student file"]
 fn student_sidecar_timings_are_sane_and_ordered() {
     // The student tier engages automatically when a `.student` file sits

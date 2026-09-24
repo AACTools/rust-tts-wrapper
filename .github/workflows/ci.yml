@@ -23,6 +23,9 @@ jobs:
       - name: Clippy (Linux features)
         run: cargo clippy --no-default-features --features system,cloud -- -D warnings
 
+      - name: Clippy (floravox)
+        run: cargo clippy --no-default-features --features floravox -- -D warnings
+
       - name: Build (Linux features)
         run: cargo build --no-default-features --features system,cloud
 
