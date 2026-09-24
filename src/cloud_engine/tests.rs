@@ -1,3 +1,4 @@
+#[allow(unused_imports)] // tests reference items across all cloud modules
 use super::*;
 
 #[cfg(test)]
