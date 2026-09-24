@@ -24,7 +24,10 @@ fn test_voice() -> Option<String> {
 }
 
 fn engine_for(voice: &str) -> FloravoxEngine {
-    let creds = format!(r#"{{"modelId": "{voice}"}}"#);
+    // Windows paths carry backslashes — they must be escaped to survive
+    // the credentials JSON round-trip.
+    let escaped = voice.replace('\\', "\\\\");
+    let creds = format!(r#"{{"modelId": "{escaped}"}}"#);
     FloravoxEngine::new(&creds)
 }
 
@@ -122,11 +125,13 @@ fn speechmarkdown_matches_ssml_expansion() {
 
 #[test]
 #[ignore = "needs FLORAVOX_TEST_VOICE + a sibling .student file"]
-fn student_sidecar_changes_timings() {
+fn student_sidecar_timings_are_sane_and_ordered() {
     // The student tier engages automatically when a `.student` file sits
-    // beside the voice. Asserts timings come back sane and ordered; the
-    // estimates flag follows floravox's own tier semantics (a student
-    // refinement is still an estimate tier, not a measurement).
+    // beside the voice. What is asserted here: synthesis delivers audio
+    // and ordered boundaries; the estimates flag follows floravox's own
+    // tier semantics (a student refinement is still an estimate tier,
+    // not a measurement). Distinguishing student vs proportional output
+    // requires a second voice without the sidecar — not covered here.
     let Some(voice) = test_voice() else {
         eprintln!("FLORAVOX_TEST_VOICE not set — skipping");
         return;

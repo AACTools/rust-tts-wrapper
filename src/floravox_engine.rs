@@ -1354,6 +1354,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_model_dotted_stem() {
+        // Dotted stems ("v1.2"): with_extension would truncate to v1.onnx,
+        // but the explicit "{requested}.onnx" candidate saves it.
+        let dir = tempfile::tempdir().unwrap();
+        let models = dir.path().join("voices");
+        std::fs::create_dir(&models).unwrap();
+        let dotted = models.join("v1.2.onnx");
+        std::fs::write(&dotted, b"x").unwrap();
+        let engine = FloravoxEngine::new(&format!(r#"{{"modelsDir": "{}"}}"#, models.display()));
+        assert_eq!(engine.resolve_model(Some("v1.2")).unwrap(), dotted);
+    }
+
+    #[test]
     fn bcp47_region_from_dataset() {
         // Region kept from the dataset's second token.
         assert_eq!(bcp47_from("", "en_US-lessac-low").0, "en-US");
