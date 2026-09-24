@@ -121,4 +121,4 @@ cargo = "warn"
 # [patch] only applies inside this repo, so a crates.io release must not
 # depend on it. rev-pinned (not branch) so builds are reproducible.
 [patch.crates-io]
-speechmarkdown-rust = { git = "https://github.com/AACTools/speechmarkdown-rust", rev = "32294a3" }
+speechmarkdown-rust = { git = "https://github.com/AACTools/speechmarkdown-rust", rev = "92c56b1" }
