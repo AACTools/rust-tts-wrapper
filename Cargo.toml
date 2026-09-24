@@ -74,7 +74,7 @@ sapi = ["windows", "speechmarkdown"]
 display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 
 [dependencies]
-reqwest = { version = "0.13", features = ["blocking", "json", "rustls", "webpki-roots"], default-features = false, optional = true }
+reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false, optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
 # Exact pin: the i686-windows publish job links a prebuilt static lib
