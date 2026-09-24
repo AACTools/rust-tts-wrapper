@@ -49,7 +49,7 @@ use {
 /// `on_audio` (matching the local SherpaOnnx / SAPI engines) instead of raw
 /// MP3 bytes that a SAPI site would have to decode itself.
 #[cfg(feature = "cloud")]
-fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
+fn decode_audio_to_pcm16_mono(bytes: &[u8], ext_hint: &str) -> Vec<u8> {
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
@@ -59,11 +59,11 @@ fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
     // Cursor needs an owned buffer: MediaSourceStream boxes the source as
     // `dyn MediaSource + 'static`, so a borrowed `&[u8]` cursor won't compile.
     let mss = MediaSourceStream::new(
-        Box::new(std::io::Cursor::new(mp3.to_vec())),
+        Box::new(std::io::Cursor::new(bytes.to_vec())),
         MediaSourceStreamOptions::default(),
     );
     let mut hint = Hint::new();
-    hint.with_extension("mp3");
+    hint.with_extension(ext_hint);
     let mut format = match symphonia::default::get_probe().format(
         &hint,
         mss,
@@ -91,6 +91,11 @@ fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
         mix_packet_to_mono_pcm16(&decoded_buf, &mut pcm);
     }
     pcm
+}
+
+/// MP3 → PCM16 mono via the generic decoder.
+fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
+    decode_audio_to_pcm16_mono(mp3, "mp3")
 }
 
 /// Scale a normalised f32 sample (`[-1.0, 1.0]`) to little-endian PCM16 and
@@ -873,6 +878,37 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 ..Default::default()
             })
         }
+        "gemini" => {
+            // Gemini 3.8 TTS via the Interactions API. Model selection
+            // matters: gemini-3.8-flash-tts (default) is the expressive
+            // flagship; gemini-3.8-flash-lite-tts is the high-volume
+            // variant. Both share the exact API schema. Older preview
+            // models (gemini-2.5-*-tts, gemini-3.1-flash-tts-preview)
+            // also work through this path. An unrecognized model ID
+            // surfaces as an API error rather than being masked.
+            let model = creds
+                .get("modelId")
+                .filter(|m| !m.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "gemini-3.8-flash-tts".into());
+            let voice = creds
+                .get("voice")
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "Kore".into());
+            Some(CloudConfig {
+                synth_url: "https://generativelanguage.googleapis.com/v1beta/interactions".into(),
+                auth_header: "x-goog-api-key".into(),
+                auth_prefix: String::new(),
+                model_default: Some(model),
+                default_voice: Some(voice),
+                voices_url: Some(
+                    "https://generativelanguage.googleapis.com/v1beta/voices".into(),
+                ),
+                provider_id: "gemini".into(),
+                ..Default::default()
+            })
+        }
         "cartesia" => Some(CloudConfig {
             synth_url: "https://api.cartesia.ai/tts/bytes".into(),
             auth_header: "X-API-Key".into(),
@@ -1428,6 +1464,150 @@ fn effective_model(config: &CloudConfig) -> Option<&str> {
         .or(config.model_default.as_deref())
 }
 
+/// Map the wrapper's rate/pitch/volume multipliers (1.0 = normal, 0.0 =
+/// unset) onto the Gemini prompting guide's style vocabulary. Sustained
+/// delivery is a turn-level `speech_metadata.style` concern on Gemini 3.8
+/// TTS — there is no numeric prosody — so numeric parameters can only be
+/// expressed approximately as style words.
+fn gemini_style_from_params(rate: f32, pitch: f32, volume: f32) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if rate > 0.0 && (rate - 1.0).abs() > f32::EPSILON {
+        if rate < 1.0 {
+            parts.push("speaking slowly");
+        } else {
+            parts.push("speaking rapidly");
+        }
+    }
+    if pitch > 0.0 && (pitch - 1.0).abs() > f32::EPSILON {
+        if pitch < 1.0 {
+            parts.push("low pitch");
+        } else {
+            parts.push("high pitch");
+        }
+    }
+    if volume > 0.0 && (volume - 1.0).abs() > f32::EPSILON {
+        if volume < 1.0 {
+            parts.push("speaking softly");
+        } else {
+            parts.push("speaking loudly");
+        }
+    }
+    parts.join(", ")
+}
+
+/// Build the Interactions API request body for Gemini TTS.
+///
+/// The transcript is sent verbatim — the model performs the text as
+/// written (the SpeechMarkdown `gemini` dialect has already rendered
+/// angle-bracket vocal bursts, pause tags and CAPS emphasis into it).
+/// Turn-level delivery rides in `speech_metadata.style`: an explicit
+/// credential `style` wins outright; otherwise the rate/pitch/volume
+/// multipliers map onto the documented style vocabulary. The voice may
+/// be a prebuilt name ("Kore"), an Extended Voice Library ID, a voice
+/// design ID (`voice_...`) or a stateless replication key
+/// (`voicekey_...`) — all pass through in `speech_config`.
+fn build_gemini_request(
+    text: &str,
+    voice: &str,
+    rate: f32,
+    pitch: f32,
+    volume: f32,
+    model: Option<&str>,
+    style_override: Option<&str>,
+) -> serde_json::Value {
+    let style = style_override
+        .map_or_else(|| gemini_style_from_params(rate, pitch, volume), str::to_string);
+
+    let mut content = serde_json::json!({ "type": "text", "text": text });
+    if !style.is_empty() {
+        content["annotations"] = serde_json::json!([
+            { "type": "speech_metadata", "style": style }
+        ]);
+    }
+
+    serde_json::json!({
+        "model": model.unwrap_or("gemini-3.8-flash-tts"),
+        "input": [{ "type": "user_input", "content": [content] }],
+        "response_format": { "type": "audio" },
+        "generation_config": { "speech_config": [{ "voice": voice }] },
+    })
+}
+
+/// Extract the last audio block (decoded from base64) from an Interactions
+/// API response.
+///
+/// REST shape: `steps[*].content[*]` blocks with `type == "audio"` carry
+/// `data` (base64) and `mime_type` (`audio/wav`). The last audio block
+/// matches the SDK's `output_audio` convenience property. Returns `None`
+/// when the response carries no audio block.
+fn parse_gemini_interaction_audio(json: &serde_json::Value) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let steps = json.get("steps").and_then(|v| v.as_array())?;
+    let mut last: Option<&str> = None;
+    for step in steps {
+        let Some(content) = step.get("content").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for block in content {
+            if block.get("type").and_then(|v| v.as_str()) == Some("audio") {
+                if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
+                    last = Some(data);
+                }
+            }
+        }
+    }
+    last.and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok())
+}
+
+/// Parse the sample rate from a RIFF/WAVE `fmt ` header (bytes 24–28,
+/// little-endian u32). Returns 24_000 (the documented Gemini output rate)
+/// for anything non-conforming.
+fn wav_sample_rate(wav: &[u8]) -> u32 {
+    if wav.len() > 28 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" {
+        return u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
+    }
+    24_000
+}
+
+/// Fire estimated word boundaries scaled to the actual delivered audio
+/// duration. The estimator assumes 150 wpm; for providers that return the
+/// complete buffer without timestamps (Gemini), scaling the estimates to
+/// the real duration keeps events roughly aligned with playback.
+#[cfg(feature = "cloud")]
+#[allow(clippy::cast_precision_loss)]
+fn fire_scaled_estimates(
+    cb: &mut crate::engine::OnBoundaryCallback<'_>,
+    text: &str,
+    pcm: &[u8],
+    sample_rate: u32,
+) {
+    let plan = crate::boundaries::EstimatePlan::build(text);
+    let n = plan.len();
+    if n == 0 || pcm.is_empty() {
+        return;
+    }
+    let Some(last) = plan.event(n - 1) else {
+        return;
+    };
+    let est_ms = (last.end_s * 1000.0).max(1.0);
+    let actual_ms = (pcm.len() as f32 / 2.0) * 1000.0 / sample_rate as f32;
+    let scale = actual_ms / est_ms;
+    for i in 0..n {
+        if let Some(e) = plan.event(i) {
+            // These are proportional estimates (scaled to the real audio
+            // duration) — flagged as such per the callback contract.
+            cb(
+                &e.word,
+                e.start_s * scale,
+                e.end_s * scale,
+                e.char_offset,
+                e.char_len,
+                true,
+            );
+        }
+    }
+}
+
 /// Pick the SpeechMarkdown platform selector for a provider/model pair.
 ///
 /// ElevenLabs markup is model-dependent: `eleven_v3*` parses no SSML and
@@ -1447,7 +1627,13 @@ fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a st
 /// Returns `None` when the input does not parse; callers then fall back
 /// to plain-text stripping.
 #[cfg(feature = "speechmarkdown")]
-fn elevenlabs_ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
+/// Translate W3C SSML into a prompt dialect via SpeechMarkdown:
+/// SSML → SpeechMarkdown → the target platform's dialect.
+///
+/// Named for its ElevenLabs origin but shared by every no-SSML dialect
+/// (ElevenLabs pre-v3/v3, Gemini): these engines read stray XML aloud,
+/// so incoming `tts_speak_ssml` input must be translated, not stripped.
+fn ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
     use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
     let platform = Platform::from_platform_str(smd_platform)?;
     let smd = SpeechMarkdownParser::to_smd(ssml).ok()?;
@@ -1603,6 +1789,54 @@ fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
             gender: normalize_gender(gender_raw),
             provider: "google".to_string(),
             language_codes: lang_codes,
+        });
+    }
+    voices
+}
+
+/// Map Gemini Extended Voice Library JSON to unified voices.
+///
+/// `GET /v1beta/voices` returns `{ "voices": [ ... ] }` with rich metadata
+/// per voice: `{ "id": "kore", "display_name": "Kore", "language_code":
+/// "en-US", "accent": "...", "persona": "...", "gender": "..." }`. The
+/// same voice IDs work in `speech_config` — including voice design IDs
+/// (`voice_...`) and replication keys (`voicekey_...`) when present.
+fn map_gemini_voices(json: &[serde_json::Value]) -> Vec<Voice> {
+    let mut voices = Vec::new();
+    for v in json {
+        let Some(id) = v.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = v
+            .get("display_name")
+            .or_else(|| v.get("displayName"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(id)
+            .to_string();
+        let gender_raw = v.get("gender").and_then(|v| v.as_str()).unwrap_or("");
+        // Persona enriches the display name so a voice picker can
+        // differentiate the 50+ prebuilt voices ("Kore — Firm, ... ").
+        let persona = v.get("persona").and_then(|v| v.as_str()).unwrap_or("");
+        let display = if persona.is_empty() {
+            name.clone()
+        } else {
+            format!("{name} — {persona}")
+        };
+        let locale = v
+            .get("language_code")
+            .or_else(|| v.get("languageCode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("en-US");
+        voices.push(Voice {
+            id: id.to_string(),
+            name: display,
+            gender: normalize_gender(gender_raw),
+            provider: "gemini".to_string(),
+            language_codes: vec![LanguageCode {
+                iso639_3: locale.split('-').next().unwrap_or("en").to_string(),
+                bcp47: locale.to_string(),
+                display: crate::types::locale_display_name(locale),
+            }],
         });
     }
     voices
@@ -1919,12 +2153,14 @@ impl TtsEngine for CloudEngine {
                 }
                 _ => {
                     google_ssml_override = None;
-                    // ElevenLabs parses no SSML: translate into the
-                    // model-matched dialect (breaks, whisper, styles
+                    // ElevenLabs and Gemini parse no SSML: translate into
+                    // the model-matched dialect (breaks, whisper, styles
                     // survive) rather than stripping to plain text.
                     #[cfg(feature = "speechmarkdown")]
-                    if self.config.provider_id == "elevenlabs" {
-                        text = elevenlabs_ssml_to_dialect(&original_text, smd_platform)
+                    if self.config.provider_id == "elevenlabs"
+                        || self.config.provider_id == "gemini"
+                    {
+                        text = ssml_to_dialect(&original_text, smd_platform)
                             .unwrap_or_else(|| crate::engine::strip_ssml_to_text(&original_text));
                     } else {
                         text = crate::engine::strip_ssml_to_text(&original_text);
@@ -1949,7 +2185,8 @@ impl TtsEngine for CloudEngine {
         // fragments) must not leak into boundary words or offset
         // mapping; search the plain spoken text instead.
         let plain_spoken;
-        let boundary_search_text: &str = if is_ssml && self.config.provider_id == "elevenlabs" {
+        let boundary_search_text: &str =
+            if is_ssml && (self.config.provider_id == "elevenlabs" || self.config.provider_id == "gemini") {
             plain_spoken = crate::engine::strip_ssml_to_text(&original_text);
             plain_spoken.as_str()
         } else if is_ssml {
@@ -2415,6 +2652,26 @@ impl TtsEngine for CloudEngine {
                 );
                 req = req.json(&body);
                 req.send()
+            } else if self.config.provider_id == "gemini" {
+                // Gemini Interactions API: turn-based JSON body with
+                // speech_metadata style annotations. extra_body merges
+                // top-level so callers can pin generationConfig fields.
+                let mut body = build_gemini_request(
+                    &text,
+                    &voice_to_use,
+                    rate,
+                    pitch,
+                    volume,
+                    effective_model(&self.config),
+                    self.credentials.get("style").map(String::as_str),
+                );
+                if let Some(obj) = body.as_object_mut() {
+                    for (k, v) in &self.config.extra_body {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                }
+                req = req.json(&body);
+                req.send()
             } else {
                 // Standard JSON body for all other engines
                 let mut body = serde_json::Map::new();
@@ -2531,8 +2788,43 @@ impl TtsEngine for CloudEngine {
                     }
                 }
             }
-        } else if self.config.provider_id == "google"
-            && (on_boundary.is_some() || on_audio.is_some())
+        } else if self.config.provider_id == "gemini" {
+            // Gemini Interactions API: one JSON document whose audio block
+            // is base64 WAV (PCM16, 24 kHz by default). Decode and deliver
+            // as uniform PCM; boundaries are estimates scaled to the actual
+            // delivered duration (the API exposes no timestamps).
+            let resp_text = resp
+                .text()
+                .map_err(|e| TtsError(format!("Read error: {e}")))?;
+            let json: serde_json::Value = serde_json::from_str(&resp_text)
+                .map_err(|e| TtsError(format!("JSON parse: {e}")))?;
+
+            if let Some(wav) = parse_gemini_interaction_audio(&json) {
+                let sample_rate = wav_sample_rate(&wav);
+                let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
+                audio_total += pcm.len();
+                if let Some(cb) = on_audio.as_mut() {
+                    for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+                        cb(chunk);
+                    }
+                }
+                if let Some(cb) = on_boundary.as_mut() {
+                    fire_scaled_estimates(cb, boundary_search_text, &pcm, sample_rate);
+                }
+            } else {
+                // 2xx without an audio block: a safety refusal, a filtered
+                // prompt, or an in-band error. Surface whatever detail the
+                // interaction carries instead of a bare "no audio".
+                let detail = json
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map_or_else(String::new, |m| format!(": {m}"));
+                return Err(TtsError(format!(
+                    "gemini synthesis returned no audio{detail}"
+                )));
+            }
+        } else if self.config.provider_id == "google" && (on_boundary.is_some() || on_audio.is_some())
         {
             // Google returns base64-encoded audio in JSON
             let resp_text = resp
@@ -2737,6 +3029,10 @@ impl TtsEngine for CloudEngine {
                 .get("voices")
                 .and_then(|v| v.as_array())
                 .map_or_else(|| Ok(vec![]), |arr| Ok(map_google_voices(arr))),
+            "gemini" => json
+                .get("voices")
+                .and_then(|v| v.as_array())
+                .map_or_else(|| Ok(vec![]), |arr| Ok(map_gemini_voices(arr))),
             _ => json.as_array().map_or_else(
                 || Ok(vec![]),
                 |arr| Ok(map_generic_voices(&self.config.provider_id, arr)),
@@ -2780,6 +3076,7 @@ impl TtsEngine for CloudEngine {
             "azure" => "azure",
             "edge" => "edge",
             "google" => "google",
+            "gemini" => "gemini",
             "cartesia" => "cartesia",
             "deepgram" => "deepgram",
             "playht" => "playht",
@@ -5140,32 +5437,32 @@ mod tests {
         // path instead of stripping).
         let alexa = r#"<speak>Hello <break time="2s"/> world</speak>"#;
         assert_eq!(
-            elevenlabs_ssml_to_dialect(alexa, "elevenlabs").unwrap(),
+            ssml_to_dialect(alexa, "elevenlabs").unwrap(),
             "Hello <break time=\"2s\"/> world"
         );
         let v3 = r#"<speak><amazon:effect name="whispered">secret</amazon:effect></speak>"#;
         assert_eq!(
-            elevenlabs_ssml_to_dialect(v3, "elevenlabs-v3").unwrap(),
+            ssml_to_dialect(v3, "elevenlabs-v3").unwrap(),
             "[whispers] secret"
         );
         let azure = r#"<speak><mstts:express-as style="cheerful">hi</mstts:express-as></speak>"#;
         assert_eq!(
-            elevenlabs_ssml_to_dialect(azure, "elevenlabs-v3").unwrap(),
+            ssml_to_dialect(azure, "elevenlabs-v3").unwrap(),
             "[cheerful] hi"
         );
         // Plain text parses as bare SpeechMarkdown and round-trips
         // unchanged (no translation needed).
         assert_eq!(
-            elevenlabs_ssml_to_dialect("no ssml here", "elevenlabs").unwrap(),
+            ssml_to_dialect("no ssml here", "elevenlabs").unwrap(),
             "no ssml here"
         );
         // Malformed SSML fails to parse → None → the caller strips.
-        assert!(elevenlabs_ssml_to_dialect("<speak>a & b</speak>", "elevenlabs").is_none());
+        assert!(ssml_to_dialect("<speak>a & b</speak>", "elevenlabs").is_none());
         // <voice> has no ElevenLabs equivalent (parity with the old
         // strip path): the modifier is dropped, the text survives.
         let voiced = r#"<speak><voice name="Aria">hi</voice></speak>"#;
         assert_eq!(
-            elevenlabs_ssml_to_dialect(voiced, "elevenlabs-v3").unwrap(),
+            ssml_to_dialect(voiced, "elevenlabs-v3").unwrap(),
             "hi"
         );
     }
@@ -5264,5 +5561,305 @@ mod tests {
         // verify the contract holds.
         let cfg = build_config("modelslab", &engine_creds("modelslab")).unwrap();
         assert_eq!(cfg.auth_header, "");
+    }
+
+    // ===== Gemini 3.8 TTS (Interactions API) =====
+
+    #[test]
+    fn test_gemini_config_defaults() {
+        let cfg = build_config("gemini", &engine_creds("gemini")).unwrap();
+        assert_eq!(cfg.provider_id, "gemini");
+        assert_eq!(cfg.auth_header, "x-goog-api-key");
+        assert_eq!(cfg.auth_prefix, "");
+        assert_eq!(cfg.model_default.as_deref(), Some("gemini-3.8-flash-tts"));
+        assert_eq!(cfg.default_voice.as_deref(), Some("Kore"));
+        assert!(!cfg.body_is_ssml);
+        assert!(cfg.voices_url.is_some());
+        assert!(cfg.synth_url.contains("/v1beta/interactions"));
+    }
+
+    #[test]
+    fn test_gemini_config_credential_overrides() {
+        let mut creds = engine_creds("gemini");
+        creds.insert("modelId".into(), "gemini-3.8-flash-lite-tts".into());
+        creds.insert("voice".into(), "Puck".into());
+        let cfg = build_config("gemini", &creds).unwrap();
+        assert_eq!(cfg.model_default.as_deref(), Some("gemini-3.8-flash-lite-tts"));
+        assert_eq!(cfg.default_voice.as_deref(), Some("Puck"));
+    }
+
+    #[test]
+    fn test_gemini_request_minimal_body() {
+        let body = build_gemini_request(
+            "Have a wonderful day!",
+            "Kore",
+            0.0,
+            0.0,
+            0.0,
+            Some("gemini-3.8-flash-tts"),
+            None,
+        );
+        assert_eq!(body["model"], "gemini-3.8-flash-tts");
+        assert_eq!(body["response_format"]["type"], "audio");
+        assert_eq!(body["generation_config"]["speech_config"][0]["voice"], "Kore");
+        let content = &body["input"][0]["content"][0];
+        assert_eq!(content["type"], "text");
+        assert_eq!(content["text"], "Have a wonderful day!");
+        // No style params set → no annotations (guide: most requests need
+        // no style at all).
+        assert!(content.get("annotations").is_none());
+    }
+
+    #[test]
+    fn test_gemini_request_style_from_params() {
+        let body = build_gemini_request(
+            "Slow down.",
+            "Kore",
+            0.7, // rate multiplier: slower
+            1.2, // pitch multiplier: higher
+            0.0,
+            None,
+            None,
+        );
+        let content = &body["input"][0]["content"][0];
+        let annotations = content["annotations"].as_array().unwrap();
+        assert_eq!(annotations[0]["type"], "speech_metadata");
+        let style = annotations[0]["style"].as_str().unwrap();
+        assert!(style.contains("speaking slowly"), "style: {style}");
+        assert!(style.contains("high pitch"), "style: {style}");
+    }
+
+    #[test]
+    fn test_gemini_request_style_override_wins() {
+        let body = build_gemini_request(
+            "Hello",
+            "Kore",
+            0.5,
+            0.0,
+            0.0,
+            None,
+            Some("whispered urgently"),
+        );
+        let style = body["input"][0]["content"][0]["annotations"][0]["style"]
+            .as_str()
+            .unwrap();
+        assert_eq!(style, "whispered urgently");
+    }
+
+    #[test]
+    fn test_gemini_request_default_model() {
+        let body = build_gemini_request("Hi", "Kore", 0.0, 0.0, 0.0, None, None);
+        assert_eq!(body["model"], "gemini-3.8-flash-tts");
+    }
+
+    #[test]
+    fn test_gemini_interaction_audio_parse() {
+        let wav = b"RIFFxxxxWAVEfmt";
+        let b64 = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(wav)
+        };
+        let json = serde_json::json!({
+            "steps": [{
+                "type": "model_output",
+                "content": [
+                    { "type": "text", "text": "partial" },
+                    { "type": "audio", "mime_type": "audio/wav", "data": b64 }
+                ]
+            }]
+        });
+        let audio = parse_gemini_interaction_audio(&json).unwrap();
+        assert_eq!(audio, wav.to_vec());
+    }
+
+    #[test]
+    fn test_gemini_interaction_audio_none_when_absent() {
+        assert!(parse_gemini_interaction_audio(&serde_json::json!({})).is_none());
+        assert!(parse_gemini_interaction_audio(&serde_json::json!({
+            "steps": [{ "type": "model_output", "content": [] }]
+        }))
+        .is_none());
+        // An error payload must not panic or yield audio.
+        assert!(parse_gemini_interaction_audio(&serde_json::json!({
+            "error": { "code": 400, "message": "bad" }
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn test_gemini_voices_mapping() {
+        let arr = serde_json::json!([
+            {
+                "id": "kore",
+                "display_name": "Kore",
+                "language_code": "en-US",
+                "accent": "American",
+                "persona": "Firm",
+                "gender": "female"
+            },
+            {
+                "id": "voice_abc123",
+                "display_name": "My Designed Voice",
+                "language_code": "de-DE"
+            }
+        ]);
+        let voices = map_gemini_voices(arr.as_array().unwrap());
+        assert_eq!(voices.len(), 2);
+        assert_eq!(voices[0].id, "kore");
+        assert_eq!(voices[0].provider, "gemini");
+        assert!(voices[0].name.contains("Kore"));
+        assert!(voices[0].name.contains("Firm"), "persona in display name");
+        assert_eq!(voices[0].language_codes[0].bcp47, "en-US");
+        // No persona → plain display name.
+        assert_eq!(voices[1].name, "My Designed Voice");
+        assert_eq!(voices[1].language_codes[0].bcp47, "de-DE");
+    }
+
+    #[test]
+    fn test_gemini_style_params_neutral_is_empty() {
+        assert_eq!(gemini_style_from_params(1.0, 1.0, 1.0), "");
+        assert_eq!(gemini_style_from_params(0.0, 0.0, 0.0), "");
+    }
+
+    #[test]
+    fn test_speechmarkdown_gemini_dialect_routing() {
+        // The gemini provider must route SpeechMarkdown through the
+        // Gemini dialect (angle-bracket tags), NOT SSML.
+        let (out, is_ssml) = preprocess_speech_markdown(
+            "Wait [500ms] then [laugh] loudly",
+            "gemini",
+        );
+        assert!(!is_ssml, "gemini dialect is prompt text, not SSML");
+        assert!(out.contains("<short pause>"), "out: {out}");
+        assert!(out.contains("<laugh>"), "out: {out}");
+        assert!(!out.contains("<speak>"), "no SSML envelope: {out}");
+    }
+
+    #[test]
+    fn test_gemini_ssml_input_translated_to_dialect() {
+        // tts_speak_ssml on the gemini engine: SSML → SpeechMarkdown →
+        // Gemini dialect, not stripped-to-plain.
+        #[cfg(feature = "speechmarkdown")]
+        {
+            let dialect = ssml_to_dialect(
+                "<speak>Hello <break time=\"500ms\"/> world</speak>",
+                "gemini",
+            );
+            let out = dialect.expect("SSML → gemini dialect");
+            assert!(out.contains("Hello"), "out: {out}");
+            assert!(out.contains("<short pause>"), "break preserved: {out}");
+        }
+    }
+
+    #[test]
+    fn test_gemini_engine_id_and_listing() {
+        let engine = CloudEngine::new("gemini", &engine_creds("gemini")).unwrap();
+        assert_eq!(engine.engine_id(), "gemini");
+        let listed = crate::factory::engine_list();
+        assert!(listed.iter().any(|e| e.id == "gemini"), "engine listed");
+    }
+
+    #[test]
+    fn test_gemini_dialect_selector() {
+        // The speak()-path SpeechMarkdown selector must resolve the gemini
+        // provider to the gemini dialect (regardless of model), or
+        // production would silently route to the Alexa SSML default while
+        // the preprocess test above stays green.
+        assert_eq!(
+            elevenlabs_smd_platform("gemini", Some("gemini-3.8-flash-tts")),
+            "gemini"
+        );
+        assert_eq!(
+            elevenlabs_smd_platform("gemini", Some("gemini-3.8-flash-lite-tts")),
+            "gemini"
+        );
+    }
+
+    /// Build a minimal valid mono 16-bit WAV buffer.
+    fn tiny_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+        let data_len = samples.len() * 2;
+        let mut wav = Vec::with_capacity(44 + data_len);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for s in samples {
+            wav.extend_from_slice(&s.to_le_bytes());
+        }
+        wav
+    }
+
+    #[test]
+    fn test_gemini_wav_decode_roundtrip() {
+        // Real decode path: a valid WAV fixture must survive
+        // symphonia → PCM16 (regression guard for the wav/pcm features).
+        let samples: Vec<i16> = (0..480).map(|i| (i * 37 % 3000) as i16).collect();
+        let wav = tiny_wav(&samples, 24_000);
+        let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
+        assert_eq!(pcm.len(), samples.len() * 2, "16-bit mono out");
+        for (i, s) in samples.iter().enumerate() {
+            let out = i16::from_le_bytes([pcm[i * 2], pcm[i * 2 + 1]]);
+            assert!((out - s).abs() <= 2, "sample {i}: {out} vs {s}");
+        }
+    }
+
+    #[test]
+    fn test_wav_sample_rate_parsing() {
+        let samples = [0i16; 16];
+        assert_eq!(wav_sample_rate(&tiny_wav(&samples, 24_000)), 24_000);
+        assert_eq!(wav_sample_rate(&tiny_wav(&samples, 44_100)), 44_100);
+        // Non-WAV garbage falls back to the documented 24 kHz default.
+        assert_eq!(wav_sample_rate(b"not a wav file at all......"), 24_000);
+        assert_eq!(wav_sample_rate(&[]), 24_000);
+    }
+
+    #[test]
+    fn test_fire_scaled_estimates_scales_to_duration() {
+        // 2 s of silence at 24 kHz. The 150-wpm estimator will produce
+        // events for the words; scaling must stretch them to the real
+        // duration, and every event is flagged estimated=true.
+        let pcm = vec![0u8; 2 * 24_000 * 2];
+        let mut events: Vec<(String, f32, f32, i32, i32, bool)> = Vec::new();
+        {
+            let mut cb: &mut dyn FnMut(&str, f32, f32, i32, i32, bool) = &mut |
+                word: &str,
+                start: f32,
+                end: f32,
+                offset: i32,
+                len: i32,
+                est: bool| {
+                events.push((word.to_string(), start, end, offset, len, est));
+            };
+            fire_scaled_estimates(&mut cb, "one two three four five six seven", &pcm, 24_000);
+        }
+        assert!(!events.is_empty(), "events fired");
+        let last_end = events.last().unwrap().2;
+        assert!(
+            (last_end - 2.0).abs() < 0.2,
+            "last end {last_end} scaled to ~2.0 s of audio"
+        );
+        assert!(events.iter().all(|e| e.5), "estimated flag set");
+        assert!(events.iter().all(|e| e.0.split(' ').count() == 1), "one word per event");
+    }
+
+    #[test]
+    fn test_fire_scaled_estimates_empty_pcm() {
+        // No audio: must not panic, must not fire.
+        let mut fired = 0;
+        let mut cb: &mut dyn FnMut(&str, f32, f32, i32, i32, bool) =
+            &mut |_w: &str, _s: f32, _e: f32, _o: i32, _l: i32, _est: bool| {
+                fired += 1;
+            };
+        fire_scaled_estimates(&mut cb, "some words here", &[], 24_000);
+        assert_eq!(fired, 0, "zero-length audio fires nothing (all at t=0)");
     }
 }

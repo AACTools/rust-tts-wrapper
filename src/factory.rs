@@ -174,6 +174,12 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
             ("edge", "Microsoft Edge (Read Aloud)", false, "[]"),
             ("google", "Google Cloud", true, r#"["apiKey"]"#),
             (
+                "gemini",
+                "Google Gemini (3.8 TTS)",
+                true,
+                r#"["apiKey","modelId","voice","style"]"#,
+            ),
+            (
                 "polly",
                 "Amazon Polly",
                 true,

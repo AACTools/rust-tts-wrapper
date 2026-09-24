@@ -76,18 +76,24 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
         // models read stray XML aloud).
         "elevenlabs" => Platform::ElevenLabs,
         "elevenlabs-v3" => Platform::ElevenLabsV3,
+        // Gemini 3.8 TTS is likewise a prompt dialect: angle-bracket
+        // vocal bursts/pauses and CAPS emphasis — no SSML document.
+        "gemini" => Platform::Gemini,
 
         // elements (e.g. whisper's <amazon:effect>) on its side — as
         // does everything else via the default.
         _ => Platform::AmazonAlexa,
     };
 
-    let is_elevenlabs_dialect = matches!(platform, Platform::ElevenLabs | Platform::ElevenLabsV3);
+    let is_prompt_dialect = matches!(
+        platform,
+        Platform::ElevenLabs | Platform::ElevenLabsV3 | Platform::Gemini
+    );
 
     match SpeechMarkdownParser::to_ssml(text, platform) {
-        // The ElevenLabs dialects are prompt text, not SSML: flag them so
-        // engines send the string as-is rather than treating it as SSML.
-        Ok(ssml) => (ssml, !is_elevenlabs_dialect),
+        // The prompt dialects are text, not SSML: flag them so engines
+        // send the string as-is rather than treating it as SSML.
+        Ok(ssml) => (ssml, !is_prompt_dialect),
         Err(_) => (text.to_string(), false),
     }
 }
