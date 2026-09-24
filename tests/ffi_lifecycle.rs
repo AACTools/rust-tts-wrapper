@@ -1,3 +1,5 @@
+#![cfg(feature = "cloud")]
+
 //! Full FFI lifecycle integration tests.
 //!
 //! Exercises the C ABI the way external bindings (Python, .NET, Swift) do:

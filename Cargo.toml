@@ -39,6 +39,26 @@ default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
 system = ["speech-dispatcher"]
 cloud = ["reqwest", "dep:serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "symphonia", "sha2"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
+# floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
+# SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
+# with measured word timings on duration-patched voices, a student-tier
+# sidecar (<voice>.student) for the rest, and proportional estimates as
+# the final fallback. floravox-g2p is already in the graph via
+# floravox-core's default features; the direct dep names MisakiG2p for
+# the engine's phonemizer. misaki/uroman ride in via floravox-core's
+# own defaults.
+floravox = [
+  "dep:floravox-core",
+  "dep:floravox-g2p",
+  "floravox-g2p/onnx",
+  "dep:serde_json",
+  "speechmarkdown",
+]
+# Lexicon + Phonetisaurus G2P chains for non-English phoneme voices, plus
+# the `lang` credential that auto-fetches published bundles
+# (gruut-derived lexicons + trained WFSTs, ~13 languages). Runtime fetch
+# only — the build itself stays offline.
+floravox-lexicons = ["floravox", "dep:voicegarden-lexicons"]
 tungstenite = ["dep:tungstenite"]
 uuid = ["dep:uuid"]
 url = ["dep:url"]
@@ -65,12 +85,21 @@ serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "=1.13.8", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
 sherpa-onnx-models = { version = "1.0.2", optional = true }
+# floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha, Kokoro)
+# with measured word timings. Default features (onnx, misaki, uroman)
+# are intentional: misaki is the only TokenPhonemizer available at this
+# dependency set, uroman powers the CharFrontend for MMS voices.
+floravox-core = { version = "=0.8.6", optional = true }
+# Exact pin: MisakiG2p implements a floravox-core trait — a drifted
+# patch pair breaks the build (same reasoning as sherpa-onnx-sys above).
+floravox-g2p = { version = "=0.8.6", optional = true, default-features = false }
+voicegarden-lexicons = { version = "0.3", optional = true }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=1.13.8", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.23", optional = true }
 speechmarkdown-rust = { version = "0.5.0", optional = true }
 anyhow = "1"
-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"], optional = true }
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 uuid = { version = "1.23.2", features = ["v4"], optional = true }
 url = { version = "2.5.8", optional = true }
 # MP3 → PCM16 decode so cloud engines deliver uniform PCM like the local ones.
@@ -79,10 +108,10 @@ url = { version = "2.5.8", optional = true }
 # "wav" + "pcm" decode the Gemini Interactions API's base64 audio/wav blocks.
 symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3", "wav", "pcm"] }
 # SHA-256 for the Edge (Read Aloud) Sec-MS-GEC auth token.
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 # Locale display names via ICU4X (compiled_data bundles the name table).
 icu_displaynames = { version = "0.11", optional = true, features = ["compiled_data"] }
-icu_locid = { version = "1.0.0-beta1", optional = true }
+icu_locid = { version = "1.4", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole"], optional = true }
@@ -97,7 +126,7 @@ speech-dispatcher = { version = "0.16", optional = true }
 cc = "1"
 
 [build-dependencies]
-cbindgen = "0.28"
+cbindgen = "0.29"
 
 [dev-dependencies]
 tempfile = "3"

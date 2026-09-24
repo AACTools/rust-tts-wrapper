@@ -1,3 +1,5 @@
+#![cfg(feature = "cloud")]
+
 //! Offline tests for the Gemini 3.8 TTS provider: the Interactions API
 //! request shape, the no-audio error path (safety refusals / in-band
 //! errors), and undecodable-audio handling.

@@ -1,3 +1,5 @@
+#![cfg(feature = "cloud")]
+
 //! Offline test for the `ElevenLabs` `/with-timestamps` degrade path: when
 //! the endpoint variant is rejected (a model that doesn't support it),
 //! `speak()` must retry the plain synthesis endpoint and deliver estimated

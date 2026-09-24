@@ -1,3 +1,5 @@
+#![cfg(feature = "sherpaonnx")]
+
 //! SherpaOnnx Model Tests
 //!
 //! Tests for SherpaOnnx model type dispatch, file layouts, and functionality.

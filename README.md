@@ -2,12 +2,15 @@
 
 Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
 
-## Engines (23 total)
+## Engines (25 total)
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
 | System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
+| AVSpeech (macOS) | Local | None | — (system plays) | — | Estimated | — |
+| SAPI (Windows) | Local | None | — (system plays) | — | Estimated (SAPI events) | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
+| floravox | Local (piper/MMS/Matcha/Kokoro ONNX — 1,100+ voices across ~1,100 languages) | Model dir | Streamed (per segment) | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
 | Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
@@ -262,6 +265,8 @@ cargo build --all-features
 - `sapi` — SAPI (Windows system TTS)
 - `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
 - `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
+- `floravox` — floravox offline TTS (piper/MMS/Matcha/Kokoro ONNX voices, ~1,100 languages; native SSML — `<break>`/`<prosody>`/`<mark>`/`<phoneme>`/`<sub>` — with three-tier word timings: measured on patched voices, student sidecar, proportional. See the [floravox Voices](#floravox-voices) section)
+- `floravox-lexicons` — adds the lexicon+Phonetisaurus G2P chain and the `lang` credential that auto-fetches published bundles (non-English phoneme voices)
 
 ### Lint & Test
 
@@ -376,6 +381,75 @@ The registry's enriched fields (`license`, `sha256`, `voice_names`,
 `min_sherpa_onnx_version`, `deprecated`, …) are currently ignored by
 `parse_model` but carried through for future opt-in — the sync is
 backwards-compatible.
+
+## floravox Voices
+
+[floravox](https://github.com/AACTools/floravox) (Apache-2.0 OR MIT, pure
+Rust, no Python, no GPL) is an offline synthesis engine over four ONNX
+voice families. Enable with `--features floravox`.
+
+| Family | Files on disk | Languages (typical) | Notes |
+|---|---|---|---|
+| piper VITS | `X.onnx` + `X.onnx.json` | ~30 (per-voice) | the original target |
+| MMS VITS | `X.onnx` + `tokens.txt` (+ `config.json`) | ~1,100 (per-voice, one language each) | the 1,138-voice patched collection ships on Hugging Face |
+| Matcha | acoustic `*.onnx` + `tokens.txt` + vocoder (`hifigan*`/`vocos*`) | per-voice | audio comes from the vocoder |
+| Kokoro | `model.onnx` + `tokens.txt` + `voices.bin` | en + zh (11 voices in en-v0.19) | multi-speaker via the `speaker` credential |
+
+### Word-timing tiers
+
+Every boundary carries an honest `estimated` flag saying which tier
+produced it — the engine never re-estimates or upgrades a tier:
+
+1. **Measured** (`estimated: false`) — duration-patched voices report
+   word timings from the model's own duration tensor, sample-accurate.
+   `<break>` lands at a real silence edge; `<mark>` fires at a measured
+   position.
+2. **Student** (`estimated: true`) — a sibling `<voice-stem>.student`
+   file engages the timing student automatically (~340 languages
+   trained; median error 59 ms against the teacher).
+3. **Proportional** (`estimated: true`) — 150-wpm estimate, same as the
+   other local engines.
+
+### SSML support
+
+`<break>`, `<prosody rate>`, `<mark>`, `<phoneme>`, `<sub>`, `<say-as>`
+are parsed locally by floravox-ssml with byte-exact spans. `<mark>`
+events surface through the `on_mark` callback **and** as zero-duration
+measured boundaries. SpeechMarkdown input expands through the standard
+pipeline into the SSML dialect floravox parses natively.
+
+### Credentials
+
+| Key | Meaning |
+|---|---|
+| `modelsDir` | voice directory (defaults to `~/.rust-tts-wrapper/floravox`); a voice is a directory or flat pair holding `X.onnx` (+ `.onnx.json` / `tokens.txt`) |
+| `modelId` | voice to load (bare stem, directory, or `.onnx` path); also selectable per call via `voice` |
+| `misaki` | `"us"` (default) / `"gb"` — English document pre-pass (heteronyms, numbers); `"off"` disables |
+| `chars` | character frontend for MMS-style voices: `"true"` lowercases through the voice's own table; any other value is an ISO 639-3 uroman code (e.g. `"hin"`) |
+| `speaker` | speaker id for multi-speaker voices (kokoro style slots, piper `sid`) |
+
+### G2P
+
+- **English**: misaki (the phonemizer Kokoro voices were trained with —
+  heteronyms and numbers come out right). Dialect `us`/`gb`.
+- **MMS voices (1,100+ languages)**: character frontend, auto-detected;
+  non-Latin scripts romanized with uroman.
+- **Non-English phoneme voices** (German/French/… piper): the
+  lexicon+Phonetisaurus chain, enabled by `--features floravox-lexicons`.
+  Point `lexicon` at a compiled lexicon stem (`stem.fst` + `stem.pho`,
+  gruut-derived bundles from
+  [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons)),
+  `phonetisaurus` at a WFST for unseen words, or just pass `lang`
+  (e.g. `"de"`) and the published bundle is fetched automatically.
+- **ByT5** (opt-in): set `byt5Encoder` + `byt5Decoder` to the
+  [byt5-g2p-multilingual](https://huggingface.co/willwade/byt5-g2p-multilingual-tiny)
+  ONNX pair (~18.5 MB int8) and unseen words in ~130 languages resolve
+  neurally instead of letter-spelling. Chain order: lexicon →
+  Phonetisaurus → ByT5 → letter spelling.
+
+wasm32 is planned but not yet available: ort-sys ships no wasm32
+binaries — the floravox web-demo plan bridges ORT to onnxruntime-web in
+a future `floravox-wasm` crate.
 
 ## License
 

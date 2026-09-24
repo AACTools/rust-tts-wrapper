@@ -1,3 +1,5 @@
+#![cfg(feature = "cloud")]
+
 //! ABI conformance suite.
 //!
 //! Symbol-level contract tests for the C ABI that every language binding

@@ -85,6 +85,22 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
                 return None;
             }
         }
+        "floravox" => {
+            #[cfg(feature = "floravox")]
+            {
+                return Some(Arc::new(crate::floravox_engine::FloravoxEngine::new(
+                    credentials_json,
+                )));
+            }
+            #[cfg(not(feature = "floravox"))]
+            {
+                eprintln!(
+                    "Engine 'floravox' is not enabled in this build. \
+                     Rebuild with --features floravox."
+                );
+                return None;
+            }
+        }
         _ => {}
     }
 
@@ -163,6 +179,14 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         name: "Sherpa-ONNX".into(),
         needs_credentials: false,
         credential_keys_json: "[]".into(),
+    });
+
+    #[cfg(feature = "floravox")]
+    engines.push(EngineDescriptor {
+        id: "floravox".into(),
+        name: "floravox".into(),
+        needs_credentials: true,
+        credential_keys_json: r#"["modelsDir","modelId","misaki","chars","speaker"]"#.into(),
     });
 
     #[cfg(feature = "cloud")]
