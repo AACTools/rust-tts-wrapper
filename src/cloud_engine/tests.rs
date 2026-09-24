@@ -1521,7 +1521,17 @@ mod tests {
         // literal in its assertion message, which would false-positive
         // a naive grep).
         let mut source = String::new();
-        for f in ["mod.rs", "engine.rs", "config.rs", "decode.rs", "ssml.rs", "google.rs", "gemini.rs", "elevenlabs.rs", "voices.rs"] {
+        for f in [
+            "mod.rs",
+            "engine.rs",
+            "config.rs",
+            "decode.rs",
+            "ssml.rs",
+            "google.rs",
+            "gemini.rs",
+            "elevenlabs.rs",
+            "voices.rs",
+        ] {
             source.push_str(
                 &std::fs::read_to_string(std::path::Path::new("src/cloud_engine").join(f))
                     .unwrap_or_default(),
