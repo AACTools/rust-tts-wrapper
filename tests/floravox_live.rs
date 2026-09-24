@@ -124,9 +124,9 @@ fn speechmarkdown_matches_ssml_expansion() {
 #[ignore = "needs FLORAVOX_TEST_VOICE + a sibling .student file"]
 fn student_sidecar_changes_timings() {
     // The student tier engages automatically when a `.student` file sits
-    // beside the voice. This test asserts the timings differ from the
-    // no-sidecar proportional run and that the estimates flag follows
-    // floravox's semantics (student tier is still an estimate tier).
+    // beside the voice. Asserts timings come back sane and ordered; the
+    // estimates flag follows floravox's own tier semantics (a student
+    // refinement is still an estimate tier, not a measurement).
     let Some(voice) = test_voice() else {
         eprintln!("FLORAVOX_TEST_VOICE not set — skipping");
         return;
@@ -138,14 +138,12 @@ fn student_sidecar_changes_timings() {
     assert!(!audio_student.is_empty());
     assert!(
         !boundaries_student.is_empty(),
-        "student tier reports boundaries: {boundaries_student:?}",
+        "student tier reports boundaries: {boundaries_student:?}"
     );
-    // If the student tier is engaged, floravox refines proportional
-    // estimates; the flag remains per its own tier semantics.
+    // Word offsets must be non-decreasing (timings ordered).
+    let offsets: Vec<u64> = boundaries_student.iter().map(|b| b.offset).collect();
     assert!(
-        boundaries_student
-            .iter()
-            .all(|b| b.offset <= b.offset + b.duration),
-        "offsets monotone with durations"
+        offsets.windows(2).all(|w| w[0] <= w[1]),
+        "offsets must be non-decreasing: {offsets:?}"
     );
 }

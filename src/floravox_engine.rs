@@ -330,7 +330,6 @@ impl FloravoxEngine {
     /// Shared pump: streams audio + events from a synthesis, feeding the
     /// callbacks. Returns collected `(pcm bytes, boundaries)`.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn pump(
         &self,
         stream: floravox_core::synth::StreamingSynthesis,
@@ -362,7 +361,12 @@ impl FloravoxEngine {
             // callbacks hold the last known offset with byte_len -1 (the
             // crate contract forbids a -1 *offset*).
             if let Some((name, s, e, _floravox_offset)) = &out.mark {
+                // find_next("") = hold-last, len -1, cursor untouched;
+                // clamp -1 (nothing matched yet) to the contract floor 0.
+                // find_next("") = hold-last, len -1, cursor untouched;
+                // clamp -1 (nothing matched yet) to the contract floor 0.
                 let (char_offset, char_len) = search.find_next("");
+                let char_offset = char_offset.max(0);
                 if let Some(cb) = on_mark.as_mut() {
                     cb(name, *s, *e, char_offset);
                 }
@@ -659,7 +663,16 @@ fn describe_voice(id: &str, onnx: &Path) -> Option<DiscoveredVoice> {
 /// (`"en-us"`), else the dataset prefix (`"en_US-lessac-low"`).
 fn bcp47_from(espeak_voice: &str, dataset: &str) -> (String, &'static str) {
     let raw = if espeak_voice.is_empty() {
-        dataset.split(['-', '_']).next().unwrap_or("").to_string()
+        // piper datasets look like "en_US-lessac-low" — language + region
+        // when the second token is a 2-letter code.
+        let parts: Vec<&str> = dataset.split(['-', '_']).collect();
+        match parts.as_slice() {
+            [lang, region, ..] if region.len() == 2 => {
+                format!("{lang}-{region}")
+            }
+            [lang, ..] => (*lang).to_string(),
+            _ => String::new(),
+        }
     } else {
         espeak_voice.to_string()
     };
@@ -721,13 +734,9 @@ struct MappedEvent {
 /// measured/estimated flag verbatim; marks are sample-accurate, so their
 /// boundary surrogate is always measured.
 fn map_event(ev: SynthesisEvent) -> MappedEvent {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss)]
     fn sec(ms: u64) -> f32 {
         ms as f32 / 1000.0
-    }
-    #[allow(clippy::cast_possible_truncation)]
-    fn i32n(v: i64) -> i32 {
-        v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
     }
 
     match ev {
@@ -740,19 +749,14 @@ fn map_event(ev: SynthesisEvent) -> MappedEvent {
             }),
             mark: None,
         },
-        SynthesisEvent::MarkReached {
-            name,
-            ms,
-            char_offset,
-            ..
-        } => MappedEvent {
+        SynthesisEvent::MarkReached { name, ms, .. } => MappedEvent {
             boundary: Some(WordBoundary {
                 text: name.clone(),
                 offset: ms,
                 duration: 0,
                 estimated: false,
             }),
-            mark: Some((name, sec(ms), sec(ms), i32n(char_offset))),
+            mark: Some((name, sec(ms), sec(ms), 0)),
         },
         _ => MappedEvent {
             boundary: None,
@@ -859,7 +863,7 @@ impl TtsEngine for FloravoxEngine {
             || !self
                 .model_id
                 .lock()
-                .map_err(|_| TtsError("model_id lock poisoned".into()))?
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .is_empty())
     }
 
@@ -869,7 +873,9 @@ impl TtsEngine for FloravoxEngine {
 
     /// floravox word timings by tier: measured (duration-patched voices),
     /// student sidecar, or proportional estimates — the `estimated` flag
-    /// on each boundary reports which tier produced it.
+    /// on each boundary reports which tier produced it. Audio/boundaries
+    /// already delivered before a `stop()` are returned as partial `Ok`
+    /// (truncation-on-stop; same semantics as the speak path).
     fn synth_with_boundaries(
         &self,
         text: &str,
@@ -1021,7 +1027,7 @@ mod tests {
             ("chapter", 2000, 0)
         );
         assert!(!b.estimated, "sample-accurate mark is measured");
-        assert_eq!(out.mark, Some(("chapter".into(), 2.0, 2.0, -1)));
+        assert_eq!(out.mark, Some(("chapter".into(), 2.0, 2.0, 0)));
     }
 
     #[test]
@@ -1110,6 +1116,252 @@ mod tests {
         let voices = scan_voices(base);
         assert_eq!(voices.len(), 1, "flat layout: {voices:?}");
         assert_eq!(voices[0].id, base.file_name().unwrap().to_string_lossy());
+    }
+
+    /// Build a StreamingSynthesis from hand-fed channels (no voice, no
+    /// ONNX) — lets pump's contract-critical paths run offline.
+    fn fixture_stream(
+        audio: Vec<floravox_core::synth::AudioChunk>,
+        events: Vec<SynthesisEvent>,
+        result: anyhow::Result<()>,
+    ) -> floravox_core::synth::StreamingSynthesis {
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        for chunk in audio {
+            audio_tx.send(chunk).unwrap();
+        }
+        for ev in events {
+            event_tx.send(ev).unwrap();
+        }
+        result_tx.send(result).unwrap();
+        drop(audio_tx);
+        drop(event_tx);
+        drop(result_tx);
+        floravox_core::synth::StreamingSynthesis {
+            audio: audio_rx,
+            events: event_rx,
+            result: result_rx,
+        }
+    }
+
+    fn word_event(
+        text: &str,
+        byte_offset: usize,
+        ms_start: u64,
+        ms_end: u64,
+        est: bool,
+    ) -> SynthesisEvent {
+        SynthesisEvent::WordBoundary(floravox_core::WordTiming {
+            text: text.into(),
+            byte_offset,
+            byte_len: text.len(),
+            char_offset: byte_offset,
+            char_len: text.chars().count(),
+            sample_start: ms_start * 24,
+            sample_end: ms_end * 24,
+            ms_start,
+            ms_end,
+            estimated: est,
+        })
+    }
+
+    #[test]
+    fn pump_remaps_words_onto_caller_text() {
+        // floravox's spans index the engine-facing SSML; the caller sent
+        // plain text. The engine-facing byte offsets (100, 200) are wrong
+        // for the caller — the WordSearch remap must win.
+        let engine = FloravoxEngine::new("{}");
+        let stream = fixture_stream(
+            vec![floravox_core::synth::AudioChunk {
+                samples: vec![0.0, 0.1],
+                first_sample: 0,
+                sample_rate: 24_000,
+            }],
+            vec![
+                word_event("Hello", 100, 0, 200, false),
+                word_event("world", 200, 300, 500, false),
+            ],
+            Ok(()),
+        );
+        let mut calls: Vec<(String, i32, i32, bool)> = Vec::new();
+        engine
+            .pump(
+                stream,
+                0,
+                "Hello world",
+                1.0,
+                Some(&mut |_: &[u8]| {}),
+                Some(&mut |w: &str, _s, _e, off, len, est| {
+                    calls.push((w.to_string(), off, len, est));
+                }),
+                None,
+                true,
+            )
+            .unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            (calls[0].0.as_str(), calls[0].1, calls[0].2),
+            ("Hello", 0, 5)
+        );
+        assert_eq!(
+            (calls[1].0.as_str(), calls[1].1, calls[1].2),
+            ("world", 6, 5)
+        );
+        assert!(!calls[0].3 && !calls[1].3);
+    }
+
+    #[test]
+    fn pump_worker_panic_is_an_error() {
+        let engine = FloravoxEngine::new("{}");
+        // Result sender dropped WITHOUT sending — worker died mid-run.
+        let (audio_tx, audio_rx) = std::sync::mpsc::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        drop(audio_tx);
+        drop(event_tx);
+        drop(result_tx);
+        let stream = floravox_core::synth::StreamingSynthesis {
+            audio: audio_rx,
+            events: event_rx,
+            result: result_rx,
+        };
+        let err = engine
+            .pump(stream, 0, "hi", 1.0, None, None, None, true)
+            .expect_err("dropped result must be an error");
+        assert!(err.0.contains("terminated without a result"), "{err:?}");
+    }
+
+    #[test]
+    fn pump_worker_error_is_surfaced() {
+        let engine = FloravoxEngine::new("{}");
+        let stream = fixture_stream(vec![], vec![], Err(anyhow::anyhow!("inference blew up")));
+        let err = engine
+            .pump(stream, 0, "hi", 1.0, None, None, None, true)
+            .expect_err("worker error must surface");
+        assert!(err.0.contains("inference blew up"), "{err:?}");
+    }
+
+    #[test]
+    fn pump_stale_generation_cancels_immediately() {
+        let engine = FloravoxEngine::new("{}");
+        let stream = fixture_stream(
+            vec![floravox_core::synth::AudioChunk {
+                samples: vec![0.0],
+                first_sample: 0,
+                sample_rate: 24_000,
+            }],
+            vec![word_event("Hello", 0, 0, 100, false)],
+            Ok(()),
+        );
+        // Generation 1 != the 0 this pump was given: a stop() landed
+        // during setup. Pump must return empty without firing anything.
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let audio_fired = std::sync::Arc::clone(&fired);
+        let boundary_fired = std::sync::Arc::clone(&fired);
+        let (bytes, boundaries) = engine
+            .pump(
+                stream,
+                1,
+                "Hello",
+                1.0,
+                Some(&mut |_: &[u8]| {
+                    audio_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+                Some(&mut |_w: &str, _s, _e, _o, _l, _e2| {
+                    boundary_fired.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+                None,
+                true,
+            )
+            .unwrap();
+        assert_eq!(fired.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!((bytes.len(), boundaries.len()), (0, 0));
+    }
+
+    #[test]
+    fn pump_mark_surfaces_on_both_callbacks_with_hold_last() {
+        let engine = FloravoxEngine::new("{}");
+        let events = vec![
+            word_event("Hello", 0, 0, 200, false),
+            SynthesisEvent::MarkReached {
+                name: "chapter".into(),
+                sample: 9600,
+                ms: 400,
+                char_offset: -1,
+            },
+        ];
+        let stream = fixture_stream(
+            vec![floravox_core::synth::AudioChunk {
+                samples: vec![0.0],
+                first_sample: 0,
+                sample_rate: 24_000,
+            }],
+            events,
+            Ok(()),
+        );
+        let mut marks: Vec<(String, f32, i32)> = Vec::new();
+        let mut bounds: Vec<(String, i32, i32, bool)> = Vec::new();
+        engine
+            .pump(
+                stream,
+                0,
+                "Hello chapter",
+                1.0,
+                Some(&mut |_: &[u8]| {}),
+                Some(&mut |w: &str, _s, _e, off, len, est| {
+                    bounds.push((w.to_string(), off, len, est));
+                }),
+                Some(&mut |name: &str, s, e, off| {
+                    marks.push((name.to_string(), s, off));
+                    let _ = e;
+                }),
+                true,
+            )
+            .unwrap();
+        assert_eq!(marks.len(), 1, "mark fired once on the mark callback");
+        assert_eq!(marks[0].0, "chapter");
+        assert_eq!(marks[0].2, 0, "hold-last offset clamped to contract floor");
+        // Mark surrogate boundary: zero-duration, measured.
+        let surrogate = bounds.iter().find(|b| b.0 == "chapter").unwrap();
+        assert_eq!((surrogate.1, surrogate.2, surrogate.3), (0, -1, false));
+    }
+
+    #[test]
+    fn resolve_model_candidate_ladder() {
+        let dir = tempfile::tempdir().unwrap();
+        let models = dir.path().join("voices");
+        std::fs::create_dir(&models).unwrap();
+        let voice_dir = models.join("en-lessac");
+        std::fs::create_dir(&voice_dir).unwrap();
+        std::fs::write(voice_dir.join("en-lessac.onnx"), b"x").unwrap();
+        let engine = FloravoxEngine::new(&format!(r#"{{"modelsDir": "{}"}}"#, models.display()));
+        // Bare stem -> the voice dir's single onnx.
+        assert_eq!(
+            engine.resolve_model(Some("en-lessac")).unwrap(),
+            voice_dir.join("en-lessac.onnx")
+        );
+        // Direct .onnx path.
+        assert_eq!(
+            engine
+                .resolve_model(Some(voice_dir.join("en-lessac.onnx").to_str().unwrap()))
+                .unwrap(),
+            voice_dir.join("en-lessac.onnx")
+        );
+        // Unknown -> error mentioning the search path.
+        let err = engine.resolve_model(Some("nope")).unwrap_err();
+        assert!(err.0.contains("not found"), "{err:?}");
+    }
+
+    #[test]
+    fn bcp47_region_from_dataset() {
+        // Region kept from the dataset's second token.
+        assert_eq!(bcp47_from("", "en_US-lessac-low").0, "en-US");
+        assert_eq!(bcp47_from("", "en_GB-northern-medium").0, "en-GB");
+        // espeak.voice wins when present.
+        assert_eq!(bcp47_from("de-de", "en_US-lessac-low").0, "de-DE");
+        // 3-letter region is not a region code.
+        assert_eq!(bcp47_from("", "hif_Foo-bar").0, "hif");
     }
 
     #[test]
