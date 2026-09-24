@@ -46,7 +46,8 @@ typedef void (*CAudioCb)(const uint8_t*, uintptr_t, void*);
  * byte length — pair them to slice the text safely. An unlocatable
  * word holds the last known offset (0 if nothing matched) with
  * byte_len -1. `estimated` is 1 when the timings are proportional
- * duration tensor, cloud provider timings). Exceptions: the Windows
+ * estimates (unpatched voice, wpm model), 0 when measured (cloud
+ * provider timings). Exceptions: the Windows
  * SAPI native-boundary path reports UTF-16 code-unit offsets/lengths
  * (the units ISpVoice events provide), and the Azure/Edge WebSocket
  * path passes Azure's own text.Offset/text.Length through unchanged

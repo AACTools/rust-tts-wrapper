@@ -19,7 +19,7 @@ fn main() {
                 the timeline tells you exactly which word is speaking.";
 
     // 1. Word boundaries. Real ones come from `synth_with_boundaries`
-    //    (cloud engines / disabled) or the speak() boundary callback;
+    //    (cloud engines) or the speak() boundary callback;
     //    the estimator stands in here so the demo needs no engine.
     let boundaries = estimate_word_boundaries(text);
     println!(

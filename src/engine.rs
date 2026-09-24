@@ -14,7 +14,7 @@ pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
 /// punctuation artifact), the callback receives the last known offset
 /// held (0 if nothing matched yet) with `byte_len` -1 — not a -1 offset.
 /// `estimated` is true for proportional estimates (unpatched voices,
-/// duration tensor, cloud provider timings).
+/// wpm model), false for measured timings (cloud provider timings).
 pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32, i32, i32, bool);
 
 /// Callback for SSML mark/bookmark events.
@@ -77,8 +77,7 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
         "elevenlabs" => Platform::ElevenLabs,
         "elevenlabs-v3" => Platform::ElevenLabsV3,
 
-        // elements (e.g. whisper's <amazon:effect>) on its side — as
-        // does everything else via the default.
+        // Everything else falls back to the Alexa-baseline SSML dialect.
         _ => Platform::AmazonAlexa,
     };
 

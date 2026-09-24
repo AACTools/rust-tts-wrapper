@@ -241,7 +241,8 @@ pub struct WordBoundary {
     /// Duration of the word in milliseconds.
     pub duration: u64,
     /// True when the timings are proportional estimates (unpatched
-    /// duration tensor, cloud provider timings that track the audio).
+    /// voices, sherpa-onnx's 150-wpm model); false when measured (cloud
+    /// provider timings that track the audio).
     pub estimated: bool,
 }
 
@@ -265,8 +266,8 @@ pub struct SherpaModelInfo {
     pub id: String,
     /// Model type (e.g. `"kokoro"`, `"vits"`).
     pub model_type: String,
-    /// matcha/kokoro graphs — SSML, measured word timings) or
-    /// `"sherpa-onnx"` (audio-LM families).
+    /// Engine that drives this family (always `"sherpa-onnx"` since the
+    /// floravox engine moved to its own project).
     pub engines: String,
     /// Human-readable model name.
     pub name: String,
