@@ -1,5 +1,3 @@
-use super::*;
-
 /// Pick the SpeechMarkdown platform selector for a provider/model pair.
 ///
 /// Most providers map to `provider` unchanged (the caller's provider id is

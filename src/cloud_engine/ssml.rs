@@ -1,5 +1,3 @@
-use super::*;
-
 /// Base64 encode for auth tokens.
 pub(crate) fn base64_encode(data: &str) -> String {
     use base64::Engine;
