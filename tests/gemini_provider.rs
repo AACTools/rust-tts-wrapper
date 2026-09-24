@@ -48,7 +48,7 @@ fn interaction_json_with_audio(wav_b64: &str) -> String {
 /// Serve exactly one request from a background thread, responding with a
 /// JSON body whose Content-Length the HTTP client can honor. Returns the
 /// local port.
-fn spawn_mock(body: String) -> (u16, std::thread::JoinHandle<String>) {
+fn spawn_mock(body: String) -> (u16, std::thread::JoinHandle<MockRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
     let handle = std::thread::spawn(move || {
@@ -64,10 +64,16 @@ fn spawn_mock(body: String) -> (u16, std::thread::JoinHandle<String>) {
     (port, handle)
 }
 
-/// Read one HTTP request (headers + Content-Length body), return the
-/// request line plus body text. The buffer grows on demand — a large
-/// request body must not panic the mock.
-fn drain_request(stream: &mut TcpStream) -> String {
+/// One captured HTTP request: request line, headers, body text.
+struct MockRequest {
+    request_line: String,
+    headers: String,
+    body: String,
+}
+
+/// Read one HTTP request (headers + Content-Length body). The buffer
+/// grows on demand — a large request body must not panic the mock.
+fn drain_request(stream: &mut TcpStream) -> MockRequest {
     let mut buf: Vec<u8> = vec![0u8; 65_536];
     let mut read = 0usize;
     let header_end = loop {
@@ -102,8 +108,13 @@ fn drain_request(stream: &mut TcpStream) -> String {
         received += n;
     }
     let request_line = headers.lines().next().unwrap_or("").to_string();
-    let body = String::from_utf8_lossy(&buf[header_end + 4..header_end + 4 + content_length]);
-    format!("{request_line}\n{body}")
+    let body = String::from_utf8_lossy(&buf[header_end + 4..header_end + 4 + content_length])
+        .to_string();
+    MockRequest {
+        request_line,
+        headers,
+        body,
+    }
 }
 
 fn gemini_engine(synth_url: &str) -> std::sync::Arc<dyn rust_tts_wrapper::engine::TtsEngine> {
@@ -153,7 +164,7 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
 
     // Request contract: model, turn structure, speech_config voice,
     // response_format audio.
-    let body_line = request.lines().nth(1).unwrap_or("");
+    let body_line = request.body.lines().next().unwrap_or("");
     let json: serde_json::Value = serde_json::from_str(body_line).expect("valid JSON body");
     assert_eq!(json["model"], "gemini-3.8-flash-tts");
     assert_eq!(json["response_format"]["type"], "audio");
@@ -163,8 +174,13 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
         json["input"][0]["content"][0]["text"],
         "Plain text, no markdown."
     );
-    // Auth header present.
-    assert!(request.lines().next().unwrap_or("").starts_with("POST"));
+    // Request line and auth header present.
+    assert!(request.request_line.starts_with("POST"));
+    assert!(
+        request.headers.to_ascii_lowercase().contains("x-goog-api-key: test-key"),
+        "auth header on the wire: {}",
+        request.headers
+    );
 }
 
 #[test]
@@ -234,7 +250,7 @@ fn gemini_style_credential_reaches_the_wire() {
         .expect("speak");
     let request = handle.join().expect("mock thread");
     let json: serde_json::Value =
-        serde_json::from_str(request.lines().nth(1).unwrap_or("{}")).expect("valid JSON");
+        serde_json::from_str(request.body.lines().next().unwrap_or("{}")).expect("valid JSON");
     // Credential style wins over the rate-derived style.
     let style = json["input"][0]["content"][0]["annotations"][0]["style"]
         .as_str()
@@ -276,7 +292,7 @@ fn gemini_modelid_credential_reaches_the_wire() {
         .expect("speak");
     let request = handle.join().expect("mock thread");
     let json: serde_json::Value =
-        serde_json::from_str(request.lines().nth(1).unwrap_or("{}")).expect("valid JSON");
+        serde_json::from_str(request.body.lines().next().unwrap_or("{}")).expect("valid JSON");
     assert_eq!(json["model"], "gemini-3.8-flash-lite-tts");
 }
 
@@ -304,7 +320,7 @@ fn gemini_speechmarkdown_routed_through_dialect() {
         )
         .expect("speak");
     let request = handle.join().expect("mock thread");
-    let body_line = request.lines().nth(1).unwrap_or("");
+    let body_line = request.body.lines().next().unwrap_or("");
     let json: serde_json::Value = serde_json::from_str(body_line).expect("valid JSON body");
     let text = json["input"][0]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("<short pause>"), "dialect on the wire: {text}");
