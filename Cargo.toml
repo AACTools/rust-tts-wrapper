@@ -111,11 +111,3 @@ strip = true
 all = "warn"
 pedantic = "warn"
 cargo = "warn"
-
-# DEV OVERRIDE — replace with `version = "0.5.0"` on the dependency line
-# once speechmarkdown-rust 0.5.0 (Gemini platform) is published to
-# crates.io, then REMOVE this section before publishing this crate: a
-# [patch] only applies inside this repo, so a crates.io release must not
-# depend on it. rev-pinned (not branch) so builds are reproducible.
-[patch.crates-io]
-speechmarkdown-rust = { git = "https://github.com/AACTools/speechmarkdown-rust", rev = "92c56b1" }
