@@ -902,9 +902,7 @@ fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig
                 auth_prefix: String::new(),
                 model_default: Some(model),
                 default_voice: Some(voice),
-                voices_url: Some(
-                    "https://generativelanguage.googleapis.com/v1beta/voices".into(),
-                ),
+                voices_url: Some("https://generativelanguage.googleapis.com/v1beta/voices".into()),
                 provider_id: "gemini".into(),
                 ..Default::default()
             })
@@ -1515,8 +1513,10 @@ fn build_gemini_request(
     model: Option<&str>,
     style_override: Option<&str>,
 ) -> serde_json::Value {
-    let style = style_override
-        .map_or_else(|| gemini_style_from_params(rate, pitch, volume), str::to_string);
+    let style = style_override.map_or_else(
+        || gemini_style_from_params(rate, pitch, volume),
+        str::to_string,
+    );
 
     let mut content = serde_json::json!({ "type": "text", "text": text });
     if !style.is_empty() {
@@ -1584,10 +1584,7 @@ fn parse_gemini_interaction_audio(json: &serde_json::Value) -> GeminiAudioBlock 
 /// rate field is zero or implausible, which would otherwise divide the
 /// boundary scaler by zero.
 fn wav_sample_rate(wav: &[u8]) -> u32 {
-    if wav.len() > 28
-        && &wav[0..4] == b"RIFF"
-        && &wav[8..12] == b"WAVE"
-        && &wav[12..16] == b"fmt "
+    if wav.len() > 28 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" && &wav[12..16] == b"fmt "
     {
         let rate = u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
         if (8_000..=192_000).contains(&rate) {
@@ -2213,8 +2210,9 @@ impl TtsEngine for CloudEngine {
         // fragments) must not leak into boundary words or offset
         // mapping; search the plain spoken text instead.
         let plain_spoken;
-        let boundary_search_text: &str =
-            if is_ssml && (self.config.provider_id == "elevenlabs" || self.config.provider_id == "gemini") {
+        let boundary_search_text: &str = if is_ssml
+            && (self.config.provider_id == "elevenlabs" || self.config.provider_id == "gemini")
+        {
             plain_spoken = crate::engine::strip_ssml_to_text(&original_text);
             plain_spoken.as_str()
         } else if is_ssml {
@@ -2864,7 +2862,8 @@ impl TtsEngine for CloudEngine {
                     )));
                 }
             }
-        } else if self.config.provider_id == "google" && (on_boundary.is_some() || on_audio.is_some())
+        } else if self.config.provider_id == "google"
+            && (on_boundary.is_some() || on_audio.is_some())
         {
             // Google returns base64-encoded audio in JSON
             let resp_text = resp
@@ -5501,10 +5500,7 @@ mod tests {
         // <voice> has no ElevenLabs equivalent (parity with the old
         // strip path): the modifier is dropped, the text survives.
         let voiced = r#"<speak><voice name="Aria">hi</voice></speak>"#;
-        assert_eq!(
-            ssml_to_dialect(voiced, "elevenlabs-v3").unwrap(),
-            "hi"
-        );
+        assert_eq!(ssml_to_dialect(voiced, "elevenlabs-v3").unwrap(), "hi");
     }
 
     #[test]
@@ -5624,7 +5620,10 @@ mod tests {
         creds.insert("modelId".into(), "gemini-3.8-flash-lite-tts".into());
         creds.insert("voice".into(), "Puck".into());
         let cfg = build_config("gemini", &creds).unwrap();
-        assert_eq!(cfg.model_default.as_deref(), Some("gemini-3.8-flash-lite-tts"));
+        assert_eq!(
+            cfg.model_default.as_deref(),
+            Some("gemini-3.8-flash-lite-tts")
+        );
         assert_eq!(cfg.default_voice.as_deref(), Some("Puck"));
     }
 
@@ -5641,7 +5640,10 @@ mod tests {
         );
         assert_eq!(body["model"], "gemini-3.8-flash-tts");
         assert_eq!(body["response_format"]["type"], "audio");
-        assert_eq!(body["generation_config"]["speech_config"][0]["voice"], "Kore");
+        assert_eq!(
+            body["generation_config"]["speech_config"][0]["voice"],
+            "Kore"
+        );
         let content = &body["input"][0]["content"][0];
         assert_eq!(content["type"], "text");
         assert_eq!(content["text"], "Have a wonderful day!");
@@ -5789,10 +5791,8 @@ mod tests {
     fn test_speechmarkdown_gemini_dialect_routing() {
         // The gemini provider must route SpeechMarkdown through the
         // Gemini dialect (angle-bracket tags), NOT SSML.
-        let (out, is_ssml) = preprocess_speech_markdown(
-            "Wait [500ms] then [laugh] loudly",
-            "gemini",
-        );
+        let (out, is_ssml) =
+            preprocess_speech_markdown("Wait [500ms] then [laugh] loudly", "gemini");
         assert!(!is_ssml, "gemini dialect is prompt text, not SSML");
         assert!(out.contains("<short pause>"), "out: {out}");
         assert!(out.contains("<laugh>"), "out: {out}");
@@ -5896,10 +5896,10 @@ mod tests {
         let pcm = vec![0u8; 2 * 24_000 * 2];
         let mut events: Vec<BoundaryEvent> = Vec::new();
         {
-            let mut cb: crate::engine::OnBoundaryCallback<'_> = &mut |
-                word: &str, start: f32, end: f32, offset: i32, len: i32, est: bool| {
-                events.push((word.to_string(), start, end, offset, len, est));
-            };
+            let mut cb: crate::engine::OnBoundaryCallback<'_> =
+                &mut |word: &str, start: f32, end: f32, offset: i32, len: i32, est: bool| {
+                    events.push((word.to_string(), start, end, offset, len, est));
+                };
             fire_scaled_estimates(&mut cb, "one two three four five six seven", &pcm, 24_000);
         }
         assert!(!events.is_empty(), "events fired");
@@ -5909,7 +5909,10 @@ mod tests {
             "last end {last_end} scaled to ~2.0 s of audio"
         );
         assert!(events.iter().all(|e| e.5), "estimated flag set");
-        assert!(events.iter().all(|e| e.0.split(' ').count() == 1), "one word per event");
+        assert!(
+            events.iter().all(|e| e.0.split(' ').count() == 1),
+            "one word per event"
+        );
     }
 
     #[test]

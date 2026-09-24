@@ -80,15 +80,10 @@ fn drain_request(stream: &mut TcpStream) -> MockRequest {
         if read == buf.len() {
             buf.resize(buf.len() * 2, 0);
         }
-        let n = stream
-            .read(&mut buf[read..])
-            .expect("read request");
+        let n = stream.read(&mut buf[read..]).expect("read request");
         assert!(n > 0, "client closed early");
         read += n;
-        if let Some(pos) = buf[..read]
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-        {
+        if let Some(pos) = buf[..read].windows(4).position(|w| w == b"\r\n\r\n") {
             break pos;
         }
     };
@@ -108,8 +103,8 @@ fn drain_request(stream: &mut TcpStream) -> MockRequest {
         received += n;
     }
     let request_line = headers.lines().next().unwrap_or("").to_string();
-    let body = String::from_utf8_lossy(&buf[header_end + 4..header_end + 4 + content_length])
-        .to_string();
+    let body =
+        String::from_utf8_lossy(&buf[header_end + 4..header_end + 4 + content_length]).to_string();
     MockRequest {
         request_line,
         headers,
@@ -124,11 +119,7 @@ fn gemini_engine(synth_url: &str) -> std::sync::Arc<dyn rust_tts_wrapper::engine
     ]
     .into_iter()
     .collect();
-    create_engine(
-        "gemini",
-        &serde_json::to_string(&creds).unwrap(),
-    )
-    .expect("gemini engine")
+    create_engine("gemini", &serde_json::to_string(&creds).unwrap()).expect("gemini engine")
 }
 
 #[test]
@@ -151,9 +142,11 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
             0.0,
             0.0,
             Some(&mut |chunk: &[u8]| audio_bytes += chunk.len()),
-            Some(&mut |_w: &str, _s: f32, _e: f32, _o: i32, _l: i32, _est: bool| {
-                boundaries += 1;
-            }),
+            Some(
+                &mut |_w: &str, _s: f32, _e: f32, _o: i32, _l: i32, _est: bool| {
+                    boundaries += 1;
+                },
+            ),
             None,
         )
         .expect("speak must succeed");
@@ -168,7 +161,10 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
     let json: serde_json::Value = serde_json::from_str(body_line).expect("valid JSON body");
     assert_eq!(json["model"], "gemini-3.8-flash-tts");
     assert_eq!(json["response_format"]["type"], "audio");
-    assert_eq!(json["generation_config"]["speech_config"][0]["voice"], "Kore");
+    assert_eq!(
+        json["generation_config"]["speech_config"][0]["voice"],
+        "Kore"
+    );
     assert_eq!(json["input"][0]["type"], "user_input");
     assert_eq!(
         json["input"][0]["content"][0]["text"],
@@ -177,7 +173,10 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
     // Request line and auth header present.
     assert!(request.request_line.starts_with("POST"));
     assert!(
-        request.headers.to_ascii_lowercase().contains("x-goog-api-key: test-key"),
+        request
+            .headers
+            .to_ascii_lowercase()
+            .contains("x-goog-api-key: test-key"),
         "auth header on the wire: {}",
         request.headers
     );
@@ -186,8 +185,8 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
 #[test]
 fn gemini_no_audio_block_is_an_error_with_detail() {
     // In-band error payload: the API's message must reach the error text.
-    let body = r#"{"error":{"code":400,"message":"The prompt was filtered"},"steps":[]}"#
-        .to_string();
+    let body =
+        r#"{"error":{"code":400,"message":"The prompt was filtered"},"steps":[]}"#.to_string();
     let (port, handle) = spawn_mock(body);
     let engine = gemini_engine(&format!("http://127.0.0.1:{port}/interactions"));
     let result = engine.speak("Hello", None, 0.0, 0.0, 0.0, None, None, None);
@@ -239,7 +238,10 @@ fn gemini_style_credential_reaches_the_wire() {
 
     let creds: std::collections::HashMap<String, String> = [
         ("apiKey".to_string(), "test-key".to_string()),
-        ("synthUrl".to_string(), format!("http://127.0.0.1:{port}/interactions")),
+        (
+            "synthUrl".to_string(),
+            format!("http://127.0.0.1:{port}/interactions"),
+        ),
         ("style".to_string(), "whispered urgently".to_string()),
     ]
     .into_iter()
@@ -281,8 +283,14 @@ fn gemini_modelid_credential_reaches_the_wire() {
     // flash-lite (or any other model) — it must reach the wire.
     let creds: std::collections::HashMap<String, String> = [
         ("apiKey".to_string(), "test-key".to_string()),
-        ("synthUrl".to_string(), format!("http://127.0.0.1:{port}/interactions")),
-        ("modelId".to_string(), "gemini-3.8-flash-lite-tts".to_string()),
+        (
+            "synthUrl".to_string(),
+            format!("http://127.0.0.1:{port}/interactions"),
+        ),
+        (
+            "modelId".to_string(),
+            "gemini-3.8-flash-lite-tts".to_string(),
+        ),
     ]
     .into_iter()
     .collect();
@@ -323,8 +331,14 @@ fn gemini_speechmarkdown_routed_through_dialect() {
     let body_line = request.body.lines().next().unwrap_or("");
     let json: serde_json::Value = serde_json::from_str(body_line).expect("valid JSON body");
     let text = json["input"][0]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("<short pause>"), "dialect on the wire: {text}");
+    assert!(
+        text.contains("<short pause>"),
+        "dialect on the wire: {text}"
+    );
     assert!(text.contains("<laugh>"), "dialect on the wire: {text}");
     assert!(!text.contains("[500ms]"), "no SMD brackets: {text}");
-    assert_eq!(json["generation_config"]["speech_config"][0]["voice"], "Puck");
+    assert_eq!(
+        json["generation_config"]["speech_config"][0]["voice"],
+        "Puck"
+    );
 }

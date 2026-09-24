@@ -5,11 +5,9 @@ fn main() {
     let key = std::env::var("GEMINI_API_KEY").expect("set GEMINI_API_KEY");
     let creds: std::collections::HashMap<String, String> =
         [("apiKey".to_string(), key)].into_iter().collect();
-    let engine = rust_tts_wrapper::factory::create_engine(
-        "gemini",
-        &serde_json::to_string(&creds).unwrap(),
-    )
-    .expect("gemini engine");
+    let engine =
+        rust_tts_wrapper::factory::create_engine("gemini", &serde_json::to_string(&creds).unwrap())
+            .expect("gemini engine");
 
     // 1. Voices
     let voices = engine.get_voices().unwrap();
@@ -34,9 +32,11 @@ fn main() {
             0.0,
             0.0,
             Some(&mut |chunk: &[u8]| audio_bytes += chunk.len()),
-            Some(&mut |word: &str, start: f32, end: f32, offset: i32, len: i32, _est: bool| {
-                boundaries.push((word.to_string(), start, end, offset, len));
-            }),
+            Some(
+                &mut |word: &str, start: f32, end: f32, offset: i32, len: i32, _est: bool| {
+                    boundaries.push((word.to_string(), start, end, offset, len));
+                },
+            ),
             None,
         )
         .expect("speak");
