@@ -266,6 +266,7 @@ cargo build --all-features
 - `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
 - `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
 - `floravox` — floravox offline TTS (piper/MMS/Matcha/Kokoro ONNX voices, ~1,100 languages; native SSML — `<break>`/`<prosody>`/`<mark>`/`<phoneme>`/`<sub>` — with three-tier word timings: measured on patched voices, student sidecar, proportional. See the [floravox Voices](#floravox-voices) section)
+- `floravox-lexicons` — adds the lexicon+Phonetisaurus G2P chain and the `lang` credential that auto-fetches published bundles (non-English phoneme voices)
 
 ### Lint & Test
 
@@ -427,11 +428,24 @@ pipeline into the SSML dialect floravox parses natively.
 | `chars` | character frontend for MMS-style voices: `"true"` lowercases through the voice's own table; any other value is an ISO 639-3 uroman code (e.g. `"hin"`) |
 | `speaker` | speaker id for multi-speaker voices (kokoro style slots, piper `sid`) |
 
-G2P: English runs through misaki (the phonemizer Kokoro voices were
-trained with — heteronyms and numbers come out right). MMS-style
-character-table voices are auto-detected and use the character frontend;
-lexicon/Phonetisaurus/ByT5 chains are out of scope for this engine (the
-CLI in the floravox repo supports them).
+### G2P
+
+- **English**: misaki (the phonemizer Kokoro voices were trained with —
+  heteronyms and numbers come out right). Dialect `us`/`gb`.
+- **MMS voices (1,100+ languages)**: character frontend, auto-detected;
+  non-Latin scripts romanized with uroman.
+- **Non-English phoneme voices** (German/French/… piper): the
+  lexicon+Phonetisaurus chain, enabled by `--features floravox-lexicons`.
+  Point `lexicon` at a compiled lexicon stem (`stem.fst` + `stem.pho`,
+  gruut-derived bundles from
+  [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons)),
+  `phonetisaurus` at a WFST for unseen words, or just pass `lang`
+  (e.g. `"de"`) and the published bundle is fetched automatically.
+- **ByT5** (opt-in): set `byt5Encoder` + `byt5Decoder` to the
+  [byt5-g2p-multilingual](https://huggingface.co/willwade/byt5-g2p-multilingual-tiny)
+  ONNX pair (~18.5 MB int8) and unseen words in ~130 languages resolve
+  neurally instead of letter-spelling. Chain order: lexicon →
+  Phonetisaurus → ByT5 → letter spelling.
 
 wasm32 is planned but not yet available: ort-sys ships no wasm32
 binaries — the floravox web-demo plan bridges ORT to onnxruntime-web in

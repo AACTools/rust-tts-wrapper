@@ -20,8 +20,11 @@
 //! G2P: misaki (the Kokoro phonemizer, a floravox-core default feature)
 //! runs as the document pre-pass for phoneme voices; MMS-style
 //! character-table voices (auto-detected, or forced via the `chars`
-//! credential) use the CharFrontend instead. Lexicon/Phonetisaurus/ByT5
-//! chains are intentionally out of scope for this engine.
+//! credential) use the CharFrontend instead. Non-English phoneme voices
+//! route through the lexicon+Phonetisaurus chain (`lexicon`/
+//! `phonetisaurus` credentials, or `lang` with the `floravox-lexicons`
+//! feature), with ByT5 as an opt-in neural OOV tier
+//! (`byt5Encoder`/`byt5Decoder`, default off).
 //!
 //! Audio is delivered as 16-bit little-endian mono PCM chunks, the same
 //! shape as the sherpa-onnx engine. `pitch` is ignored (VITS-family
@@ -44,7 +47,9 @@ use crate::engine::TtsEngine;
 use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use floravox_core::synth::{CharFrontend, MisakiPrePass, StreamingSynthesis, Synthesizer};
 use floravox_core::{SynthesisEvent, VoiceBackend};
-use floravox_g2p::MisakiG2p;
+use floravox_g2p::{
+    CachedPhonemizer, LexiconPhonemizer, MisakiG2p, OovFallback, RuleFallback, TokenPhonemizer,
+};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -57,8 +62,11 @@ use std::time::Duration;
 const POLL: Duration = Duration::from_millis(25);
 
 /// Soft cap on cached synthesizers (each holds a live ONNX session —
-/// tens of MB). Exceeding it clears the cache.
+/// tens of MB). Exceeding it evicts one arbitrary cached voice.
 const SYNTH_CACHE_CAP: usize = 8;
+
+/// One cached synthesizer per resolved voice + G2P configuration.
+type SynthCache = HashMap<String, Arc<Synthesizer<Box<dyn TokenPhonemizer + Send>>>>;
 
 /// Engine configuration from credentials JSON.
 #[derive(Debug, Default)]
@@ -77,6 +85,19 @@ struct Config {
     /// Speaker id for multi-speaker voices (kokoro style slots, piper
     /// `sid`); single-speaker voices ignore it.
     speaker: Option<i64>,
+    /// Compiled lexicon stem (`stem.fst` + `stem.pho`) — anchors the
+    /// lexicon+Phonetisaurus G2P chain for non-English phoneme voices.
+    lexicon: Option<PathBuf>,
+    /// Phonetisaurus WFST model path (OOV pronunciations for the chain).
+    phonetisaurus: Option<PathBuf>,
+    /// Language code; with the `floravox-lexicons` feature, fetches the
+    /// published bundle (lexicon + trained WFST) for the language.
+    lang: Option<String>,
+    /// ByT5 ONNX encoder path — neural OOV fallback, ~130 languages
+    /// (opt-in: absent by default, which disables ByT5).
+    byt5_encoder: Option<PathBuf>,
+    /// ByT5 ONNX decoder path (required together with `byt5Encoder`).
+    byt5_decoder: Option<PathBuf>,
 }
 
 impl Config {
@@ -104,6 +125,14 @@ impl Config {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
             speaker: v.get("speaker").and_then(serde_json::Value::as_i64),
+            lexicon: get("lexicon"),
+            phonetisaurus: get("phonetisaurus"),
+            lang: v
+                .get("lang")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            byt5_encoder: get("byt5Encoder"),
+            byt5_decoder: get("byt5Decoder"),
         }
     }
 }
@@ -138,6 +167,14 @@ pub struct FloravoxEngine {
     chars_romanize: Option<&'static str>,
     /// Speaker id applied to multi-speaker voices.
     speaker: i64,
+    /// Explicit lexicon stem / Phonetisaurus model (chain G2P).
+    lexicon: Option<PathBuf>,
+    phonetisaurus: Option<PathBuf>,
+    /// Language code for bundle resolution (floravox-lexicons feature).
+    lang: Option<String>,
+    /// ByT5 ONNX pair (opt-in neural OOV). `None` = disabled.
+    byt5_encoder: Option<PathBuf>,
+    byt5_decoder: Option<PathBuf>,
     /// Bumped by `stop()`; each pump captures the counter when it starts
     /// consuming and cancels itself the moment the counter differs. A
     /// generation counter (rather than a reset flag) means `stop()` can
@@ -148,9 +185,9 @@ pub struct FloravoxEngine {
     /// Cached synthesizers keyed by the voice + phonemizer options they
     /// were built with (rebuilding reloads the ONNX session — seconds —
     /// so per-voice caching matters). Soft-capped: exceeding
-    /// [`SYNTH_CACHE_CAP`] entries clears the map, trading reloads for
-    /// bounded memory (each entry holds a live ONNX session).
-    synth: Mutex<HashMap<String, Arc<Synthesizer<MisakiG2p>>>>,
+    /// [`SYNTH_CACHE_CAP`] entries evicts one arbitrary entry, trading
+    /// reloads for bounded memory (each entry holds a live ONNX session).
+    synth: Mutex<SynthCache>,
 }
 
 impl fmt::Debug for FloravoxEngine {
@@ -187,8 +224,25 @@ impl FloravoxEngine {
     ///   voices.
     /// - `speaker`: speaker id for multi-speaker voices (kokoro style
     ///   slots, piper `sid`).
+    /// - `lexicon`: compiled lexicon stem (`stem.fst` + `stem.pho`) —
+    ///   switches G2P to the lexicon+Phonetisaurus chain for non-English
+    ///   phoneme voices (German, French, … piper voices).
+    /// - `phonetisaurus`: Phonetisaurus WFST model — pronounces
+    ///   out-of-lexicon words (usable alone if the WFST is a full G2P;
+    ///   typically paired with `lexicon`).
+    /// - `lang`: language code; with the `floravox-lexicons` feature,
+    ///   fetches the published bundle (lexicon + trained WFST) for that
+    ///   language when `lexicon`/`phonetisaurus` are not set.
+    /// - `byt5Encoder` / `byt5Decoder`: ByT5 ONNX pair for neural OOV
+    ///   (~130 languages). Opt-in — absent by default, which disables
+    ///   the tier.
+    #[must_use]
     pub fn new(credentials_json: &str) -> Self {
-        let cfg = Config::parse(credentials_json);
+        Self::from_parsed(Config::parse(credentials_json))
+    }
+
+    /// Constructor from an already-parsed config (test seam).
+    fn from_parsed(cfg: Config) -> Self {
         Self {
             models_dir: cfg.models_dir.unwrap_or_else(default_models_dir),
             model_id: Mutex::new(cfg.model_id.unwrap_or_default()),
@@ -210,6 +264,11 @@ impl FloravoxEngine {
                 code => Box::leak(code.to_string().into_boxed_str()),
             }),
             speaker: cfg.speaker.unwrap_or(0).max(0),
+            lexicon: cfg.lexicon,
+            phonetisaurus: cfg.phonetisaurus,
+            lang: cfg.lang,
+            byt5_encoder: cfg.byt5_encoder,
+            byt5_decoder: cfg.byt5_decoder,
             stop_generation: std::sync::atomic::AtomicU64::new(0),
             synth: Mutex::new(HashMap::new()),
         }
@@ -259,15 +318,150 @@ impl FloravoxEngine {
         )))
     }
 
+    /// Does this engine route G2P through the lexicon chain (rather than
+    /// misaki)? Exposed for tests.
+    #[must_use]
+    fn using_chain(&self) -> bool {
+        self.lexicon.is_some()
+            || self.phonetisaurus.is_some()
+            || (self.byt5_encoder.is_some() && self.byt5_decoder.is_some())
+    }
+
+    /// Build the per-token G2P stage.
+    ///
+    /// Default: misaki per-token phonemizer (English, real G2P). With
+    /// `lexicon`/`phonetisaurus` credentials (or the `floravox-lexicons`
+    /// `lang` bundle fetch): the lexicon chain — dictionary hits first,
+    /// Phonetisaurus WFST for unseen words, letter spelling as the last
+    /// resort. Returns `(phonemizer, chain_resolved_real_g2p)`.
+    fn build_g2p(&self, effective_lang: Option<&str>) -> (Box<dyn TokenPhonemizer + Send>, bool) {
+        // Default: misaki per-token (real English G2P, built into
+        // floravox-core's default feature set).
+        if !self.using_chain() {
+            #[cfg(feature = "floravox-lexicons")]
+            if let Some(lang) = effective_lang {
+                // The published-bundle fetch is the `floravox-lexicons`
+                // feature's whole point: lang -> lexicon + trained WFST.
+                match Self::fetch_lexicon_bundle(lang) {
+                    Ok(chain) => return chain,
+                    Err(e) => {
+                        eprintln!("floravox: lexicon bundle for {lang:?} unavailable: {e:#}");
+                    }
+                }
+            }
+            #[cfg(not(feature = "floravox-lexicons"))]
+            let _ = effective_lang;
+            return (
+                Box::new(MisakiG2p::new(self.misaki.starts_with("gb"))),
+                true,
+            );
+        }
+
+        // Lexicon chain: dictionary -> Phonetisaurus WFST -> letter
+        // spelling. `real_g2p` is true only if the lexicon actually
+        // opened (an empty FstLexicon letter-spells every word).
+        let mut real_g2p = false;
+        let mut fallback: Box<dyn OovFallback + Send> = Box::new(RuleFallback::default());
+        if let Some(model) = &self.phonetisaurus {
+            if let Ok(ph) = floravox_g2p::PhonetisaurusG2p::open(model) {
+                fallback = Box::new(floravox_g2p::ChainedFallback(ph, fallback));
+                real_g2p = true;
+            }
+        }
+        // ByT5 (opt-in via byt5Encoder/byt5Decoder credentials): neural OOV
+        // covering ~130 languages. A load failure warns rather than
+        // silently dropping the tier.
+        if let (Some(enc), Some(dec)) = (&self.byt5_encoder, &self.byt5_decoder) {
+            match floravox_g2p::Byt5G2p::load(enc, dec) {
+                Ok(byt5) => {
+                    fallback = Box::new(floravox_g2p::ChainedFallback(byt5, fallback));
+                    real_g2p = true;
+                }
+                Err(e) => eprintln!("floravox: ByT5 G2P failed to load: {e:#}"),
+            }
+        }
+        let lexicon = self
+            .lexicon
+            .as_deref()
+            .and_then(|stem| {
+                floravox_g2p::MmapLexicon::open(stem)
+                    .ok()
+                    .inspect(|_| real_g2p = true)
+            })
+            .map_or_else(
+                || floravox_g2p::FstLexicon::<Vec<u8>>::from_rows(Vec::new()).expect("empty"),
+                |m| m.to_mem(),
+            );
+        (
+            Box::new(CachedPhonemizer::new(
+                LexiconPhonemizer::new(lexicon, fallback),
+                1024,
+            )),
+            real_g2p,
+        )
+    }
+
+    #[cfg(feature = "floravox-lexicons")]
+    /// Fetch the published lexicon bundle for a language and build the
+    /// chain from it (lexicon + Phonetisaurus WFST when the bundle ships
+    /// one).
+    ///
+    /// Note: voicegarden-lexicons 0.3 on crates.io vendors its own older
+    /// floravox-g2p, so only paths cross the boundary here — the lexicon
+    /// and WFST are opened with OUR floravox-g2p 0.8.6.
+    fn fetch_lexicon_bundle(lang: &str) -> anyhow::Result<(Box<dyn TokenPhonemizer + Send>, bool)> {
+        use std::sync::OnceLock;
+        static ARCHIVE: OnceLock<Option<voicegarden_lexicons::LexiconArchive>> = OnceLock::new();
+        let archive = ARCHIVE.get_or_init(|| {
+            voicegarden_lexicons::LexiconArchive::default_expanded()
+                .or_else(|_| voicegarden_lexicons::LexiconArchive::default_archive())
+                .ok()
+        });
+        let Some(archive) = archive else {
+            anyhow::bail!("no published lexicon archive available");
+        };
+        let bundle = archive.fetch(lang)?;
+        let dir = bundle.dir;
+        let stem_lang = bundle.entry.lang.clone();
+
+        // Open with OUR floravox-g2p: lexicon fst named after the corpus
+        // tag, optional Phonetisaurus WFST beside it.
+        let mut fallback: Box<dyn OovFallback + Send> = Box::new(RuleFallback::default());
+        let wfst = dir.join("phonetisaurus.fst");
+        if wfst.exists() {
+            if let Ok(ph) = floravox_g2p::PhonetisaurusG2p::open(&wfst) {
+                fallback = Box::new(floravox_g2p::ChainedFallback(ph, fallback));
+            }
+        }
+        // Opening the lexicon IS the real-G2P proof.
+        let lex = floravox_g2p::MmapLexicon::open(dir.join(format!("{stem_lang}.fst")))
+            .map_err(|e| anyhow::anyhow!("lexicon: {e}"))?;
+        Ok((
+            Box::new(CachedPhonemizer::new(
+                LexiconPhonemizer::new(lex, fallback),
+                1024,
+            )),
+            true,
+        ))
+    }
+
     /// Get (building if needed) the cached synthesizer for a voice.
-    fn synthesizer(&self, voice: Option<&str>) -> TtsResult<Arc<Synthesizer<MisakiG2p>>> {
+    fn synthesizer(
+        &self,
+        voice: Option<&str>,
+    ) -> TtsResult<Arc<Synthesizer<Box<dyn TokenPhonemizer + Send>>>> {
         let onnx = self.resolve_model(voice)?;
         let key = format!(
-            "{}|{}|{:?}|{}",
+            "{}|{}|{:?}|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
             onnx.display(),
             self.misaki,
             self.chars_romanize,
-            self.speaker
+            self.speaker,
+            self.lexicon,
+            self.phonetisaurus,
+            self.lang,
+            self.byt5_encoder,
+            self.byt5_decoder
         );
         // Poisoned-mutex recovery: the map is structurally valid even
         // after a panic in a previous build, so locking resumes.
@@ -292,12 +486,16 @@ impl FloravoxEngine {
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
         let auto_chars = model.config().is_char_table;
         let british = self.misaki.starts_with("gb");
+        let effective_lang = self.lang.as_deref();
 
-        let mut synth = Synthesizer::new(model, MisakiG2p::new(british));
+        let (g2p, chain_real_g2p) = self.build_g2p(effective_lang);
+        let mut synth = Synthesizer::new(model, g2p);
 
         // Document-level pre-passes, in order of specificity:
         //   explicit chars credential > auto-detected character table
-        //   (MMS-style voices) > misaki pre-pass ("off" disables).
+        //   (MMS-style voices) > misaki pre-pass ("off" disables). The
+        //   pre-pass assigns document-context phonemes; the per-token G
+        //   (chain or misaki) covers whatever it leaves unset.
         if let Some(rom) = self.chars_romanize {
             synth = synth.with_document_phonemizer(Box::new(CharFrontend {
                 lowercase: true,
@@ -320,6 +518,19 @@ impl FloravoxEngine {
             synth
                 .set_speaker(self.speaker)
                 .map_err(|e| TtsError(format!("set_speaker: {e:#}")))?;
+        }
+
+        // A lexicon chain with an unreadable/empty lexicon letter-spells
+        // everything — warn once per build so the misconfiguration is not
+        // silent (char-table voices are exempt: the frontend feeds their
+        // symbols directly).
+        if self.using_chain() && !chain_real_g2p && self.chars_romanize.is_none() && !auto_chars {
+            eprintln!(
+                "floravox: lexicon chain for {} resolved no real G2P stage — \
+                 words will be letter-spelled. Check the `lexicon`/`phonetisaurus` \
+                 paths or use the `lang` credential with the `floravox-lexicons` feature.",
+                onnx.display()
+            );
         }
 
         let synth = Arc::new(synth);
