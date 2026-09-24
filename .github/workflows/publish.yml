@@ -53,6 +53,7 @@ jobs:
         run: cargo build --no-default-features --features cloud
 
   test-windows:
+    # The Windows NuGet DLLs carry sapi + cloud + sherpaonnx together
     # (see the build matrix). Test that exact combination — it is the
     # configuration every .NET consumer actually loads.
     name: Test (Windows NuGet features)
@@ -64,8 +65,10 @@ jobs:
         with:
           name: version-sync
       - uses: dtolnay/rust-toolchain@stable
+      - name: Test (sapi,cloud,sherpaonnx)
         env:
           RTW_SKIP_EDGE_LIVE: "1"
+        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx
 
   build:
     name: Build ${{ matrix.label }}

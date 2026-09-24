@@ -305,9 +305,9 @@ client.SetVoice("alloy");
 client.SpeakSync("Hello world");
 ```
 
-**NuGet contents per RID** (since 0.5.3): `win-x64` bundles one DLL with
-ByT5 G2P bundles, measured boundaries, SSML marks). `win-x86` bundles
-`sapi` + `cloud` + `sherpaonnx` only — ort needs onnxruntime API 27 and
+**NuGet contents per RID** (since 0.5.3): `win-x64` and `win-x86` bundle
+one DLL with `sapi` + `cloud` + `sherpaonnx` (the sherpa builds carry
+lexicon/G2P bundles, measured boundaries, SSML marks).
 
 ### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
 
