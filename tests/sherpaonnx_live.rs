@@ -1,3 +1,5 @@
+#![cfg(feature = "sherpaonnx")]
+
 //! Live SherpaOnnx synthesis tests across multiple model types.
 //!
 //! These tests exercise actual model inference — they need real model files

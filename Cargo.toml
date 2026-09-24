@@ -39,6 +39,15 @@ default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
 system = ["speech-dispatcher"]
 cloud = ["reqwest", "dep:serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "symphonia", "sha2"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
+# floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
+# SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
+# with measured word timings on duration-patched voices, a student-tier
+# sidecar (<voice>.student) for the rest, and proportional estimates as
+# the final fallback. floravox-g2p is already in the graph via
+# floravox-core's default features; the direct dep names MisakiG2p for
+# the engine's phonemizer. misaki/uroman ride in via floravox-core's
+# own defaults.
+floravox = ["dep:floravox-core", "dep:floravox-g2p", "dep:serde_json", "speechmarkdown"]
 tungstenite = ["dep:tungstenite"]
 uuid = ["dep:uuid"]
 url = ["dep:url"]
@@ -65,6 +74,12 @@ serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "=1.13.8", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
 sherpa-onnx-models = { version = "1.0.2", optional = true }
+# floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha, Kokoro)
+# with measured word timings. Default features (onnx, misaki, uroman)
+# are intentional: misaki is the only TokenPhonemizer available at this
+# dependency set, uroman powers the CharFrontend for MMS voices.
+floravox-core = { version = "0.8.6", optional = true }
+floravox-g2p = { version = "0.8.6", optional = true, default-features = false }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=1.13.8", optional = true }
 base64 = { version = "0.22", optional = true }

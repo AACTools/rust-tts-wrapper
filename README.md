@@ -2,12 +2,13 @@
 
 Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
 
-## Engines (23 total)
+## Engines (24 total)
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
 | System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
+| floravox | Local (piper/MMS/Matcha/Kokoro ONNX) | Model dir | Sentence batches | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
 | Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
@@ -262,6 +263,7 @@ cargo build --all-features
 - `sapi` — SAPI (Windows system TTS)
 - `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
 - `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
+- `floravox` — floravox offline TTS (piper/MMS/Matcha/Kokoro ONNX voices; native SSML with measured word timings on duration-patched voices)
 
 ### Lint & Test
 

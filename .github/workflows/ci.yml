@@ -32,6 +32,14 @@ jobs:
       - name: Build cloud-only
         run: cargo build --no-default-features --features cloud
 
+      - name: Build + test floravox
+        # ort's static prebuilts download per-platform and can 504 (same
+        # flakiness as the sherpaonnx builds) — non-blocking until proven.
+        continue-on-error: true
+        run: |
+          cargo build --no-default-features --features floravox
+          cargo test --no-default-features --features floravox --lib
+
       - name: Upload C header
         uses: actions/upload-artifact@v4
         with:

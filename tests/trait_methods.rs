@@ -1,3 +1,5 @@
+#![cfg(feature = "cloud")]
+
 //! TtsEngine trait method coverage that doesn't fit naturally as inline unit
 //! tests inside a specific engine module.
 //!

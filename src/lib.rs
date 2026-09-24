@@ -37,6 +37,8 @@ pub mod boundaries;
 mod cloud_engine;
 pub mod engine;
 pub mod factory;
+#[cfg(feature = "floravox")]
+pub mod floravox_engine;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]

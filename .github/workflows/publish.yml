@@ -150,6 +150,41 @@ jobs:
             label: "sapi-cloud-sherpaonnx-i686-windows"
             lib_ext: dll
 
+          # --- floravox builds (non-blocking until proven in CI: ort
+          # prebuilt downloads can 504; wasm32 is blocked upstream of the
+          # wrapper — ort-sys ships no wasm32 binaries, see
+          # src/floravox_engine.rs) ---
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            features: "system,cloud,floravox"
+            label: "system-cloud-floravox-x86_64-linux"
+            lib_ext: so
+            allow_failure: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,floravox"
+            label: "avsynth-cloud-floravox-x86_64-macos"
+            lib_ext: dylib
+            allow_failure: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            features: "avsynth,cloud,floravox"
+            label: "avsynth-cloud-floravox-aarch64-macos"
+            lib_ext: dylib
+            allow_failure: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox"
+            label: "sapi-cloud-floravox-x86_64-windows"
+            lib_ext: dll
+            allow_failure: true
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            features: "sapi,cloud,floravox"
+            label: "sapi-cloud-floravox-aarch64-windows"
+            lib_ext: dll
+            allow_failure: true
+
           # --- Mobile: Android (all four ABIs, cloud-only) ---
           # rustls everywhere (no OpenSSL), so these are pure-Rust builds
           # against the NDK clang. API 24+ (Android 7.0) floor.
