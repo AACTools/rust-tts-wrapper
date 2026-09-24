@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_imports)] // shared-import pattern for the split modules
 use super::*;
 
 pub(crate) type VisemeFn = Box<dyn FnMut(i32, f32)>;

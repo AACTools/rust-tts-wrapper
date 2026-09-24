@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_imports)] // shared-import pattern for the split modules
 use super::*;
 
 /// Size of each audio chunk delivered via `on_audio` for JSON-body engines

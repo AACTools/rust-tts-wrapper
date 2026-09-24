@@ -1,3 +1,4 @@
+#![allow(clippy::wildcard_imports)] // shared-import pattern for the split modules
 use super::*;
 
 /// Base64 encode for auth tokens.
