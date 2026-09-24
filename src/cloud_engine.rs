@@ -1563,7 +1563,8 @@ fn parse_gemini_interaction_audio(json: &serde_json::Value) -> Option<Vec<u8>> {
 /// little-endian u32). Returns 24_000 (the documented Gemini output rate)
 /// for anything non-conforming.
 fn wav_sample_rate(wav: &[u8]) -> u32 {
-    if wav.len() > 28 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" {
+    if wav.len() > 28 && &wav[0..4] == b"RIFF" && &wav[8..12] == b"WAVE" && &wav[12..16] == b"fmt "
+    {
         return u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]);
     }
     24_000
@@ -1610,10 +1611,13 @@ fn fire_scaled_estimates(
 
 /// Pick the SpeechMarkdown platform selector for a provider/model pair.
 ///
+/// Most providers map to `provider` unchanged (the caller's provider id is
+/// itself the selector for azure/google/gemini/the Alexa fallback);
 /// ElevenLabs markup is model-dependent: `eleven_v3*` parses no SSML and
-/// needs the audio-tag dialect; every other model (and every other
-/// provider) maps to `provider` unchanged (the caller's provider id is
-/// itself the selector for azure/google/the Alexa fallback).
+/// needs the audio-tag dialect, every other ElevenLabs model understands
+/// `<break>` — and the dialects keep the markup correct per model.
+/// Unrecognized ElevenLabs model IDs surface as API errors rather than
+/// being masked.
 fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a str {
     if provider == "elevenlabs" && model.is_some_and(|m| m.starts_with("eleven_v3")) {
         "elevenlabs-v3"
@@ -2802,6 +2806,14 @@ impl TtsEngine for CloudEngine {
             if let Some(wav) = parse_gemini_interaction_audio(&json) {
                 let sample_rate = wav_sample_rate(&wav);
                 let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
+                if pcm.is_empty() {
+                    // An audio block was present but symphonia could not
+                    // probe/decode it — an error, not a silent success.
+                    return Err(TtsError(format!(
+                        "gemini audio block failed to decode ({} wav bytes)",
+                        wav.len()
+                    )));
+                }
                 audio_total += pcm.len();
                 if let Some(cb) = on_audio.as_mut() {
                     for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
