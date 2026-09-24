@@ -8,7 +8,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
 | System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
-| floravox | Local (piper/MMS/Matcha/Kokoro ONNX) | Model dir | Sentence batches | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
+| floravox | Local (piper/MMS/Matcha/Kokoro ONNX) | Model dir | Streamed (per segment) | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
 | Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |

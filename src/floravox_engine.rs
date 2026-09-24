@@ -45,15 +45,20 @@ use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundar
 use floravox_core::synth::{CharFrontend, MisakiPrePass, StreamingSynthesis, Synthesizer};
 use floravox_core::{SynthesisEvent, VoiceBackend};
 use floravox_g2p::MisakiG2p;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Poll interval while interleaving audio chunks and events from the
 /// synthesis channels (also caps `stop()` latency).
 const POLL: Duration = Duration::from_millis(25);
+
+/// Soft cap on cached synthesizers (each holds a live ONNX session —
+/// tens of MB). Exceeding it clears the cache.
+const SYNTH_CACHE_CAP: usize = 8;
 
 /// Engine configuration from credentials JSON.
 #[derive(Debug, Default)]
@@ -126,19 +131,26 @@ pub struct FloravoxEngine {
     model_id: Mutex<String>,
     /// misaki dialect: `"us"` | `"gb"` | `"off"`.
     misaki: String,
-    /// Character-frontend spec: `None` = misaki pre-pass; `Some(spec)`
-    /// = CharFrontend (`""`/`"true"` plain, otherwise an ISO 639-3
-    /// romanization code).
-    chars: Option<String>,
+    /// Character-frontend romanization code, leaked once per engine
+    /// (`CharFrontend.romanize` is `Option<&'static str>`): `None` =
+    /// misaki pre-pass; `Some("")` = plain CharFrontend; `Some(code)` =
+    /// uroman with that ISO 639-3 code.
+    chars_romanize: Option<&'static str>,
     /// Speaker id applied to multi-speaker voices.
     speaker: i64,
-    /// Set by `stop()`; the streaming pump drops its channels in response,
-    /// which cancels the synthesis worker within one poll interval.
-    cancel: Arc<AtomicBool>,
-    /// Cached synthesizer, keyed by the voice + phonemizer options it was
-    /// built with (rebuilding reloads the ONNX session, so it is worth
-    /// caching).
-    synth: Mutex<Option<(String, Arc<Synthesizer<MisakiG2p>>)>>,
+    /// Bumped by `stop()`; each pump captures the counter when it starts
+    /// consuming and cancels itself the moment the counter differs. A
+    /// generation counter (rather than a reset flag) means `stop()` can
+    /// never be silently wiped by a concurrent `speak()` entering its
+    /// pump, and `stop` cancels every in-flight utterance — which is the
+    /// trait contract ("stop any in-progress speech").
+    stop_generation: AtomicU64,
+    /// Cached synthesizers keyed by the voice + phonemizer options they
+    /// were built with (rebuilding reloads the ONNX session — seconds —
+    /// so per-voice caching matters). Soft-capped: exceeding
+    /// [`SYNTH_CACHE_CAP`] entries clears the map, trading reloads for
+    /// bounded memory (each entry holds a live ONNX session).
+    synth: Mutex<HashMap<String, Arc<Synthesizer<MisakiG2p>>>>,
 }
 
 impl fmt::Debug for FloravoxEngine {
@@ -147,7 +159,7 @@ impl fmt::Debug for FloravoxEngine {
             .field("models_dir", &self.models_dir)
             .field("model_id", &self.model_id.lock().map(|g| g.clone()).ok())
             .field("misaki", &self.misaki)
-            .field("chars", &self.chars)
+            .field("chars", &self.chars_romanize)
             .field("speaker", &self.speaker)
             .finish_non_exhaustive()
     }
@@ -180,14 +192,26 @@ impl FloravoxEngine {
         Self {
             models_dir: cfg.models_dir.unwrap_or_else(default_models_dir),
             model_id: Mutex::new(cfg.model_id.unwrap_or_default()),
-            misaki: cfg
-                .misaki
-                .unwrap_or_else(|| "us".to_string())
-                .to_ascii_lowercase(),
-            chars: cfg.chars,
-            speaker: cfg.speaker.unwrap_or(0),
-            cancel: Arc::new(AtomicBool::new(false)),
-            synth: Mutex::new(None),
+            misaki: {
+                let m = cfg
+                    .misaki
+                    .unwrap_or_else(|| "us".to_string())
+                    .to_ascii_lowercase();
+                if matches!(m.as_str(), "us" | "gb" | "off") {
+                    m
+                } else {
+                    "us".to_string()
+                }
+            },
+            chars_romanize: cfg.chars.as_deref().map(|spec| match spec {
+                "" | "true" => "",
+                // Leaked once per engine instance: CharFrontend wants
+                // `Option<&'static str>`, and engines are long-lived.
+                code => Box::leak(code.to_string().into_boxed_str()),
+            }),
+            speaker: cfg.speaker.unwrap_or(0).max(0),
+            stop_generation: std::sync::atomic::AtomicU64::new(0),
+            synth: Mutex::new(HashMap::new()),
         }
     }
 
@@ -240,17 +264,21 @@ impl FloravoxEngine {
             "{}|{}|{:?}|{}",
             onnx.display(),
             self.misaki,
-            self.chars,
+            self.chars_romanize,
             self.speaker
         );
         let mut guard = self
             .synth
             .lock()
             .map_err(|_| TtsError("synth lock poisoned".into()))?;
-        if let Some((k, s)) = guard.as_ref() {
-            if *k == key {
-                return Ok(Arc::clone(s));
-            }
+        // Note: the lock is held across `load_voice` (a multi-second ONNX
+        // load), so concurrent first-synthesis of the same voice
+        // serializes; later calls hit the cache without contention.
+        if let Some(s) = guard.get(&key) {
+            return Ok(Arc::clone(s));
+        }
+        if guard.len() >= SYNTH_CACHE_CAP {
+            guard.clear();
         }
         let model: Box<dyn VoiceBackend> = floravox_core::load_voice(&onnx)
             .map_err(|e| TtsError(format!("loading {}: {e:#}", onnx.display())))?;
@@ -262,14 +290,10 @@ impl FloravoxEngine {
         // Document-level pre-passes, in order of specificity:
         //   explicit chars credential > auto-detected character table
         //   (MMS-style voices) > misaki pre-pass ("off" disables).
-        if let Some(spec) = self.chars.as_deref() {
-            let rom: Option<&'static str> = match spec {
-                "" | "true" => None,
-                code => Some(code.to_string().leak()),
-            };
+        if let Some(rom) = self.chars_romanize {
             synth = synth.with_document_phonemizer(Box::new(CharFrontend {
                 lowercase: true,
-                romanize: rom,
+                romanize: Some(rom).filter(|r| !r.is_empty()),
             }));
         } else if auto_chars {
             // Character-table voice with no explicit frontend: CharFrontend
@@ -291,7 +315,7 @@ impl FloravoxEngine {
         }
 
         let synth = Arc::new(synth);
-        *guard = Some((key, Arc::clone(&synth)));
+        guard.insert(key, Arc::clone(&synth));
         Ok(synth)
     }
 
@@ -314,72 +338,44 @@ impl FloravoxEngine {
         } = stream;
         let mut bytes = Vec::new();
         let mut boundaries = Vec::new();
-        self.cancel.store(false, Ordering::SeqCst);
+        let my_generation = self.stop_generation.load(Ordering::SeqCst);
 
-        let drain_event = |ev: SynthesisEvent,
-                           on_boundary: &mut Option<crate::engine::OnBoundaryCallback<'_>>,
-                           on_mark: &mut Option<crate::engine::OnMarkCallback<'_>>,
-                           boundaries: &mut Vec<WordBoundary>| {
-            match ev {
-                SynthesisEvent::WordBoundary(w) => {
-                    if let Some(cb) = on_boundary.as_mut() {
-                        #[allow(clippy::cast_precision_loss)]
-                        let (s, e) = (w.ms_start as f32 / 1000.0, w.ms_end as f32 / 1000.0);
-                        #[allow(clippy::cast_possible_wrap)]
-                        cb(
-                            &w.text,
-                            s,
-                            e,
-                            w.byte_offset as i32,
-                            w.byte_len as i32,
-                            w.estimated,
-                        );
-                    }
-                    boundaries.push(WordBoundary {
-                        text: w.text,
-                        offset: w.ms_start,
-                        duration: w.ms_end.saturating_sub(w.ms_start),
-                        estimated: w.estimated,
-                    });
+        let mut handle_event = |ev: SynthesisEvent| {
+            let out = map_event(ev);
+            if let Some(b) = &out.boundary {
+                if let Some(cb) = on_boundary.as_mut() {
+                    #[allow(clippy::cast_precision_loss)]
+                    let (s, e) = (
+                        b.offset as f32 / 1000.0,
+                        (b.offset + b.duration) as f32 / 1000.0,
+                    );
+                    // byte span travels beside the boundary (WordBoundary
+                    // itself carries only ms timing); -1/-1 = unlocatable.
+                    let (bo, bl) = out.byte.unwrap_or((-1, -1));
+                    cb(&b.text, s, e, bo, bl, b.estimated);
                 }
-                SynthesisEvent::MarkReached {
-                    name,
-                    ms,
-                    char_offset,
-                    ..
-                } => {
-                    // Sample-accurate → measured. Also a zero-duration
-                    // boundary so boundary-only consumers see marks.
-                    if let Some(cb) = on_mark.as_mut() {
-                        #[allow(clippy::cast_precision_loss)]
-                        let s = ms as f32 / 1000.0;
-                        #[allow(clippy::cast_possible_wrap)]
-                        cb(&name, s, s, char_offset as i32);
-                    }
-                    if let Some(cb) = on_boundary.as_mut() {
-                        #[allow(clippy::cast_precision_loss)]
-                        let s = ms as f32 / 1000.0;
-                        cb(&name, s, s, char_offset as i32, 0, false);
-                    }
-                    boundaries.push(WordBoundary {
-                        text: name,
-                        offset: ms,
-                        duration: 0,
-                        estimated: false,
-                    });
+                boundaries.push(b.clone());
+            }
+            if let Some((name, s, e, char_offset)) = &out.mark {
+                if let Some(cb) = on_mark.as_mut() {
+                    cb(name, *s, *e, *char_offset);
                 }
-                _ => {}
             }
         };
 
         loop {
-            if self.cancel.load(Ordering::SeqCst) {
-                return Ok((bytes, boundaries)); // dropping the receivers cancels the worker
+            if self.stop_generation.load(Ordering::SeqCst) != my_generation {
+                // A newer stop() (or a newer utterance's stop of all
+                // in-flight speech) supersedes this pump. Dropping the
+                // receivers cancels the synthesis worker (floravox-core
+                // documents the bounded-channel send blocking on a live
+                // consumer).
+                return Ok((bytes, boundaries));
             }
             // Drain pending events first so boundaries precede the audio
             // they time.
             while let Ok(ev) = events.try_recv() {
-                drain_event(ev, &mut on_boundary, &mut on_mark, &mut boundaries);
+                handle_event(ev);
             }
             match audio.recv_timeout(POLL) {
                 Ok(chunk) => {
@@ -399,12 +395,26 @@ impl FloravoxEngine {
                     // masquerade as success with empty audio (floravox
                     // issue #9 semantics).
                     for ev in events {
-                        drain_event(ev, &mut on_boundary, &mut on_mark, &mut boundaries);
+                        handle_event(ev);
                     }
-                    if let Ok(Err(err)) = result.recv() {
-                        return Err(TtsError(format!("floravox synthesis: {err:#}")));
+                    match result.recv() {
+                        Ok(Ok(())) => return Ok((bytes, boundaries)),
+                        Ok(Err(err)) => {
+                            return Err(TtsError(format!("floravox synthesis: {err:#}")));
+                        }
+                        // Worker dropped its sender without a result — a
+                        // panic mid-inference (ort FFI panics happen).
+                        // Must not masquerade as a successful synthesis.
+                        // Worker dropped its sender without a result — a
+                        // panic mid-inference (ort FFI panics happen).
+                        // Must not masquerade as a successful synthesis.
+                        Err(_) => {
+                            return Err(TtsError(
+                                "floravox synthesis worker terminated without a result (panic?)"
+                                    .into(),
+                            ));
+                        }
                     }
-                    return Ok((bytes, boundaries));
                 }
             }
         }
@@ -561,20 +571,34 @@ fn scan_voices(dir: &Path) -> Vec<DiscoveredVoice> {
             continue;
         }
         if let Some(onnx) = find_onnx(&path) {
-            if let Some(v) = describe_voice(&entry.file_name().to_string_lossy(), &onnx) {
-                out.push(v);
-            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            out.push(describe_voice(&id, &onnx).unwrap_or_else(|| {
+                // Metadata unreadable — still listable/selectable.
+                DiscoveredVoice {
+                    id: id.clone(),
+                    name: id,
+                    bcp47: String::new(),
+                    iso639_3: String::new(),
+                }
+            }));
         }
     }
     // Flat layout: X.onnx + X.onnx.json directly in dir.
     if out.is_empty() {
         if let Some(onnx) = find_onnx(dir) {
-            if let Some(v) = describe_voice(
-                &dir.file_name().unwrap_or_default().to_string_lossy(),
-                &onnx,
-            ) {
-                out.push(v);
-            }
+            let id = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            out.push(
+                describe_voice(&id, &onnx).unwrap_or_else(|| DiscoveredVoice {
+                    name: id.clone(),
+                    id,
+                    bcp47: String::new(),
+                    iso639_3: String::new(),
+                }),
+            );
         }
     }
     out
@@ -650,6 +674,66 @@ fn bcp47_from(espeak_voice: &str, dataset: &str) -> (String, &'static str) {
     (bcp47, iso)
 }
 
+/// One synthesis event mapped onto the wrapper's callback/boundary
+/// shapes. Pure — unit-testable without a voice or channels.
+struct MappedEvent {
+    /// Wrapper boundary (ms offsets; `estimated` passed through
+    /// untouched — never re-estimated here).
+    boundary: Option<WordBoundary>,
+    /// `(byte_offset, byte_len)` for the boundary callback (the wrapper
+    /// boundary type carries only ms timing).
+    byte: Option<(i32, i32)>,
+    /// `(name, start_s, end_s, char_offset)` for the mark callback.
+    mark: Option<(String, f32, f32, i32)>,
+}
+
+/// Map a floravox synthesis event. Word boundaries keep the model's
+/// measured/estimated flag verbatim; marks are sample-accurate, so their
+/// boundary surrogate is always measured.
+fn map_event(ev: SynthesisEvent) -> MappedEvent {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn sec(ms: u64) -> f32 {
+        ms as f32 / 1000.0
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    fn i32n(v: i64) -> i32 {
+        v.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+    }
+
+    match ev {
+        SynthesisEvent::WordBoundary(w) => MappedEvent {
+            boundary: Some(WordBoundary {
+                text: w.text,
+                offset: w.ms_start,
+                duration: w.ms_end.saturating_sub(w.ms_start),
+                estimated: w.estimated,
+            }),
+            byte: Some((i32n(w.byte_offset as i64), i32n(w.byte_len as i64))),
+            mark: None,
+        },
+        SynthesisEvent::MarkReached {
+            name,
+            ms,
+            char_offset,
+            ..
+        } => MappedEvent {
+            boundary: Some(WordBoundary {
+                text: name.clone(),
+                offset: ms,
+                duration: 0,
+                estimated: false,
+            }),
+            byte: None,
+            mark: Some((name, sec(ms), sec(ms), i32n(char_offset))),
+        },
+        _ => MappedEvent {
+            boundary: None,
+            byte: None,
+            mark: None,
+        },
+    }
+}
+
 impl TtsEngine for FloravoxEngine {
     #[allow(clippy::too_many_arguments)]
     fn speak(
@@ -697,32 +781,42 @@ impl TtsEngine for FloravoxEngine {
     }
 
     fn stop(&self) -> TtsResult<()> {
-        self.cancel.store(true, Ordering::SeqCst);
+        // Supersedes every pump whose captured generation is older than
+        // the new value; dropping their receivers cancels the workers.
+        self.stop_generation.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
         Ok(scan_voices(&self.models_dir)
             .into_iter()
-            .map(|v| Voice {
-                name: v.name,
-                id: v.id,
-                gender: Gender::Unknown,
-                provider: "floravox".to_string(),
-                language_codes: vec![LanguageCode {
-                    display: crate::types::locale_display_name(&v.bcp47),
-                    bcp47: v.bcp47,
-                    iso639_3: v.iso639_3,
-                }],
+            .map(|v| {
+                let language_codes = if v.bcp47.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![LanguageCode {
+                        display: crate::types::locale_display_name(&v.bcp47),
+                        bcp47: v.bcp47,
+                        iso639_3: v.iso639_3,
+                    }]
+                };
+                Voice {
+                    name: v.name,
+                    id: v.id,
+                    gender: Gender::Unknown,
+                    provider: "floravox".to_string(),
+                    language_codes,
+                }
             })
             .collect())
     }
 
     fn check_credentials(&self) -> TtsResult<bool> {
         // A usable configuration = the models dir holds at least one
-        // voice, or an explicit modelId is configured (and will resolve
-        // on first synthesis). No ONNX session is opened here.
-        Ok(find_onnx(&self.models_dir).is_some()
+        // voice (subdirectory or flat — scan_voices covers both), or an
+        // explicit modelId is configured (and will resolve on first
+        // synthesis). No ONNX session is opened here.
+        Ok(!scan_voices(&self.models_dir).is_empty()
             || !self
                 .model_id
                 .lock()
@@ -819,24 +913,91 @@ mod tests {
     }
 
     #[test]
-    fn event_mapping_measured_vs_estimated() {
-        // WordTiming maps to WordBoundary with the estimated flag passed
-        // through untouched — the contract floravox depends on.
-        let w = floravox_core::WordTiming {
+    fn event_mapping_measured_word() {
+        // Measured (duration-patched voice): flag passes through verbatim,
+        // ms -> seconds for the callback, byte span preserved.
+        let out = map_event(SynthesisEvent::WordBoundary(floravox_core::WordTiming {
             text: "hello".into(),
-            byte_offset: 0,
+            byte_offset: 6,
             byte_len: 5,
-            char_offset: 0,
+            char_offset: 6,
             char_len: 5,
-            sample_start: 0,
-            sample_end: 2400,
-            ms_start: 0,
-            ms_end: 100,
+            sample_start: 4800,
+            sample_end: 9600,
+            ms_start: 200,
+            ms_end: 400,
             estimated: false,
+        }));
+        let b = out.boundary.expect("boundary present");
+        assert_eq!(b.text, "hello");
+        assert_eq!((b.offset, b.duration), (200, 200));
+        assert!(!b.estimated, "measured flag preserved");
+        assert_eq!(out.byte, Some((6, 5)));
+        assert!(out.mark.is_none());
+    }
+
+    #[test]
+    fn event_mapping_estimated_flag_is_honest() {
+        // Unpatched voice: estimated=true must survive the mapping.
+        let mut w = floravox_core::WordTiming {
+            text: "meh".into(),
+            byte_offset: 0,
+            byte_len: 3,
+            char_offset: 0,
+            char_len: 3,
+            sample_start: 0,
+            sample_end: 1,
+            ms_start: 0,
+            ms_end: 250,
+            estimated: true,
         };
-        let ev = SynthesisEvent::WordBoundary(w);
-        assert_eq!(ev.sample(), 0);
-        assert_eq!(ev.ms(), 0);
+        let out = map_event(SynthesisEvent::WordBoundary(w.clone()));
+        assert!(out.boundary.as_ref().unwrap().estimated);
+        // ...and flipping the input flips the output — the engine never
+        // upgrades an estimate to a measurement.
+        w.estimated = false;
+        assert!(
+            !map_event(SynthesisEvent::WordBoundary(w))
+                .boundary
+                .as_ref()
+                .unwrap()
+                .estimated
+        );
+    }
+
+    #[test]
+    fn event_mapping_mark_dual_surfaces() {
+        // Marks fire the mark callback AND a zero-duration measured
+        // boundary; unknown char_offset (-1) survives the i64->i32 narrowing.
+        let out = map_event(SynthesisEvent::MarkReached {
+            name: "chapter".into(),
+            sample: 48_000,
+            ms: 2000,
+            char_offset: -1,
+        });
+        let b = out.boundary.expect("mark boundary surrogate");
+        assert_eq!(
+            (b.text.as_str(), b.offset, b.duration),
+            ("chapter", 2000, 0)
+        );
+        assert!(!b.estimated, "sample-accurate mark is measured");
+        assert_eq!(out.mark, Some(("chapter".into(), 2.0, 2.0, -1)));
+        assert_eq!(out.byte, None);
+    }
+
+    #[test]
+    fn event_mapping_ignores_non_boundary_events() {
+        for ev in [
+            SynthesisEvent::Started,
+            SynthesisEvent::Finished {
+                total_samples: 1,
+                total_ms: 1,
+            },
+            SynthesisEvent::BreakStarted { ms: 100, sample: 1 },
+        ] {
+            let out = map_event(ev);
+            assert!(out.boundary.is_none() && out.byte.is_none() && out.mark.is_none());
+        }
     }
 
     #[test]

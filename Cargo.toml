@@ -78,8 +78,10 @@ sherpa-onnx-models = { version = "1.0.2", optional = true }
 # with measured word timings. Default features (onnx, misaki, uroman)
 # are intentional: misaki is the only TokenPhonemizer available at this
 # dependency set, uroman powers the CharFrontend for MMS voices.
-floravox-core = { version = "0.8.6", optional = true }
-floravox-g2p = { version = "0.8.6", optional = true, default-features = false }
+floravox-core = { version = "=0.8.6", optional = true }
+# Exact pin: MisakiG2p implements a floravox-core trait — a drifted
+# patch pair breaks the build (same reasoning as sherpa-onnx-sys above).
+floravox-g2p = { version = "=0.8.6", optional = true, default-features = false }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=1.13.8", optional = true }
 base64 = { version = "0.22", optional = true }
