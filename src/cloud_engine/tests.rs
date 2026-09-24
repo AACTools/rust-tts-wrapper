@@ -500,16 +500,16 @@ mod tests {
     #[test]
     pub(crate) fn test_normalize_gender() {
         assert_eq!(
-            super::super::types::normalize_gender("Female"),
-            super::super::types::Gender::Female
+            crate::types::normalize_gender("Female"),
+            crate::types::Gender::Female
         );
         assert_eq!(
-            super::super::types::normalize_gender("male"),
-            super::super::types::Gender::Male
+            crate::types::normalize_gender("male"),
+            crate::types::Gender::Male
         );
         assert_eq!(
-            super::super::types::normalize_gender(""),
-            super::super::types::Gender::Unknown
+            crate::types::normalize_gender(""),
+            crate::types::Gender::Unknown
         );
     }
 
@@ -1520,7 +1520,13 @@ mod tests {
         // aren't part of this test (the test itself mentions the magic
         // literal in its assertion message, which would false-positive
         // a naive grep).
-        let source = include_str!("cloud_engine.rs");
+        let mut source = String::new();
+        for f in ["mod.rs", "engine.rs", "config.rs", "decode.rs", "ssml.rs", "google.rs", "gemini.rs", "elevenlabs.rs", "voices.rs"] {
+            source.push_str(
+                &std::fs::read_to_string(std::path::Path::new("src/cloud_engine").join(f))
+                    .unwrap_or_default(),
+            );
+        }
         let production_uses = source
             .lines()
             // Skip every line inside this test's body, which legitimately
