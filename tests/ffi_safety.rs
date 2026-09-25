@@ -119,7 +119,7 @@ mod path_parsing_tests {
             ("Content-Type:application/json", ""),
         ];
         for (input, expected) in cases {
-            // This mirrors the logic in cloud_engine.rs.
+            // This mirrors the logic in cloud_engine/mod.rs (azure_ws_extract_path).
             let path = input
                 .lines()
                 .find(|l| l.starts_with("Path:"))
