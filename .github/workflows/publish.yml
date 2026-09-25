@@ -227,67 +227,42 @@ jobs:
             lib_ext: a
             ios: true
 
-          # Windows static builds carry the DirectML floor (Win10 1903+);
-          # i686 has no ort prebuilt, so it links onnxruntime at runtime.
+          # --- Plain cloud-only desktop builds (no platform speech API)
+          # for consumers that only need network voices. Windows static
+          # builds carry the DirectML floor (Win10 1903+); Intel Macs and
+          # i686 Windows have no ort prebuilt — onnxruntime loads at
+          # runtime. ---
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             features: "cloud"
+            label: "cloud-x86_64-linux"
             lib_ext: so
           # Intel Macs: no ort prebuilt — onnxruntime loads at runtime.
           - target: x86_64-apple-darwin
             os: macos-latest
             features: "cloud"
+            label: "cloud-x86_64-macos"
             lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
             features: "cloud"
+            label: "cloud-aarch64-macos"
             lib_ext: dylib
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             features: "cloud"
+            label: "cloud-x86_64-windows"
             lib_ext: dll
           - target: aarch64-pc-windows-msvc
             os: windows-latest
             features: "cloud"
+            label: "cloud-aarch64-windows"
             lib_ext: dll
           - target: i686-pc-windows-msvc
             os: windows-latest
             features: "cloud"
+            label: "cloud-i686-windows"
             lib_ext: dll
-
-          # arm64 android: ort ships an NNAPI static prebuilt.
-          # 32-bit/x86 android: no prebuilts — onnxruntime loads at
-          # runtime from the Microsoft onnxruntime-android release.
-          - target: aarch64-linux-android
-            os: ubuntu-latest
-            features: "cloud"
-            lib_ext: so
-            android: true
-          - target: armv7-linux-androideabi
-            os: ubuntu-latest
-            features: "cloud"
-            lib_ext: so
-            android: true
-          - target: x86_64-linux-android
-            os: ubuntu-latest
-            features: "cloud"
-            lib_ext: so
-            android: true
-          - target: i686-linux-android
-            os: ubuntu-latest
-            features: "cloud"
-            lib_ext: so
-            android: true
-          - target: aarch64-apple-ios
-            os: macos-latest
-            features: "cloud"
-            lib_ext: a
-            ios: true
-          - target: aarch64-apple-ios-sim
-            os: macos-latest
-            features: "cloud"
-            lib_ext: a
-            ios: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
