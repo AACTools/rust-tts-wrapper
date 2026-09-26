@@ -709,6 +709,234 @@ pub(crate) fn test_polly_unsupported_returns_none() {
     assert!(build_config("polly", &creds).is_none());
 }
 
+#[test]
+pub(crate) fn test_qwen_config_matrix() {
+    let cfg = build_config("qwen", &engine_creds("qwen")).expect("qwen");
+    assert_eq!(cfg.provider_id, "qwen");
+    assert_eq!(
+        cfg.model_default.as_deref(),
+        Some("qwen-audio-3.0-tts-flash")
+    );
+    assert_eq!(cfg.default_voice.as_deref(), Some("longanhuan_v3.6"));
+    // WS-only engine: no REST synth URL or voice-list endpoint; PCM flows
+    // straight from the binary frames.
+    assert!(cfg.synth_url.is_empty());
+    assert!(cfg.voices_url.is_none());
+    assert!(cfg.response_is_pcm);
+}
+
+#[test]
+pub(crate) fn test_qwen_model_id_override() {
+    let mut c = engine_creds("qwen");
+    c.insert("modelId".to_string(), "qwen-audio-3.0-tts-plus".to_string());
+    let cfg = build_config("qwen", &c).expect("qwen");
+    assert_eq!(
+        cfg.model_default.as_deref(),
+        Some("qwen-audio-3.0-tts-plus")
+    );
+}
+
+#[test]
+pub(crate) fn test_qwen_ws_url_regions() {
+    let mut c = HashMap::new();
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_QWENCLOUD);
+    c.insert("region".to_string(), "intl".to_string());
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_INTL);
+    c.insert("region".to_string(), "beijing".to_string());
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_BEIJING);
+    c.insert("region".to_string(), "qwencloud".to_string());
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_QWENCLOUD);
+    c.insert(
+        "wsUrl".to_string(),
+        "wss://proxy.example.com/api-ws/v1/inference".to_string(),
+    );
+    assert_eq!(
+        qwen_ws_url(&c).unwrap(),
+        "wss://proxy.example.com/api-ws/v1/inference"
+    );
+}
+
+#[test]
+pub(crate) fn test_qwen_ws_url_unknown_region_rejected() {
+    let mut c = HashMap::new();
+    c.insert("region".to_string(), "Beijing".to_string());
+    let err = qwen_ws_url(&c).unwrap_err().to_string();
+    assert!(
+        err.contains("unknown region 'Beijing'"),
+        "should name the bad region, got: {err}"
+    );
+}
+
+#[test]
+pub(crate) fn test_qwen_sentence_clock_advances_by_delivered_bytes() {
+    use super::qwen::QwenSentenceClock;
+    let mut clock = QwenSentenceClock::default();
+    // Sentence 1: 4800 bytes → 100 ms of audio; its base is 0.
+    assert_eq!(clock.sentence_finished(4_800), 0);
+    // Sentence 2: 7200 more bytes (base 100 ms, spans 100–250 ms).
+    assert_eq!(clock.sentence_finished(12_000), 100);
+    // Sentence 3 reports no audio (e.g. empty words + no frames): base
+    // does not advance — later sentences stay aligned.
+    assert_eq!(clock.sentence_finished(12_000), 250);
+    // Sentence 4: 4800 more bytes.
+    assert_eq!(clock.sentence_finished(16_800), 250);
+    // A byte count going backwards saturates rather than panicking.
+    assert_eq!(clock.sentence_finished(1_000), 350);
+}
+
+#[test]
+pub(crate) fn test_qwen_parse_events() {
+    use super::qwen::QwenServerEvent;
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"task-started","attributes":{}},"payload":{}}"#
+        ),
+        QwenServerEvent::TaskStarted
+    );
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"task-finished"},"payload":{"usage":{"characters":13}}}"#
+        ),
+        QwenServerEvent::TaskFinished
+    );
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"task-failed","error_code":"InvalidParameter","error_message":"bad voice"},"payload":{}}"#
+        ),
+        QwenServerEvent::TaskFailed {
+            code: "InvalidParameter".into(),
+            message: "bad voice".into()
+        }
+    );
+    // sentence-synthesis marks an imminent binary audio frame.
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-synthesis","sentence":{"index":0,"words":[]}}}}"#
+        ),
+        QwenServerEvent::AudioFrame
+    );
+    // sentence-begin is ignored.
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-begin","original_text":"Hello"}}}"#
+        ),
+        QwenServerEvent::Other
+    );
+}
+
+#[test]
+pub(crate) fn test_qwen_parse_sentence_end_words() {
+    use super::qwen::{QwenServerEvent, QwenWord};
+    match qwen_parse_event(
+        r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-end","sentence":{"index":0,"words":[{"text":"Before","begin_index":0,"end_index":1,"begin_time":0,"end_time":263},{"text":"my","begin_index":1,"end_index":2,"begin_time":263,"end_time":401}]},"original_text":"Before my bed"}}}"#,
+    ) {
+        QwenServerEvent::SentenceEnd { words } => {
+            assert_eq!(
+                words,
+                vec![
+                    QwenWord {
+                        text: "Before".into(),
+                        begin_ms: 0,
+                        end_ms: 263
+                    },
+                    QwenWord {
+                        text: "my".into(),
+                        begin_ms: 263,
+                        end_ms: 401
+                    },
+                ]
+            );
+        }
+        other => panic!("expected SentenceEnd, got {other:?}"),
+    }
+}
+
+#[test]
+pub(crate) fn test_qwen_run_task_json_shape() {
+    let v = qwen_run_task_json(
+        "task-1",
+        "qwen-audio-3.0-tts-flash",
+        "longanhuan_v3.6",
+        1.5,
+        0.25, // below the 0.5 floor — clamped
+        1.0,  // wrapper neutral → API neutral 50
+        true,
+        None,
+    );
+    assert_eq!(v["header"]["action"], "run-task");
+    assert_eq!(v["header"]["task_id"], "task-1");
+    assert_eq!(v["header"]["streaming"], "duplex");
+    assert_eq!(v["payload"]["task_group"], "audio");
+    assert_eq!(v["payload"]["task"], "tts");
+    assert_eq!(v["payload"]["function"], "SpeechSynthesizer");
+    assert_eq!(v["payload"]["model"], "qwen-audio-3.0-tts-flash");
+    let p = &v["payload"]["parameters"];
+    assert_eq!(p["text_type"], "PlainText");
+    assert_eq!(p["voice"], "longanhuan_v3.6");
+    assert_eq!(p["format"], "pcm");
+    assert_eq!(p["sample_rate"], 24_000);
+    assert_eq!(p["volume"], 50);
+    assert_eq!(p["rate"], 1.5);
+    assert_eq!(p["pitch"], 0.5); // clamped up
+    assert_eq!(p["word_timestamp_enabled"], true);
+    assert!(p.get("instruction").is_none());
+}
+
+#[test]
+pub(crate) fn test_qwen_volume_multiplier_mapping() {
+    // The wrapper's volume is a 1.0-centred multiplier (crate-wide
+    // contract: lib.rs tts_set_volume "1.0 = normal"); the API scale is
+    // [0, 100] with neutral at 50. 0.5 → 25, 1.0 → 50, 2.0 → 100, and
+    // anything above 2.0 clamps to 100.
+    let mk = |volume: f32| {
+        let v = qwen_run_task_json("t", "m", "v", 1.0, 1.0, volume, false, None);
+        v["payload"]["parameters"]["volume"].as_i64().unwrap()
+    };
+    assert_eq!(mk(0.0), 0);
+    assert_eq!(mk(0.5), 25);
+    assert_eq!(mk(1.0), 50);
+    assert_eq!(mk(2.0), 100);
+    assert_eq!(mk(5.0), 100);
+}
+
+#[test]
+pub(crate) fn test_qwen_run_task_instruction_included() {
+    let v = qwen_run_task_json(
+        "t",
+        "m",
+        "v",
+        1.0,
+        1.0,
+        1.0,
+        false,
+        Some("Speak cheerfully."),
+    );
+    assert_eq!(
+        v["payload"]["parameters"]["instruction"],
+        "Speak cheerfully."
+    );
+    assert_eq!(v["payload"]["parameters"]["word_timestamp_enabled"], false);
+}
+
+#[test]
+pub(crate) fn test_qwen_chunk_text_respects_limit() {
+    // Short text → single chunk.
+    assert_eq!(qwen_chunk_text("hello"), vec!["hello"]);
+    // Long ASCII text → chunks of ≤ 19 000 chars that reassemble exactly.
+    let long = "a".repeat(40_000);
+    let chunks = qwen_chunk_text(&long);
+    assert!(chunks.len() >= 3);
+    assert!(chunks.iter().all(|c| c.chars().count() <= 19_000));
+    assert_eq!(chunks.concat(), long);
+    // Multibyte text is never sliced mid-char.
+    let cjk = "汉".repeat(19_050);
+    let chunks = qwen_chunk_text(&cjk);
+    assert_eq!(chunks.concat(), cjk);
+    for c in &chunks {
+        assert!(c.chars().count() <= 19_000);
+    }
+}
+
 // ===== Per-engine config matrix =====
 //
 // One test per provider asserting the URL the engine will actually hit,

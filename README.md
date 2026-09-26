@@ -2,7 +2,7 @@
 
 Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
 
-## Engines (25 total)
+## Engines (27 total)
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
@@ -14,6 +14,8 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
 | Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
+| Google Gemini (3.8 TTS) | Cloud | API Key | After response (JSON) | API | Estimated (scaled) | Platform-aware |
+| Qwen (Alibaba Cloud Model Studio / DashScope) | Cloud | API Key (+ optional Model/Region/Instruction) | Real-time (WS) | Static (14 system voices) | **Real** (word timestamps, voice-dependent) | Stripped |
 | OpenAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
 | ElevenLabs | Cloud | API Key | Streamed (JSON w/ timestamps) | API | Estimated | Platform-aware |
 | Cartesia | Cloud | API Key | Streamed | API | Estimated | Platform-aware |

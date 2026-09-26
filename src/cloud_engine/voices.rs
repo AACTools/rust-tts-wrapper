@@ -277,6 +277,114 @@ pub(crate) fn static_voices(provider: &str) -> Option<Vec<Voice>> {
         };
 
     match provider {
+        // Qwen-Audio-TTS system voices (DashScope has no list endpoint —
+        // static table from the Qwen-Audio-TTS voice list doc). Chinese
+        // voices are bilingual zh/en; loong* are English-only. The two
+        // longan* entries belong to qwen-audio-3.0-tts-plus, the rest to
+        // qwen-audio-3.0-tts-flash; IDs are unique so one list serves both.
+        "qwen" => {
+            let zh_en = || vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()];
+            Some(vec![
+                voice(
+                    "longanlingxin",
+                    "Long An Ling Xin",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longanlufeng",
+                    "Long An Lu Feng",
+                    Gender::Male,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longanfengyue",
+                    "Long An Feng Yue",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longanyuanfei",
+                    "Long An Yuan Fei",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longanlingxi",
+                    "Long An Ling Xi",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longanxiaoxin",
+                    "Long An Xiao Xin",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longanhuan_v3.6",
+                    "Long An Huan",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longjielidou_v3.6",
+                    "Long Jie Li Dou",
+                    Gender::Male,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longpaopao_v3.6",
+                    "Long Pao Pao",
+                    Gender::Female,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longhuohuo_v3.6",
+                    "Long Huo Huo",
+                    Gender::Male,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "longchuanshu_v3.6",
+                    "Long Chuan Shu",
+                    Gender::Male,
+                    "qwen",
+                    zh_en(),
+                ),
+                voice(
+                    "loongmary",
+                    "Loong Mary",
+                    Gender::Female,
+                    "qwen",
+                    vec![en_us()],
+                ),
+                voice(
+                    "loongeva_v3.6",
+                    "Loong Eva",
+                    Gender::Female,
+                    "qwen",
+                    vec![en_us()],
+                ),
+                voice(
+                    "loongjohn",
+                    "Loong John",
+                    Gender::Male,
+                    "qwen",
+                    vec![en_us()],
+                ),
+            ])
+        }
         "openai" => Some(vec![
             voice(
                 "alloy",

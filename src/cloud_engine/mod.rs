@@ -76,6 +76,7 @@ mod elevenlabs;
 mod engine;
 mod gemini;
 mod google;
+mod qwen;
 mod ssml;
 #[cfg(test)]
 mod tests;
@@ -89,6 +90,7 @@ pub(crate) use edge::*;
 pub(crate) use elevenlabs::*;
 pub(crate) use gemini::*;
 pub(crate) use google::*;
+pub(crate) use qwen::*;
 pub(crate) use ssml::*;
 pub(crate) use voices::*;
 
