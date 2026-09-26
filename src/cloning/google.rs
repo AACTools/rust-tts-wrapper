@@ -15,7 +15,7 @@
 //! exercised live in CI — no allow-listed key available).
 
 use super::{
-    select_clips, wav_bytes, CloneHandle, CloneOutcome, CloningMode, ConsentRecording, ConsentSpec,
+    select_clips, CloneHandle, CloneOutcome, CloningMode, ConsentRecording, ConsentSpec,
     VoiceCloning, VoiceIdentity,
 };
 use crate::types::{TtsError, TtsResult};
@@ -104,27 +104,17 @@ impl VoiceCloning for GoogleCloner {
                 )
             })?;
 
-        // ~10 s of reference audio, as one WAV.
+        // ~10 s of reference audio. LINEAR16 means headerless PCM16 LE —
+        // no RIFF container.
         let picked = select_clips(&identity.clips, GOOGLE_TARGET_SECS);
-        if picked.is_empty() {
-            return Err(TtsError("google cloning: no clips to send".into()));
-        }
-        let mut pcm = Vec::new();
-        let mut rate = 0;
-        for clip in &picked {
-            if rate == 0 {
-                rate = clip.sample_rate;
-            }
-            pcm.extend_from_slice(&clip.pcm);
-        }
-        // Cap near the documented 10 s.
+        let (mut pcm, rate) = super::concat_clips(&picked, 300)?;
         #[allow(clippy::cast_possible_truncation)]
         let max_pcm = (rate as usize).saturating_mul(2 * GOOGLE_TARGET_SECS as usize);
         if pcm.len() > max_pcm {
             pcm.truncate(max_pcm);
         }
-        let reference = wav_bytes(&pcm, rate);
-        let consent_wav = wav_bytes(&consent.pcm, consent.sample_rate);
+        let reference = pcm;
+        let consent_pcm = consent.pcm.clone();
 
         let b64 = base64::engine::general_purpose::STANDARD;
         let body = serde_json::json!({
@@ -134,16 +124,18 @@ impl VoiceCloning for GoogleCloner {
             },
             "voice_talent_consent": {
                 "audio_config": { "audio_encoding": "LINEAR16" },
-                "content": b64.encode(&consent_wav),
+                "content": b64.encode(&consent_pcm),
             },
             "consent_script": GOOGLE_CONSENT_SCRIPT,
             "language_code": language_code,
         });
 
+        // Google API keys are not bearer tokens — the crate's google
+        // synth engine uses x-goog-api-key; mirror it here.
         let req = self
             .client
             .post(self.endpoint())
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("x-goog-api-key", &self.api_key)
             .header("x-goog-user-project", &self.project)
             .json(&body);
         let resp = req

@@ -259,8 +259,14 @@ pub(crate) fn build_azure_ssml(
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-')
         {
-            let model_escaped = base_model.replace('&', "&amp;").replace('\'', "&apos;");
-            let profile_escaped = profile.replace('&', "&amp;").replace('\'', "&apos;");
+            let esc = |v: &str| {
+                v.replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('\'', "&apos;")
+            };
+            let model_escaped = esc(base_model);
+            let profile_escaped = esc(profile);
             // Base model names carry no locale prefix, so `lang` (derived
             // from a normal "en-US-Voice" name) would be garbage here.
             // Azure auto-detects the spoken language for personal voices;

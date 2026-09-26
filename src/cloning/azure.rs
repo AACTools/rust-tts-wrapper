@@ -124,7 +124,7 @@ impl AzureCloner {
         );
         let resp = self
             .client
-            .post(&url)
+            .put(&url)
             .header(header, value)
             .multipart(form)
             .send()
@@ -145,21 +145,18 @@ impl AzureCloner {
         resource_id: &str,
         project_id: &str,
         consent_id: &str,
-        identity: &VoiceIdentity,
+        prompt_pcm: &[u8],
+        prompt_rate: u32,
     ) -> TtsResult<String> {
-        let picked = select_clips(&identity.clips, AZURE_TARGET_SECS);
-        let (pcm, rate) = super::concat_clips(&picked, 300)?;
-        // 5–90 s window.
+        let rate = prompt_rate;
+        // 5–90 s window (lower bound validated by the caller).
         #[allow(clippy::cast_possible_truncation)]
         let max_pcm = (rate as usize).saturating_mul(2 * 90);
-        let pcm = if pcm.len() > max_pcm {
-            pcm[..max_pcm].to_vec()
+        let pcm = if prompt_pcm.len() > max_pcm {
+            prompt_pcm[..max_pcm].to_vec()
         } else {
-            pcm
+            prompt_pcm.to_vec()
         };
-        if (pcm.len() as u64) < u64::from(rate) * 2 * 5 {
-            return Err(TtsError("azure cloning: prompt audio must be ≥5 s".into()));
-        }
         let form = reqwest::blocking::multipart::Form::new()
             .text("projectId", project_id.to_string())
             .text("consentId", consent_id.to_string())
@@ -283,11 +280,43 @@ impl VoiceCloning for AzureCloner {
                  voiceTalentName/companyName/locale"
             )));
         };
+        // Validate everything BEFORE any network call: a failure after
+        // put_consent would orphan a server-side consent resource.
+        let talent = consent
+            .metadata
+            .get("voiceTalentName")
+            .ok_or_else(|| TtsError("azure cloning: consent needs voiceTalentName".into()))?;
+        let company = consent
+            .metadata
+            .get("companyName")
+            .ok_or_else(|| TtsError("azure cloning: consent needs companyName".into()))?;
+        let locale = consent
+            .metadata
+            .get("locale")
+            .ok_or_else(|| TtsError("azure cloning: consent needs locale".into()))?;
+        // Only the en-US script is pinned; a different locale would be
+        // verified against that locale's script we cannot supply.
+        if locale != "en-US" {
+            return Err(TtsError(format!(
+                "azure cloning: only the en-US consent script is pinned \
+                 (requested {locale})"
+            )));
+        }
+        if identity.clips.is_empty() {
+            return Err(TtsError("azure cloning: identity has no clips".into()));
+        }
+        let picked = select_clips(&identity.clips, AZURE_TARGET_SECS);
+        let (prompt_pcm, prompt_rate) = super::concat_clips(&picked, 300)?;
+        if (prompt_pcm.len() as u64) < u64::from(prompt_rate) * 2 * 5 {
+            return Err(TtsError("azure cloning: prompt audio must be ≥5 s".into()));
+        }
+        let _ = (talent, company);
         let suffix = uuid::Uuid::new_v4().simple().to_string();
         let consent_id = format!("rust-tts-consent-{suffix}");
         let voice_id = format!("rust-tts-pv-{suffix}");
         self.put_consent(consent, &consent_id, project_id)?;
-        let operation = self.post_personal_voice(&voice_id, project_id, &consent_id, identity)?;
+        let operation =
+            self.post_personal_voice(&voice_id, project_id, &consent_id, &prompt_pcm, prompt_rate)?;
         // First poll immediately — training is documented as <5 s.
         if let Some(handle) = self.poll_once(&operation)? {
             return Ok(CloneOutcome::Ready(handle));

@@ -292,17 +292,23 @@ impl AudioClip {
     }
 
     /// Append streaming PCM16 LE mono chunks (live microphone capture).
-    /// The rate must match the clip's; chunks must be whole samples
-    /// (odd-length trailing bytes are held back until the next push).
+    /// The rate must match the clip's, and chunks must be whole samples.
     ///
     /// # Errors
-    /// When the chunk's sample rate differs from the clip's.
+    /// When the chunk's sample rate differs from the clip's, or the chunk
+    /// splits a sample (odd byte length) — one odd chunk would skew the
+    /// stream permanently, so it is rejected rather than silently held.
     pub fn push_pcm(&mut self, chunk: &[u8], sample_rate: u32) -> TtsResult<()> {
         if sample_rate != self.sample_rate {
             return Err(TtsError(format!(
                 "stream chunk rate {sample_rate} != clip rate {}",
                 self.sample_rate
             )));
+        }
+        if !chunk.len().is_multiple_of(2) {
+            return Err(TtsError(
+                "stream chunk splits a 16-bit sample (odd byte length)".into(),
+            ));
         }
         self.pcm.extend_from_slice(chunk);
         Ok(())
