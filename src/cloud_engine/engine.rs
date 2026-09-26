@@ -37,7 +37,16 @@ impl CloudEngine {
         let mut config = build_config(id, credentials)?;
         if let Some(url_override) = credentials.get("synthUrl") {
             if !url_override.is_empty() {
-                config.synth_url.clone_from(url_override);
+                if id == "qwen" {
+                    // The qwen path never reads synth_url (WS-only); a
+                    // synthUrl override would be silently ignored.
+                    eprintln!(
+                        "Engine 'qwen' is WebSocket-only: credential 'synthUrl' has no \
+                         effect. Use 'wsUrl' to override the endpoint."
+                    );
+                } else {
+                    config.synth_url.clone_from(url_override);
+                }
             }
         }
         let api_key = credentials

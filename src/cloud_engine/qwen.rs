@@ -51,16 +51,22 @@ const QWEN_TEXT_CHUNK_CHARS: usize = 19_000;
 
 /// Resolve the WebSocket inference URL. A `wsUrl` credential wins; then a
 /// `region` credential (`qwencloud` | `intl` | `beijing`); otherwise the
-/// Qwen Cloud default.
+/// Qwen Cloud default. An unrecognized `region` is an error rather than a
+/// silent fallback (a typo'd "Beijing" would otherwise route to the wrong
+/// endpoint and fail with a confusing auth error).
 #[cfg(feature = "cloud")]
-pub(crate) fn qwen_ws_url(credentials: &HashMap<String, String>) -> String {
+pub(crate) fn qwen_ws_url(credentials: &HashMap<String, String>) -> TtsResult<String> {
     if let Some(url) = credentials.get("wsUrl").filter(|u| !u.is_empty()) {
-        return url.clone();
+        return Ok(url.clone());
     }
     match credentials.get("region").map(String::as_str) {
-        Some("intl") => QWEN_WS_URL_INTL.into(),
-        Some("beijing") => QWEN_WS_URL_BEIJING.into(),
-        _ => QWEN_WS_URL_QWENCLOUD.into(),
+        None | Some("qwencloud" | "") => Ok(QWEN_WS_URL_QWENCLOUD.into()),
+        Some("intl") => Ok(QWEN_WS_URL_INTL.into()),
+        Some("beijing") => Ok(QWEN_WS_URL_BEIJING.into()),
+        Some(other) => Err(TtsError(format!(
+            "qwen: unknown region '{other}' (expected qwencloud, intl, or beijing; \
+             or set wsUrl to override the endpoint)"
+        ))),
     }
 }
 
@@ -92,6 +98,36 @@ pub(crate) struct QwenWord {
     pub(crate) text: String,
     pub(crate) begin_ms: u64,
     pub(crate) end_ms: u64,
+}
+
+/// Accumulates the running audio-time base for per-sentence word
+/// timestamps. Word times in `sentence-end` events are relative to their
+/// own sentence, so each sentence needs the offset of its start.
+///
+/// Ground truth is delivered audio: at 24 kHz 16-bit mono, 48 bytes =
+/// 1 ms. Advancing by byte deltas (rather than the sentence's last word
+/// end) keeps later sentences aligned even when one reports no words or
+/// ends in trailing silence.
+#[cfg(feature = "cloud")]
+#[derive(Debug, Default)]
+pub(crate) struct QwenSentenceClock {
+    sentence_audio_ms: u64,
+    audio_bytes_at_sentence_end: usize,
+}
+
+#[cfg(feature = "cloud")]
+impl QwenSentenceClock {
+    /// Record that a sentence ended with `audio_bytes_total` PCM bytes
+    /// delivered so far (all of a sentence's frames precede its
+    /// sentence-end). Returns the finished sentence's base offset in ms.
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn sentence_finished(&mut self, audio_bytes_total: usize) -> u64 {
+        let base = self.sentence_audio_ms;
+        let delta = audio_bytes_total.saturating_sub(self.audio_bytes_at_sentence_end);
+        self.sentence_audio_ms += (delta / 48) as u64;
+        self.audio_bytes_at_sentence_end = audio_bytes_total;
+        base
+    }
 }
 
 /// Parse a server text frame into a [`QwenServerEvent`].
@@ -222,15 +258,15 @@ pub(crate) fn qwen_chunk_text(text: &str) -> Vec<&str> {
     let mut chunks = Vec::new();
     let mut start = 0;
     while start < text.len() {
-        let mut end = text.len();
-        while text[start..end].chars().count() > QWEN_TEXT_CHUNK_CHARS {
-            // Halve towards the char boundary at/after the cap.
-            end = start
-                + text[start..]
-                    .char_indices()
-                    .nth(QWEN_TEXT_CHUNK_CHARS)
-                    .map_or(text.len() - start, |(i, _)| i);
-        }
+        // One step to the byte offset of the (cap+1)-th char — i.e. the
+        // char boundary directly after the cap-th char.
+        let mut end = text[start..]
+            .char_indices()
+            .nth(QWEN_TEXT_CHUNK_CHARS)
+            .map_or(text.len(), |(i, _)| start + i);
+        // Guard against pathological slicing (cannot happen with valid
+        // UTF-8, but keeps the loop obviously terminating).
+        end = end.clamp(start + 1, text.len());
         chunks.push(&text[start..end]);
         start = end;
     }
@@ -283,7 +319,7 @@ pub(crate) fn qwen_speak_ws(
         return Err(TtsError("qwen: refusing to synthesize empty text".into()));
     }
 
-    let ws_url_str = qwen_ws_url(credentials);
+    let ws_url_str = qwen_ws_url(credentials)?;
     let ws_url = Url::parse(&ws_url_str).map_err(|e| TtsError(format!("Invalid WS URL: {e}")))?;
 
     // Auth is bound at the handshake only (subsequent task frames carry
@@ -307,7 +343,9 @@ pub(crate) fn qwen_speak_ws(
         .map_err(|e| TtsError(format!("WS connect error: {e}")))?
         .0;
 
-    let task_id = Uuid::new_v4().to_string();
+    // DashScope SDKs emit 32-hex-no-dash task IDs; match that shape (the
+    // Azure WS branch uses .simple() for the same reason).
+    let task_id = Uuid::new_v4().simple().to_string();
     let send = |socket: &mut tungstenite::WebSocket<
         tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
     >,
@@ -385,14 +423,10 @@ pub(crate) fn qwen_speak_ws(
     // (exact → case/accent-insensitive → hold-last), like the
     // ElevenLabs/Google paths.
     let mut search = crate::word_search::WordSearch::new(boundary_search_text);
-    // Word times are per-sentence, so keep a running audio-time offset.
-    // Ground truth is delivered audio: at 24 kHz 16-bit mono, 48 bytes =
-    // 1 ms. Advancing by byte deltas (rather than the sentence's last
-    // word end) keeps later sentences' timestamps aligned even when a
-    // sentence reports no words or ends in trailing silence.
-    let mut sentence_audio_ms: u64 = 0;
+    // Per-sentence word times need each sentence's audio-time base —
+    // see QwenSentenceClock for why delivered bytes are the ground truth.
+    let mut clock = QwenSentenceClock::default();
     let mut audio_bytes = 0usize;
-    let mut audio_bytes_at_sentence_end = 0usize;
 
     loop {
         if std::time::Instant::now() > deadline {
@@ -421,15 +455,11 @@ pub(crate) fn qwen_speak_ws(
                     return Err(TtsError(format!("qwen task failed: {message} ({code})")));
                 }
                 QwenServerEvent::SentenceEnd { words } => {
-                    let sentence_start_ms = sentence_audio_ms;
                     // All of this sentence's audio frames precede its
                     // sentence-end, so the byte delta is the sentence
                     // duration. Advance before firing so the next
                     // sentence starts from the right offset.
-                    #[allow(clippy::cast_possible_truncation)]
-                    let delta_bytes = audio_bytes.saturating_sub(audio_bytes_at_sentence_end);
-                    sentence_audio_ms += (delta_bytes / 48) as u64;
-                    audio_bytes_at_sentence_end = audio_bytes;
+                    let sentence_start_ms = clock.sentence_finished(audio_bytes);
                     if let Some(cb) = on_boundary.as_mut() {
                         for w in &words {
                             let (char_offset, char_len) = search.find_next(&w.text);

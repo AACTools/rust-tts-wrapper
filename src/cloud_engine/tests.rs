@@ -739,19 +739,49 @@ pub(crate) fn test_qwen_model_id_override() {
 #[test]
 pub(crate) fn test_qwen_ws_url_regions() {
     let mut c = HashMap::new();
-    assert_eq!(qwen_ws_url(&c), QWEN_WS_URL_QWENCLOUD);
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_QWENCLOUD);
     c.insert("region".to_string(), "intl".to_string());
-    assert_eq!(qwen_ws_url(&c), QWEN_WS_URL_INTL);
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_INTL);
     c.insert("region".to_string(), "beijing".to_string());
-    assert_eq!(qwen_ws_url(&c), QWEN_WS_URL_BEIJING);
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_BEIJING);
+    c.insert("region".to_string(), "qwencloud".to_string());
+    assert_eq!(qwen_ws_url(&c).unwrap(), QWEN_WS_URL_QWENCLOUD);
     c.insert(
         "wsUrl".to_string(),
         "wss://proxy.example.com/api-ws/v1/inference".to_string(),
     );
     assert_eq!(
-        qwen_ws_url(&c),
+        qwen_ws_url(&c).unwrap(),
         "wss://proxy.example.com/api-ws/v1/inference"
     );
+}
+
+#[test]
+pub(crate) fn test_qwen_ws_url_unknown_region_rejected() {
+    let mut c = HashMap::new();
+    c.insert("region".to_string(), "Beijing".to_string());
+    let err = qwen_ws_url(&c).unwrap_err().to_string();
+    assert!(
+        err.contains("unknown region 'Beijing'"),
+        "should name the bad region, got: {err}"
+    );
+}
+
+#[test]
+pub(crate) fn test_qwen_sentence_clock_advances_by_delivered_bytes() {
+    use super::qwen::QwenSentenceClock;
+    let mut clock = QwenSentenceClock::default();
+    // Sentence 1: 4800 bytes → 100 ms of audio; its base is 0.
+    assert_eq!(clock.sentence_finished(4_800), 0);
+    // Sentence 2: 7200 more bytes (base 100 ms, spans 100–250 ms).
+    assert_eq!(clock.sentence_finished(12_000), 100);
+    // Sentence 3 reports no audio (e.g. empty words + no frames): base
+    // does not advance — later sentences stay aligned.
+    assert_eq!(clock.sentence_finished(12_000), 250);
+    // Sentence 4: 4800 more bytes.
+    assert_eq!(clock.sentence_finished(16_800), 250);
+    // A byte count going backwards saturates rather than panicking.
+    assert_eq!(clock.sentence_finished(1_000), 350);
 }
 
 #[test]
