@@ -34,6 +34,12 @@
 #[cfg(all(feature = "avsynth", target_os = "macos"))]
 mod avsynth_engine;
 pub mod boundaries;
+
+/// Voice cloning: bank a voice once (Personal Voice export / LJSpeech
+/// corpus), enroll it with cloning-capable engines, speak it everywhere.
+/// Rust-only for now; enable the `cloning` feature.
+#[cfg(feature = "cloning")]
+pub mod cloning;
 #[cfg(feature = "cloud")]
 mod cloud_engine;
 pub mod engine;

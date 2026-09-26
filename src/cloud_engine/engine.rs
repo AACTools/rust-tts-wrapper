@@ -64,6 +64,68 @@ impl CloudEngine {
     }
 }
 
+impl CloudEngine {
+    /// Apply AWS SigV4 auth headers to a request builder for the Polly
+    /// endpoints. Signs `payload` exactly as it will be sent.
+    #[allow(clippy::similar_names)]
+    fn sigv4_request(
+        &self,
+        req: reqwest::blocking::RequestBuilder,
+        method: &str,
+        url_str: &str,
+        content_type: Option<&str>,
+        payload: &[u8],
+    ) -> reqwest::blocking::RequestBuilder {
+        let Ok(parsed) = Url::parse(url_str) else {
+            return req; // unparseable URLs fail later with a clearer error
+        };
+        let host = parsed.host_str().unwrap_or_default().to_string();
+        let mut path = parsed.path().to_string();
+        if path.is_empty() {
+            path = "/".into();
+        }
+        let query = parsed
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let region = self
+            .credentials
+            .get("region")
+            .cloned()
+            .unwrap_or_else(|| "us-east-1".into());
+        let creds = SigV4Credentials {
+            access_key: self
+                .credentials
+                .get("accessKeyId")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            secret_key: self
+                .credentials
+                .get("secretAccessKey")
+                .map(String::as_str)
+                .unwrap_or_default(),
+            region: &region,
+            service: "polly",
+        };
+        let (amz_date, _) = amz_date_now();
+        let auth = authorization_header(
+            method,
+            &SignedUrl { host, path, query },
+            &creds,
+            &amz_date,
+            content_type,
+            &sha256_hex(payload),
+        );
+        let mut req = req
+            .header("X-Amz-Date", &amz_date)
+            .header("Authorization", auth);
+        if let Some(ct) = content_type {
+            req = req.header("Content-Type", ct);
+        }
+        req
+    }
+}
+
 impl TtsEngine for CloudEngine {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
     fn speak(
@@ -714,8 +776,23 @@ impl TtsEngine for CloudEngine {
                 for (k, v) in &self.config.extra_body {
                     body.insert(k.clone(), v.clone());
                 }
-                req = req.json(&serde_json::Value::Object(body));
-                req.send()
+                if self.config.provider_id == "polly" {
+                    // AWS SigV4: sign and send the exact same bytes.
+                    let payload = serde_json::Value::Object(body).to_string();
+                    req = self
+                        .sigv4_request(
+                            req,
+                            "POST",
+                            synth_url,
+                            Some("application/json"),
+                            payload.as_bytes(),
+                        )
+                        .body(payload);
+                    req.send()
+                } else {
+                    req = req.json(&serde_json::Value::Object(body));
+                    req.send()
+                }
             };
             resp.map_err(|e| TtsError(format!("HTTP error: {e}")))
         };
@@ -1012,12 +1089,68 @@ impl TtsEngine for CloudEngine {
         } else {
             format!("{}{}", self.config.auth_prefix, self.api_key)
         };
+        // Polly signs its GETs (SigV4) instead of a static header; the
+        // headers are computed here (sync context) and applied on the
+        // voice-list thread.
+        let polly_headers: Vec<(String, String)> = if self.config.provider_id == "polly" {
+            let Ok(parsed) = Url::parse(&url) else {
+                return Err(TtsError(format!("Invalid voices URL: {url}")));
+            };
+            let region = self
+                .credentials
+                .get("region")
+                .cloned()
+                .unwrap_or_else(|| "us-east-1".into());
+            let creds = SigV4Credentials {
+                access_key: self
+                    .credentials
+                    .get("accessKeyId")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                secret_key: self
+                    .credentials
+                    .get("secretAccessKey")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                region: &region,
+                service: "polly",
+            };
+            let (amz_date, _) = amz_date_now();
+            let mut path = parsed.path().to_string();
+            if path.is_empty() {
+                path = "/".into();
+            }
+            let auth = authorization_header(
+                "GET",
+                &SignedUrl {
+                    host: parsed.host_str().unwrap_or_default().to_string(),
+                    path,
+                    query: parsed
+                        .query_pairs()
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect(),
+                },
+                &creds,
+                &amz_date,
+                None,
+                EMPTY_PAYLOAD_SHA256,
+            );
+            vec![
+                ("X-Amz-Date".into(), amz_date),
+                ("Authorization".into(), auth),
+            ]
+        } else {
+            Vec::new()
+        };
         let client = self.client.clone();
 
         let handle = std::thread::Builder::new()
             .name("tts-voice-list".into())
             .spawn(move || -> TtsResult<serde_json::Value> {
                 let mut req = client.get(url.as_str());
+                for (k, v) in &polly_headers {
+                    req = req.header(k.as_str(), v.as_str());
+                }
                 if !auth_header.is_empty() {
                     req = req.header(&auth_header, auth_value);
                 }
@@ -1050,6 +1183,11 @@ impl TtsEngine for CloudEngine {
                 .get("voices")
                 .and_then(|v| v.as_array())
                 .map_or_else(|| Ok(vec![]), |arr| Ok(map_gemini_voices(arr))),
+            // Polly: {"Voices": [{Id, Name, Gender, LanguageCode, …}]}
+            "polly" => json
+                .get("Voices")
+                .and_then(|v| v.as_array())
+                .map_or_else(|| Ok(vec![]), |arr| Ok(map_generic_voices("polly", arr))),
             _ => json.as_array().map_or_else(
                 || Ok(vec![]),
                 |arr| Ok(map_generic_voices(&self.config.provider_id, arr)),
@@ -1076,7 +1214,9 @@ impl TtsEngine for CloudEngine {
             return Ok(false);
         };
         let mut req = self.client.get(voices_url.as_str());
-        if !self.config.auth_header.is_empty() {
+        if self.config.provider_id == "polly" {
+            req = self.sigv4_request(req, "GET", voices_url, None, &[]);
+        } else if !self.config.auth_header.is_empty() {
             let val = format!("{}{}", self.config.auth_prefix, self.api_key);
             req = req.header(&self.config.auth_header, val);
         }

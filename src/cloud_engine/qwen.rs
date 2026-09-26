@@ -78,10 +78,19 @@ pub(crate) enum QwenServerEvent {
     /// `task-started` — the client may now send text.
     TaskStarted,
     /// `result-generated` / `sentence-synthesis` — one binary audio frame
-    /// follows this event immediately.
-    AudioFrame,
+    /// follows this event immediately. Carries the sentence index so
+    /// audio bytes can be attributed to the right sentence even when
+    /// `sentence-end` events arrive late (observed on the live API).
+    ///
+    /// A missing `sentence.index` parses as 0: if a server variant ever
+    /// omitted indices entirely, every frame would attribute to sentence
+    /// 0 and later sentences' boundary bases would collapse onto the
+    /// total delivered audio. The live API always sends the index
+    /// (pinned by tests); if that ever changes, treat this as a protocol
+    /// break to fix, not a silent fallback.
+    AudioFrame { sentence: u64 },
     /// `result-generated` / `sentence-end` with the word-timestamp array.
-    SentenceEnd { words: Vec<QwenWord> },
+    SentenceEnd { sentence: u64, words: Vec<QwenWord> },
     /// `task-finished` — synthesis complete.
     TaskFinished,
     /// `task-failed` — the connection must be closed.
@@ -105,28 +114,39 @@ pub(crate) struct QwenWord {
 /// own sentence, so each sentence needs the offset of its start.
 ///
 /// Ground truth is delivered audio: at 24 kHz 16-bit mono, 48 bytes =
-/// 1 ms. Advancing by byte deltas (rather than the sentence's last word
-/// end) keeps later sentences aligned even when one reports no words or
-/// ends in trailing silence.
+/// 1 ms. Every `sentence-synthesis` event carries the sentence index of
+/// the binary frame that follows it, so bytes are attributed to the
+/// sentence they actually belong to — even when `sentence-end` events
+/// arrive after the next sentence's audio has started (observed on the
+/// live API; lump-sum attribution at sentence-end time over-advanced
+/// later sentences by the overlap).
 #[cfg(feature = "cloud")]
 #[derive(Debug, Default)]
 pub(crate) struct QwenSentenceClock {
-    sentence_audio_ms: u64,
-    audio_bytes_at_sentence_end: usize,
+    /// PCM bytes delivered per sentence index (attributed via the
+    /// sentence-synthesis marker preceding each binary frame).
+    bytes_by_sentence: std::collections::HashMap<u64, usize>,
 }
 
 #[cfg(feature = "cloud")]
 impl QwenSentenceClock {
-    /// Record that a sentence ended with `audio_bytes_total` PCM bytes
-    /// delivered so far (all of a sentence's frames precede its
-    /// sentence-end). Returns the finished sentence's base offset in ms.
+    /// Attribute `len` PCM bytes to `sentence` (call when a binary frame
+    /// arrives, with the index from the preceding sentence-synthesis).
+    pub(crate) fn audio_frame(&mut self, sentence: u64, len: usize) {
+        *self.bytes_by_sentence.entry(sentence).or_insert(0) += len;
+    }
+
+    /// Resolve the base offset (ms) for the finished `sentence`: the
+    /// total duration of all lower-indexed sentences.
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) fn sentence_finished(&mut self, audio_bytes_total: usize) -> u64 {
-        let base = self.sentence_audio_ms;
-        let delta = audio_bytes_total.saturating_sub(self.audio_bytes_at_sentence_end);
-        self.sentence_audio_ms += (delta / 48) as u64;
-        self.audio_bytes_at_sentence_end = audio_bytes_total;
-        base
+    pub(crate) fn sentence_base_ms(&self, sentence: u64) -> u64 {
+        let bytes: usize = self
+            .bytes_by_sentence
+            .iter()
+            .filter(|(&idx, _)| idx < sentence)
+            .map(|(_, &v)| v)
+            .sum();
+        (bytes / 48) as u64
     }
 }
 
@@ -162,8 +182,17 @@ pub(crate) fn qwen_parse_event(frame: &str) -> QwenServerEvent {
                 .and_then(|o| o.get("type"))
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
+            let sentence_index = || {
+                output
+                    .and_then(|o| o.get("sentence"))
+                    .and_then(|s| s.get("index"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default()
+            };
             match ty {
-                "sentence-synthesis" => QwenServerEvent::AudioFrame,
+                "sentence-synthesis" => QwenServerEvent::AudioFrame {
+                    sentence: sentence_index(),
+                },
                 "sentence-end" => {
                     let words = output
                         .and_then(|o| o.get("sentence"))
@@ -188,7 +217,10 @@ pub(crate) fn qwen_parse_event(frame: &str) -> QwenServerEvent {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    QwenServerEvent::SentenceEnd { words }
+                    QwenServerEvent::SentenceEnd {
+                        sentence: sentence_index(),
+                        words,
+                    }
                 }
                 _ => QwenServerEvent::Other,
             }
@@ -427,6 +459,9 @@ pub(crate) fn qwen_speak_ws(
     // see QwenSentenceClock for why delivered bytes are the ground truth.
     let mut clock = QwenSentenceClock::default();
     let mut audio_bytes = 0usize;
+    // Index of the sentence the next binary frame belongs to (set by
+    // sentence-synthesis markers).
+    let mut pending_frame_sentence: u64 = 0;
 
     loop {
         if std::time::Instant::now() > deadline {
@@ -454,12 +489,13 @@ pub(crate) fn qwen_speak_ws(
                     let _ = socket.close(None);
                     return Err(TtsError(format!("qwen task failed: {message} ({code})")));
                 }
-                QwenServerEvent::SentenceEnd { words } => {
-                    // All of this sentence's audio frames precede its
-                    // sentence-end, so the byte delta is the sentence
-                    // duration. Advance before firing so the next
-                    // sentence starts from the right offset.
-                    let sentence_start_ms = clock.sentence_finished(audio_bytes);
+                QwenServerEvent::AudioFrame { sentence } => {
+                    // The binary frame that immediately follows belongs
+                    // to this sentence.
+                    pending_frame_sentence = sentence;
+                }
+                QwenServerEvent::SentenceEnd { sentence, words } => {
+                    let sentence_start_ms = clock.sentence_base_ms(sentence);
                     if let Some(cb) = on_boundary.as_mut() {
                         for w in &words {
                             let (char_offset, char_len) = search.find_next(&w.text);
@@ -480,6 +516,7 @@ pub(crate) fn qwen_speak_ws(
             // bytes are raw PCM16LE mono 24 kHz (format: "pcm").
             Message::Binary(b) if !b.is_empty() => {
                 audio_bytes += b.len();
+                clock.audio_frame(pending_frame_sentence, b.len());
                 if let Some(cb) = on_audio.as_mut() {
                     cb(&b);
                 }

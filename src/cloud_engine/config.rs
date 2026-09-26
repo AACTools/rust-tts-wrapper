@@ -319,10 +319,37 @@ pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<
             ..Default::default()
         }),
         "polly" => {
-            // Polly requires AWS Signature V4 - not implemented yet
-            // Returning None indicates unsupported engine
-            eprintln!("WARNING: AWS Polly requires AWS Signature V4 authentication which is not implemented. Use a different cloud provider.");
-            None
+            // AWS SigV4-signed REST (see sigv4.rs) — the only engine whose
+            // auth is computed per-request rather than a static header.
+            let region = creds
+                .get("region")
+                .cloned()
+                .unwrap_or_else(|| "us-east-1".into());
+            let mut extra_body = HashMap::new();
+            // Polly always requires OutputFormat; MP3 flows through the
+            // standard incremental decode path (symphonia).
+            extra_body.insert(
+                "OutputFormat".to_string(),
+                serde_json::Value::String("mp3".into()),
+            );
+            extra_body.insert(
+                "LanguageCode".to_string(),
+                serde_json::Value::String("en-US".into()),
+            );
+            Some(CloudConfig {
+                // /v1/speech is the synchronous SynthesizeSpeech; /v1/synthesis is
+                // the *async* long-text API and 404s on streaming use.
+                synth_url: format!("https://polly.{region}.amazonaws.com/v1/speech"),
+                voice_param: "VoiceId".into(),
+                model_param: Some("Engine".into()),
+                model_default: Some("neural".into()),
+                default_voice: Some("Joanna".into()),
+                text_field: "Text".into(),
+                extra_body,
+                voices_url: Some(format!("https://polly.{region}.amazonaws.com/v1/voices")),
+                provider_id: "polly".into(),
+                ..Default::default()
+            })
         }
         // Qwen cloud TTS (Alibaba Cloud Model Studio / DashScope) via the
         // duplex WS protocol shared by Qwen-Audio-TTS and CosyVoice.

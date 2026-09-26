@@ -95,10 +95,11 @@ mod cloud_engine_smoke_tests {
     }
 
     #[test]
-    fn test_polly_is_not_constructable() {
-        // Polly needs SigV4 — engine creation must surface as None.
+    fn test_polly_is_constructable_with_full_creds() {
+        // Polly is SigV4-signed now — with full credentials it constructs
+        // like every other cloud engine.
         let creds = r#"{"accessKeyId":"a","secretAccessKey":"s","region":"us-east-1"}"#;
-        assert!(create_engine("polly", creds).is_none());
+        assert!(create_engine("polly", creds).is_some());
     }
 }
 

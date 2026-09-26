@@ -248,6 +248,39 @@ pub(crate) fn build_azure_ssml(
         format!("<prosody {}>{escaped}</prosody>", prosody_attrs.join(" "))
     };
 
+    // Personal Voice handles arrive as "{base_model}/{speakerProfileId}"
+    // (e.g. "DragonLatestNeural/3059912f-…") from the cloning registry.
+    // Synthesis then needs Azure's proprietary embedding element instead
+    // of a plain voice-name reference.
+    if let Some((base_model, profile)) = voice.split_once('/') {
+        if !profile.is_empty()
+            && base_model.chars().next().is_some_and(char::is_uppercase)
+            && profile
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            let esc = |v: &str| {
+                v.replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;")
+                    .replace('\'', "&apos;")
+            };
+            let model_escaped = esc(base_model);
+            let profile_escaped = esc(profile);
+            // Base model names carry no locale prefix, so `lang` (derived
+            // from a normal "en-US-Voice" name) would be garbage here.
+            // Azure auto-detects the spoken language for personal voices;
+            // en-US is the safe envelope default.
+            return format!(
+                "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' \
+                 xmlns:mstts='https://www.w3.org/2001/mstts' xml:lang='en-US'>\
+                 <voice name='{model_escaped}'>\
+                 <mstts:ttsembedding speakerProfileId='{profile_escaped}'>{inner}\
+                 </mstts:ttsembedding></voice></speak>"
+            );
+        }
+    }
+
     format!(
         "<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='{lang}'>\
          <voice name='{voice_escaped}'>{inner}</voice></speak>"

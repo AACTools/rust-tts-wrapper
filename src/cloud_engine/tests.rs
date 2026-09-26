@@ -702,11 +702,67 @@ pub(crate) fn test_hume_voice_is_object_in_extra_body() {
 }
 
 #[test]
-pub(crate) fn test_polly_unsupported_returns_none() {
-    // AWS Polly needs SigV4. We surface this by returning None
-    // (and emitting a warning) rather than constructing a broken config.
-    let creds = HashMap::new();
-    assert!(build_config("polly", &creds).is_none());
+pub(crate) fn test_azure_ssml_personal_voice_embedding() {
+    // Personal Voice handles ("{base}/{profile}") produce Azure's
+    // ttsembedding element with the mstts namespace.
+    let ssml = build_azure_ssml(
+        "Hello there",
+        "DragonLatestNeural/3059912f-2f7a-4c96-9abc-def012345678",
+        1.0,
+        1.0,
+        1.0,
+    );
+    assert!(
+        ssml.contains("xmlns:mstts='https://www.w3.org/2001/mstts'"),
+        "{ssml}"
+    );
+    assert!(ssml.contains("<voice name='DragonLatestNeural'>"), "{ssml}");
+    assert!(
+        ssml.contains(
+            "<mstts:ttsembedding \
+             speakerProfileId='3059912f-2f7a-4c96-9abc-def012345678'>Hello there"
+        ),
+        "{ssml}"
+    );
+}
+
+#[test]
+pub(crate) fn test_azure_ssml_normal_voice_unchanged() {
+    // Ordinary locale-prefixed voices take the plain path — no
+    // ttsembedding, no mstts namespace.
+    let ssml = build_azure_ssml("Hi", "en-US-AriaNeural", 1.0, 1.0, 1.0);
+    assert!(
+        ssml.contains("<voice name='en-US-AriaNeural'>Hi</voice>"),
+        "{ssml}"
+    );
+    assert!(!ssml.contains("mstts"), "{ssml}");
+}
+
+#[test]
+pub(crate) fn test_polly_config_matrix() {
+    // AWS Polly: SigV4-signed REST (sigv4.rs) — region-scoped synth and
+    // voices URLs, no static auth header, default neural/Joanna.
+    let mut creds = HashMap::new();
+    creds.insert("region".to_string(), "eu-west-1".to_string());
+    let cfg = build_config("polly", &creds).expect("polly config");
+    assert_eq!(
+        cfg.synth_url,
+        "https://polly.eu-west-1.amazonaws.com/v1/speech"
+    );
+    assert_eq!(
+        cfg.voices_url.as_deref(),
+        Some("https://polly.eu-west-1.amazonaws.com/v1/voices")
+    );
+    assert_eq!(cfg.provider_id, "polly");
+    assert!(cfg.auth_header.is_empty());
+    assert_eq!(cfg.text_field, "Text");
+    assert_eq!(cfg.voice_param, "VoiceId");
+    assert_eq!(cfg.model_param.as_deref(), Some("Engine"));
+    assert_eq!(cfg.model_default.as_deref(), Some("neural"));
+    assert_eq!(cfg.default_voice.as_deref(), Some("Joanna"));
+    // Default region when none given.
+    let cfg = build_config("polly", &HashMap::new()).expect("polly config");
+    assert!(cfg.synth_url.starts_with("https://polly.us-east-1."));
 }
 
 #[test]
@@ -768,20 +824,46 @@ pub(crate) fn test_qwen_ws_url_unknown_region_rejected() {
 }
 
 #[test]
-pub(crate) fn test_qwen_sentence_clock_advances_by_delivered_bytes() {
+pub(crate) fn test_qwen_sentence_clock_attributes_by_index() {
     use super::qwen::QwenSentenceClock;
     let mut clock = QwenSentenceClock::default();
-    // Sentence 1: 4800 bytes → 100 ms of audio; its base is 0.
-    assert_eq!(clock.sentence_finished(4_800), 0);
-    // Sentence 2: 7200 more bytes (base 100 ms, spans 100–250 ms).
-    assert_eq!(clock.sentence_finished(12_000), 100);
-    // Sentence 3 reports no audio (e.g. empty words + no frames): base
-    // does not advance — later sentences stay aligned.
-    assert_eq!(clock.sentence_finished(12_000), 250);
-    // Sentence 4: 4800 more bytes.
-    assert_eq!(clock.sentence_finished(16_800), 250);
-    // A byte count going backwards saturates rather than panicking.
-    assert_eq!(clock.sentence_finished(1_000), 350);
+    // Sentence 0: 4800 bytes → 100 ms.
+    clock.audio_frame(0, 4_800);
+    assert_eq!(clock.sentence_base_ms(0), 0);
+    // Sentence 1's frames start arriving BEFORE sentence 0's end event
+    // (observed on the live API) — attribution stays per-index.
+    clock.audio_frame(1, 2_400);
+    assert_eq!(clock.sentence_base_ms(0), 0);
+    assert_eq!(clock.sentence_base_ms(1), 100);
+    // More frames for sentence 1 (multiple synthesis markers per
+    // sentence are legal): 2400 + 4800 bytes → 150 ms duration.
+    clock.audio_frame(1, 4_800);
+    // Sentence 2 base = 100 ms + 150 ms.
+    assert_eq!(clock.sentence_base_ms(2), 250);
+    // Out-of-order frame indices never panic; unknown indices only
+    // affect their own totals.
+    clock.audio_frame(4, 48);
+    assert_eq!(clock.sentence_base_ms(2), 250);
+}
+
+#[test]
+pub(crate) fn test_qwen_parse_audio_frame_carries_index() {
+    use super::qwen::QwenServerEvent;
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-synthesis","sentence":{"index":3,"words":[]}}}}"#
+        ),
+        QwenServerEvent::AudioFrame { sentence: 3 }
+    );
+    match qwen_parse_event(
+        r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-end","sentence":{"index":2,"words":[]}}}}"#,
+    ) {
+        QwenServerEvent::SentenceEnd { sentence, words } => {
+            assert_eq!(sentence, 2);
+            assert!(words.is_empty());
+        }
+        other => panic!("expected SentenceEnd, got {other:?}"),
+    }
 }
 
 #[test]
@@ -813,7 +895,7 @@ pub(crate) fn test_qwen_parse_events() {
         qwen_parse_event(
             r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-synthesis","sentence":{"index":0,"words":[]}}}}"#
         ),
-        QwenServerEvent::AudioFrame
+        QwenServerEvent::AudioFrame { sentence: 0 }
     );
     // sentence-begin is ignored.
     assert_eq!(
@@ -830,7 +912,7 @@ pub(crate) fn test_qwen_parse_sentence_end_words() {
     match qwen_parse_event(
         r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-end","sentence":{"index":0,"words":[{"text":"Before","begin_index":0,"end_index":1,"begin_time":0,"end_time":263},{"text":"my","begin_index":1,"end_index":2,"begin_time":263,"end_time":401}]},"original_text":"Before my bed"}}}"#,
     ) {
-        QwenServerEvent::SentenceEnd { words } => {
+        QwenServerEvent::SentenceEnd { words, .. } => {
             assert_eq!(
                 words,
                 vec![
