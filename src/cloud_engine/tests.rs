@@ -702,6 +702,43 @@ pub(crate) fn test_hume_voice_is_object_in_extra_body() {
 }
 
 #[test]
+pub(crate) fn test_azure_ssml_personal_voice_embedding() {
+    // Personal Voice handles ("{base}/{profile}") produce Azure's
+    // ttsembedding element with the mstts namespace.
+    let ssml = build_azure_ssml(
+        "Hello there",
+        "DragonLatestNeural/3059912f-2f7a-4c96-9abc-def012345678",
+        1.0,
+        1.0,
+        1.0,
+    );
+    assert!(
+        ssml.contains("xmlns:mstts='https://www.w3.org/2001/mstts'"),
+        "{ssml}"
+    );
+    assert!(ssml.contains("<voice name='DragonLatestNeural'>"), "{ssml}");
+    assert!(
+        ssml.contains(
+            "<mstts:ttsembedding \
+             speakerProfileId='3059912f-2f7a-4c96-9abc-def012345678'>Hello there"
+        ),
+        "{ssml}"
+    );
+}
+
+#[test]
+pub(crate) fn test_azure_ssml_normal_voice_unchanged() {
+    // Ordinary locale-prefixed voices take the plain path — no
+    // ttsembedding, no mstts namespace.
+    let ssml = build_azure_ssml("Hi", "en-US-AriaNeural", 1.0, 1.0, 1.0);
+    assert!(
+        ssml.contains("<voice name='en-US-AriaNeural'>Hi</voice>"),
+        "{ssml}"
+    );
+    assert!(!ssml.contains("mstts"), "{ssml}");
+}
+
+#[test]
 pub(crate) fn test_polly_unsupported_returns_none() {
     // AWS Polly needs SigV4. We surface this by returning None
     // (and emitting a warning) rather than constructing a broken config.

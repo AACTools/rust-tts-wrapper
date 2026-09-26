@@ -12,7 +12,7 @@ pub(crate) const CORPUS_SAMPLE_RATE: u32 = 24_000;
 /// Per-file read cap for imports (zip entries and corpus wavs): real
 /// clips are a few MB; a zip bomb or misdirected archive must not OOM
 /// the process. Oversized entries are skipped and counted.
-const MAX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+pub(crate) const MAX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// A banked voice on disk: clips + (optional) transcripts. Two on-disk
 /// shapes are understood:
@@ -227,7 +227,62 @@ impl VoiceCorpus {
             name: self.name.clone(),
             clips: self.clips.clone(),
             language: language.map(str::to_string),
+            consent: Vec::new(),
         }
+    }
+
+    /// Import a directory of standalone audio files (wav/mp3/m4a/flac —
+    /// anything symphonia decodes in this build) as a corpus. Transcripts
+    /// attach by matching filename stem to `transcripts` when given.
+    /// Unreadable/undecodable files are skipped and counted.
+    ///
+    /// # Errors
+    /// When the directory cannot be read or no file decodes.
+    pub fn from_audio_dir(
+        dir: &str,
+        transcripts: Option<&std::collections::HashMap<String, String>>,
+    ) -> TtsResult<Self> {
+        let dir_path = std::path::Path::new(dir);
+        let name = dir_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("corpus")
+            .to_string();
+        let mut clips = Vec::new();
+        let mut skipped = 0usize;
+        for entry in std::fs::read_dir(dir_path)
+            .map_err(|e| TtsError(format!("read {dir}: {e}")))?
+            .flatten()
+        {
+            let path = entry.path();
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                continue;
+            };
+            if !matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "wav" | "mp3" | "m4a" | "flac"
+            ) {
+                continue;
+            }
+            match AudioClip::from_audio_file(&path) {
+                Ok(mut clip) => {
+                    if let Some(map) = transcripts {
+                        clip.transcript = map.get(&clip.name).cloned().or(clip.transcript);
+                    }
+                    clips.push(clip);
+                }
+                Err(_) => skipped += 1,
+            }
+        }
+        if clips.is_empty() {
+            return Err(TtsError(format!(
+                "no audio files decoded from {dir} ({skipped} skipped)"
+            )));
+        }
+        if skipped > 0 {
+            eprintln!("rust-tts-wrapper: audio dir import skipped {skipped} unreadable file(s)");
+        }
+        Ok(Self { name, clips })
     }
 }
 
@@ -393,6 +448,25 @@ mod tests {
         // 2 samples × factor 2 → 4 interpolated samples.
         let up = resample(&[0.0, 1.0], 24_000, 48_000);
         assert_eq!(up.len(), 4);
+    }
+
+    #[test]
+    fn audio_dir_import_with_transcripts() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = super::super::wav_bytes(&vec![0u8; 4_800], CORPUS_SAMPLE_RATE);
+        std::fs::write(dir.path().join("one.wav"), &wav).unwrap();
+        std::fs::write(dir.path().join("two.wav"), &wav).unwrap();
+        std::fs::write(dir.path().join("skip.txt"), b"not audio").unwrap();
+        let mut transcripts = std::collections::HashMap::new();
+        transcripts.insert("one".to_string(), "first line".to_string());
+        let corpus =
+            VoiceCorpus::from_audio_dir(dir.path().to_str().unwrap(), Some(&transcripts)).unwrap();
+        assert_eq!(corpus.clips.len(), 2);
+        // read_dir order is unspecified — find by name.
+        let one = corpus.clips.iter().find(|c| c.name == "one").expect("one");
+        let two = corpus.clips.iter().find(|c| c.name == "two").expect("two");
+        assert_eq!(one.transcript.as_deref(), Some("first line"));
+        assert!(two.transcript.is_none());
     }
 
     #[test]

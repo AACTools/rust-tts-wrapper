@@ -63,9 +63,11 @@ engine.speak("Hello", Some(&handle.voice_id), 1.0, 1.0, 1.0, Some(&mut audio_cb)
 cloner.delete_cloned(&handle)?; // quota hygiene
 ```
 
+- Capture is source-agnostic: `VoiceIdentityBuilder` records live microphone PCM clip-by-clip (`start_clip` / `push_pcm` / `finish_clip`), `VoiceIdentity::from_transcribed_pairs` takes audio files + transcripts, `AudioClip::from_audio_file` loads wav/mp3/m4a/flac. Personal Voice and LJSpeech are just two importers.
 - `CloneRegistry` persists identity → engine handles (`~/.rust-tts-wrapper/clones.json`).
 - Personal Voice exports are audio-only (no transcripts); attach them via `VoiceCorpus::phrases` or ASR when an engine needs them (Qwen doesn't).
-- Consent-gated providers (Azure Personal Voice, Google Chirp 3 ICV) and job-based ones (Murf, Resemble) are not implemented yet.
+- Consent-gated providers are implemented behind their real-world gates: **Google Chirp 3 ICV** (`generateVoiceCloningKey`, allow-listed projects — `consent_spec()` returns the exact script to record) and **Azure Personal Voice** (consent → personal voice → long-running-operation `poll_clone`; intake-gated at aka.ms/customneural; requires a `projectId` Custom Voice project). Azure cloned voices speak via the `"{base_model}/{speakerProfileId}"` voice-string convention (`mstts:ttsembedding`). Neither is live-testable without vendor approval; request shapes are doc-verified and unit-tested.
+- Job-based providers (Murf, Resemble) are not implemented yet.
 - Cloning someone's voice requires their permission; banked-voice programs' licensed synthetic voices must not be re-cloned.
 
 End-to-end demo: `examples/voice-clone.rs`. Live test: `tests/cloning_live.rs` (`QWEN_API_KEY` + `QWEN_PV_ZIP`, `--ignored`).
