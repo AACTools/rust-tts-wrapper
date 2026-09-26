@@ -164,13 +164,13 @@ fn test_create_watson_with_all_creds() {
 
 #[test]
 fn test_create_polly_with_all_creds() {
-    // AWS Polly requires SigV4 — the engine returns None with a
-    // warning rather than constructing a broken config.
+    // AWS Polly is SigV4-signed now (sigv4.rs) — a full credential set
+    // constructs the engine like any other cloud provider.
     let engine = factory::create_engine(
         "polly",
         r#"{"accessKeyId":"test","secretAccessKey":"test","region":"us-east-1"}"#,
     );
-    assert!(engine.is_none());
+    assert!(engine.is_some());
 }
 
 #[cfg(feature = "sherpaonnx")]

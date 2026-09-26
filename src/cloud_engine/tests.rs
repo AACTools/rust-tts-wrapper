@@ -739,11 +739,30 @@ pub(crate) fn test_azure_ssml_normal_voice_unchanged() {
 }
 
 #[test]
-pub(crate) fn test_polly_unsupported_returns_none() {
-    // AWS Polly needs SigV4. We surface this by returning None
-    // (and emitting a warning) rather than constructing a broken config.
-    let creds = HashMap::new();
-    assert!(build_config("polly", &creds).is_none());
+pub(crate) fn test_polly_config_matrix() {
+    // AWS Polly: SigV4-signed REST (sigv4.rs) — region-scoped synth and
+    // voices URLs, no static auth header, default neural/Joanna.
+    let mut creds = HashMap::new();
+    creds.insert("region".to_string(), "eu-west-1".to_string());
+    let cfg = build_config("polly", &creds).expect("polly config");
+    assert_eq!(
+        cfg.synth_url,
+        "https://polly.eu-west-1.amazonaws.com/v1/speech"
+    );
+    assert_eq!(
+        cfg.voices_url.as_deref(),
+        Some("https://polly.eu-west-1.amazonaws.com/v1/voices")
+    );
+    assert_eq!(cfg.provider_id, "polly");
+    assert!(cfg.auth_header.is_empty());
+    assert_eq!(cfg.text_field, "Text");
+    assert_eq!(cfg.voice_param, "VoiceId");
+    assert_eq!(cfg.model_param.as_deref(), Some("Engine"));
+    assert_eq!(cfg.model_default.as_deref(), Some("neural"));
+    assert_eq!(cfg.default_voice.as_deref(), Some("Joanna"));
+    // Default region when none given.
+    let cfg = build_config("polly", &HashMap::new()).expect("polly config");
+    assert!(cfg.synth_url.starts_with("https://polly.us-east-1."));
 }
 
 #[test]

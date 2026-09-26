@@ -149,6 +149,7 @@ pub(crate) fn map_generic_voices(provider: &str, json: &[serde_json::Value]) -> 
                 .get("id")
                 .or_else(|| v.get("voice_id"))
                 .or_else(|| v.get("VoiceId"))
+                .or_else(|| v.get("Id"))
                 .or_else(|| v.get("name"))
                 .or_else(|| v.get("Name"))?
                 .as_str()?;
