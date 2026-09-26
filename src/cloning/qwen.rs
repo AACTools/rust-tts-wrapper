@@ -125,11 +125,19 @@ impl VoiceCloning for QwenCloner {
         }
         // One URL of 10–20 s: longest clips first, 0.4 s gaps.
         let picked = select_clips(&identity.clips, QWEN_TARGET_SECS);
-        let (pcm, rate) = concat_clips(&picked, 400)?;
+        let (mut pcm, rate) = concat_clips(&picked, 400)?;
         if rate < 16_000 {
             return Err(TtsError(format!(
                 "qwen cloning: clips must be ≥16 kHz (got {rate} Hz)"
             )));
+        }
+        // Hard caps from the API contract: 60 s max audio, ≤10 MB file.
+        // Enforced client-side so one long caller-built clip cannot
+        // produce a request the server rejects opaquely.
+        #[allow(clippy::cast_possible_truncation)]
+        let max_pcm = (rate as usize).saturating_mul(120);
+        if pcm.len() > max_pcm {
+            pcm.truncate(max_pcm);
         }
         let wav = wav_bytes(&pcm, rate);
         let b64 = base64::engine::general_purpose::STANDARD.encode(&wav);

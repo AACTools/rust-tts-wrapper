@@ -74,10 +74,12 @@ impl VoiceCorpus {
                 skipped += 1;
                 continue;
             }
+            // take() bounds the read itself — a lying central-directory
+            // size cannot over-allocate before the post-check.
             let mut bytes = Vec::new();
-            if std::io::Read::read_to_end(&mut entry, &mut bytes).is_err()
-                || bytes.len() as u64 > MAX_IMPORT_FILE_BYTES
-            {
+            let mut limited = std::io::Read::take(&mut entry, MAX_IMPORT_FILE_BYTES + 1);
+            let read = std::io::Read::read_to_end(&mut limited, &mut bytes);
+            if read.is_err() || bytes.len() as u64 > MAX_IMPORT_FILE_BYTES {
                 skipped += 1;
                 continue;
             }
@@ -265,9 +267,12 @@ pub(crate) fn decode_to_canonical_pcm(bytes: &[u8]) -> TtsResult<Vec<u8>> {
     let mut decoder = symphonia::default::get_codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| TtsError(format!("decoder: {e}")))?;
-    // CodecParameters carries rate/channels as Options; CAF/ALAC Personal
-    // Voice recordings are 48 kHz mono. Defaults cover malformed headers.
-    let src_rate = track.codec_params.sample_rate.unwrap_or(CORPUS_SAMPLE_RATE);
+    // A missing rate would silently resample from a wrong base
+    // (half-speed/double-speed audio) — fail loudly instead.
+    let src_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| TtsError("audio track has no sample rate".into()))?;
     let channels = track
         .codec_params
         .channels

@@ -65,7 +65,7 @@ cloner.delete_cloned(&handle)?; // quota hygiene
 
 - `CloneRegistry` persists identity → engine handles (`~/.rust-tts-wrapper/clones.json`).
 - Personal Voice exports are audio-only (no transcripts); attach them via `VoiceCorpus::phrases` or ASR when an engine needs them (Qwen doesn't).
-- Consent-gated providers (Azure Personal Voice, Google Chirp 3 ICV) and job-based ones (Murf, Resemble) are not implemented yet — see `VOICE_CLONING_PLAN.md` for the roadmap and provider matrix.
+- Consent-gated providers (Azure Personal Voice, Google Chirp 3 ICV) and job-based ones (Murf, Resemble) are not implemented yet.
 - Cloning someone's voice requires their permission; banked-voice programs' licensed synthetic voices must not be re-cloned.
 
 End-to-end demo: `examples/voice-clone.rs`. Live test: `tests/cloning_live.rs` (`QWEN_API_KEY` + `QWEN_PV_ZIP`, `--ignored`).

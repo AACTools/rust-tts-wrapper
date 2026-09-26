@@ -86,12 +86,18 @@ impl CloneRegistry {
             .map_err(|e| TtsError(format!("serialize registry: {e}")))?;
         // Atomic write (temp + rename): a crash mid-save must never
         // leave a truncated clones.json behind — load() would fail
-        // forever until manually deleted.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, text)
-            .map_err(|e| TtsError(format!("write {}: {e}", tmp.display())))?;
-        std::fs::rename(&tmp, path)
-            .map_err(|e| TtsError(format!("rename to {}: {e}", path.display())))
+        // forever until manually deleted. The tmp name carries the pid
+        // so concurrent saves don't clobber each other's temp file.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&tmp, text).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            TtsError(format!("write {}: {e}", tmp.display()))
+        })?;
+        let renamed = std::fs::rename(&tmp, path);
+        if renamed.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        renamed.map_err(|e| TtsError(format!("rename to {}: {e}", path.display())))
     }
 }
 

@@ -17,13 +17,15 @@
 //! let identity = corpus.to_identity(Some("en"));
 //! let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#)
 //!     .ok_or("no qwen cloner")?;
-//! let handle = cloner.clone_voice(&identity)?;
+//! let CloneOutcome::Ready(handle) = cloner.clone_voice(&identity)?
+//!     else { unimplemented!("qwen cloning is instant") };
 //! println!("cloned: {} (model {})", handle.voice_id, handle.model.as_deref().unwrap_or("-"));
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Design notes and the full provider matrix live in `VOICE_CLONING_PLAN.md`.
+//! Design notes and the full provider matrix live in the project's
+//! voice-cloning plan (kept out of the repository).
 
 mod corpus;
 mod elevenlabs;
@@ -70,10 +72,14 @@ pub struct AudioClip {
 }
 
 impl AudioClip {
-    /// Duration in seconds (rounded down).
+    /// Duration in seconds (rounded down). A zero `sample_rate` (invalid,
+    /// but the fields are public) yields 0 rather than panicking.
     #[must_use]
     pub fn duration_secs(&self) -> u32 {
         let bytes_per_sec = u64::from(self.sample_rate) * 2;
+        if bytes_per_sec == 0 {
+            return 0;
+        }
         u32::try_from(self.pcm.len() as u64 / bytes_per_sec).unwrap_or(u32::MAX)
     }
 }

@@ -52,9 +52,22 @@ impl VoiceCloning for ElevenLabsCloner {
         let mut form =
             reqwest::blocking::multipart::Form::new().text("name", identity.name.clone());
         for clip in picked {
-            let part =
-                reqwest::blocking::multipart::Part::bytes(wav_bytes(&clip.pcm, clip.sample_rate))
-                    .file_name(format!("{}.wav", clip.name));
+            // Per-clip cap: >3 min of audio is detrimental per the docs;
+            // a single long caller-built clip goes out truncated.
+            #[allow(clippy::cast_possible_truncation)]
+            let max_pcm =
+                (clip.sample_rate as usize).saturating_mul(2 * ELEVENLABS_TARGET_SECS as usize);
+            let pcm = if clip.pcm.len() > max_pcm {
+                let mut trimmed = clip.pcm.clone();
+                trimmed.truncate(max_pcm);
+                trimmed
+            } else {
+                clip.pcm.clone()
+            };
+            let part = reqwest::blocking::multipart::Part::bytes(wav_bytes(&pcm, clip.sample_rate))
+                .file_name(format!("{}.wav", clip.name))
+                .mime_str("audio/wav")
+                .map_err(|e| TtsError(format!("mime header: {e}")))?;
             form = form.part("files", part);
         }
         let resp = self
@@ -92,11 +105,10 @@ impl VoiceCloning for ElevenLabsCloner {
             .header("xi-api-key", &self.api_key)
             .send()
             .map_err(|e| TtsError(format!("elevenlabs voice API: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(TtsError(format!(
-                "elevenlabs voice API {}: listing failed",
-                resp.status()
-            )));
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(TtsError(format!("elevenlabs voice API {status}: {body}")));
         }
         let json: serde_json::Value = resp
             .json()
@@ -129,11 +141,10 @@ impl VoiceCloning for ElevenLabsCloner {
             .header("xi-api-key", &self.api_key)
             .send()
             .map_err(|e| TtsError(format!("elevenlabs voice API: {e}")))?;
-        if !resp.status().is_success() {
-            return Err(TtsError(format!(
-                "elevenlabs voice API {}: delete failed",
-                resp.status()
-            )));
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(TtsError(format!("elevenlabs voice API {status}: {body}")));
         }
         Ok(())
     }
