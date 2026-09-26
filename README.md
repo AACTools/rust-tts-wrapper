@@ -96,6 +96,46 @@ if let Some(spec) = cloner.consent_spec() {
 - Job-based providers (Murf, Resemble) are not implemented yet.
 - Cloning someone's voice requires their permission; banked-voice programs' licensed synthetic voices must not be re-cloned.
 
+### From an Apple Personal Voice backup
+
+The whole banked-voice-in-iOS pipeline works with no external tools:
+
+1. **Export on device.** The user exports their Personal Voice from the
+   Accessibility → Personal Voice settings (a user-initiated on-device
+   export — apps cannot trigger it). The artifact is
+   `"{Voice Name} - Recordings.zip"`.
+2. **What's inside.** A `TrainingData/` folder of
+   `{session5}_{NN}.caf` clips — Core Audio Format / Apple Lossless,
+   48 kHz mono. An iOS 17-era bank is ~150 clips (~12 min) across
+   several recording sessions; iOS 26 banks ~10 prompts. Both are far
+   more than every instant cloner needs (10–20 s) — engines pick the
+   best clips.
+3. **Import (pure Rust).** `from_personal_voice_zip` decodes CAF/ALAC
+   via symphonia (no ffmpeg), canonicalizes to PCM16 mono 24 kHz,
+   skips any corrupt frames, and takes the voice name from the zip
+   title:
+
+```rust
+use rust_tts_wrapper::cloning::{create_cloner, CloneOutcome, VoiceCorpus};
+
+let corpus = VoiceCorpus::from_personal_voice_zip("Dad's Voice - Recordings.zip")?;
+// corpus.name == "Dad's Voice"; ~150 clips; 24 kHz mono PCM
+let identity = corpus.to_identity(Some("en"));
+
+let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#).ok_or("no cloner")?;
+let CloneOutcome::Ready(handle) = cloner.clone_voice(&identity)? else { unreachable!() };
+// speak with create_engine("qwen", ...) + Some(&handle.voice_id) as above
+```
+
+4. **Transcripts are not in the zip** (Apple includes audio only). If
+   an engine needs them, attach via `VoiceCorpus::phrases` (prompt-list
+   mapping by the `{NN}` filename index) or ASR; Qwen and ElevenLabs
+   ignore transcripts entirely.
+
+`examples/voice-clone.rs` runs this exact flow end-to-end
+(`--zip "… - Recordings.zip"`), and `tests/cloning_live.rs` exercises
+import → clone → list → speak → delete against a real export.
+
 End-to-end demo: `examples/voice-clone.rs`. Live test: `tests/cloning_live.rs` (`QWEN_API_KEY` + `QWEN_PV_ZIP`, `--ignored`).
 
 ## Formatting & Testing
