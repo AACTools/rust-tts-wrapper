@@ -351,6 +351,13 @@ impl VoiceCloning for AzureCloner {
             .send()
             .map_err(|e| TtsError(format!("azure list: {e}")))?;
         let status = resp.status();
+        if !status.is_success() {
+            // Gated subscriptions land here (401 from customvoice even
+            // with a key that works for plain synthesis) — surface it,
+            // never fold it into an empty list.
+            let body = resp.text().unwrap_or_default();
+            return Err(TtsError(format!("azure list {status}: {body}")));
+        }
         let json: serde_json::Value = resp
             .json()
             .map_err(|e| TtsError(format!("azure list parse ({status}): {e}")))?;
@@ -385,6 +392,11 @@ impl VoiceCloning for AzureCloner {
             .header(header, value.clone())
             .send()
             .map_err(|e| TtsError(format!("azure delete lookup: {e}")))?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(TtsError(format!("azure delete lookup {status}: {body}")));
+        }
         let json: serde_json::Value = resp
             .json()
             .map_err(|e| TtsError(format!("azure delete lookup parse: {e}")))?;
