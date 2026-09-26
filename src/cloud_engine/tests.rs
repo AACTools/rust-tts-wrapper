@@ -829,7 +829,7 @@ pub(crate) fn test_qwen_run_task_json_shape() {
         "longanhuan_v3.6",
         1.5,
         0.25, // below the 0.5 floor — clamped
-        0.5,  // 0.0–1.0 → 50 on the 0–100 scale
+        1.0,  // wrapper neutral → API neutral 50
         true,
         None,
     );
@@ -850,6 +850,23 @@ pub(crate) fn test_qwen_run_task_json_shape() {
     assert_eq!(p["pitch"], 0.5); // clamped up
     assert_eq!(p["word_timestamp_enabled"], true);
     assert!(p.get("instruction").is_none());
+}
+
+#[test]
+pub(crate) fn test_qwen_volume_multiplier_mapping() {
+    // The wrapper's volume is a 1.0-centred multiplier (crate-wide
+    // contract: lib.rs tts_set_volume "1.0 = normal"); the API scale is
+    // [0, 100] with neutral at 50. 0.5 → 25, 1.0 → 50, 2.0 → 100, and
+    // anything above 2.0 clamps to 100.
+    let mk = |volume: f32| {
+        let v = qwen_run_task_json("t", "m", "v", 1.0, 1.0, volume, false, None);
+        v["payload"]["parameters"]["volume"].as_i64().unwrap()
+    };
+    assert_eq!(mk(0.0), 0);
+    assert_eq!(mk(0.5), 25);
+    assert_eq!(mk(1.0), 50);
+    assert_eq!(mk(2.0), 100);
+    assert_eq!(mk(5.0), 100);
 }
 
 #[test]

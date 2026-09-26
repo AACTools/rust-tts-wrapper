@@ -22,6 +22,11 @@ use super::*;
 ///
 /// Audio is requested as raw PCM16LE mono 24 kHz (`format: "pcm"`), so
 /// binary frames flow straight through `on_audio` with no decode step.
+///
+/// Connections are deliberately NOT pooled (unlike Edge/Azure): DashScope
+/// tasks are connection-scoped, idle connections auto-close after 60 s,
+/// and a `task-failed` socket must be discarded per protocol — pooling
+/// would buy little and risk checking in a poisoned socket.
 #[cfg(feature = "cloud")]
 pub(crate) const QWEN_WS_URL_QWENCLOUD: &str = "wss://maas.qwencloudapi.com/api-ws/v1/inference";
 
@@ -170,11 +175,13 @@ pub(crate) fn qwen_run_task_json(
     word_timestamps: bool,
     instruction: Option<&str>,
 ) -> serde_json::Value {
-    // The wrapper's rate/pitch are 1.0-centred multipliers and volume is
-    // 0.0–1.0; the API takes rate/pitch in [0.5, 2.0] and volume in
-    // [0, 100]. Clamp into range rather than rejecting the caller.
+    // The wrapper's rate/pitch/volume are 1.0-centred multipliers; the
+    // API takes rate/pitch in [0.5, 2.0] and volume in [0, 100] with
+    // neutral at 50. Scale volume so 1.0 → 50, 2.0 → 100, 0.0 → 0 (and
+    // mute below 0), and clamp the others into range rather than
+    // rejecting the caller.
     #[allow(clippy::cast_possible_truncation)]
-    let volume_int = (volume.clamp(0.0, 1.0) * 100.0).round() as i64;
+    let volume_int = (volume.clamp(0.0, 2.0) * 50.0).round() as i64;
     let mut parameters = serde_json::json!({
         "text_type": "PlainText",
         "voice": voice,
@@ -270,6 +277,12 @@ pub(crate) fn qwen_speak_ws(
     use tungstenite::{connect, Message};
     use url::Url;
 
+    if text.is_empty() {
+        // An empty continue-task would fail deep in the service with a
+        // generic error; refuse it up front with a diagnosable message.
+        return Err(TtsError("qwen: refusing to synthesize empty text".into()));
+    }
+
     let ws_url_str = qwen_ws_url(credentials);
     let ws_url = Url::parse(&ws_url_str).map_err(|e| TtsError(format!("Invalid WS URL: {e}")))?;
 
@@ -319,12 +332,13 @@ pub(crate) fn qwen_speak_ws(
     send(&mut socket, &run_task, "run-task")?;
 
     // Wait for task-started before sending text (protocol ordering).
-    // Overall timeout for the session. First packet lands in a few hundred
-    // ms; 2 minutes is a generous ceiling for long texts. from_secs (not
-    // the unstable from_mins) for stable-rustc portability, matching the
+    // Idle timeout: reset on every message so a healthy long synthesis
+    // never trips it — only a stalled service does. from_secs (not the
+    // unstable from_mins) for stable-rustc portability, matching the
     // Azure WS branch.
     #[allow(clippy::duration_suboptimal_units)]
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let idle_limit = || std::time::Duration::from_secs(120);
+    let mut deadline = std::time::Instant::now() + idle_limit();
     loop {
         if std::time::Instant::now() > deadline {
             let _ = socket.close(None);
@@ -342,6 +356,7 @@ pub(crate) fn qwen_speak_ws(
             Ok(_) => {}
             Err(e) => return Err(TtsError(format!("WS receive error: {e}"))),
         }
+        deadline = std::time::Instant::now() + idle_limit();
     }
 
     for chunk in qwen_chunk_text(text) {
@@ -370,11 +385,14 @@ pub(crate) fn qwen_speak_ws(
     // (exact → case/accent-insensitive → hold-last), like the
     // ElevenLabs/Google paths.
     let mut search = crate::word_search::WordSearch::new(boundary_search_text);
-    // sentence-begin … sentence-end pairs bracket each sentence's audio;
-    // word times are per-sentence, so keep a running audio-time offset by
-    // accumulating each finished sentence's last word end.
+    // Word times are per-sentence, so keep a running audio-time offset.
+    // Ground truth is delivered audio: at 24 kHz 16-bit mono, 48 bytes =
+    // 1 ms. Advancing by byte deltas (rather than the sentence's last
+    // word end) keeps later sentences' timestamps aligned even when a
+    // sentence reports no words or ends in trailing silence.
     let mut sentence_audio_ms: u64 = 0;
     let mut audio_bytes = 0usize;
+    let mut audio_bytes_at_sentence_end = 0usize;
 
     loop {
         if std::time::Instant::now() > deadline {
@@ -389,6 +407,9 @@ pub(crate) fn qwen_speak_ws(
             ) => break,
             Err(e) => return Err(TtsError(format!("WS receive error: {e}"))),
         };
+        // Healthy traffic pushes the idle deadline out; only a stalled
+        // service (or dead connection) trips it.
+        deadline = std::time::Instant::now() + idle_limit();
         match msg {
             Message::Text(t) => match qwen_parse_event(t.as_str()) {
                 QwenServerEvent::TaskFinished => {
@@ -400,26 +421,26 @@ pub(crate) fn qwen_speak_ws(
                     return Err(TtsError(format!("qwen task failed: {message} ({code})")));
                 }
                 QwenServerEvent::SentenceEnd { words } => {
+                    let sentence_start_ms = sentence_audio_ms;
+                    // All of this sentence's audio frames precede its
+                    // sentence-end, so the byte delta is the sentence
+                    // duration. Advance before firing so the next
+                    // sentence starts from the right offset.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let delta_bytes = audio_bytes.saturating_sub(audio_bytes_at_sentence_end);
+                    sentence_audio_ms += (delta_bytes / 48) as u64;
+                    audio_bytes_at_sentence_end = audio_bytes;
                     if let Some(cb) = on_boundary.as_mut() {
-                        let mut sentence_end_ms = sentence_audio_ms;
                         for w in &words {
                             let (char_offset, char_len) = search.find_next(&w.text);
                             cb(
                                 &w.text,
-                                (sentence_audio_ms + w.begin_ms) as f32 / 1000.0,
-                                (sentence_audio_ms + w.end_ms) as f32 / 1000.0,
+                                (sentence_start_ms + w.begin_ms) as f32 / 1000.0,
+                                (sentence_start_ms + w.end_ms) as f32 / 1000.0,
                                 char_offset.max(0),
                                 char_len,
                                 false,
                             );
-                            sentence_end_ms = sentence_audio_ms + w.end_ms.max(w.begin_ms);
-                        }
-                        sentence_audio_ms = sentence_end_ms;
-                    } else {
-                        // Still advance the running offset so boundary
-                        // timing stays correct if a late callback appears.
-                        if let Some(last) = words.last() {
-                            sentence_audio_ms += last.end_ms.max(last.begin_ms);
                         }
                     }
                 }
@@ -437,9 +458,11 @@ pub(crate) fn qwen_speak_ws(
         }
     }
 
-    // Server closed the socket without task-finished (network drop).
-    if audio_bytes == 0 {
-        return Err(TtsError("qwen synthesis returned no audio".into()));
-    }
-    Ok(audio_bytes)
+    // The loop only breaks on ConnectionClosed/AlreadyClosed: the server
+    // dropped the socket without task-finished (network drop / protocol
+    // violation). Truncated audio is an error, not a success — task-
+    // finished returns Ok directly above.
+    Err(TtsError(format!(
+        "qwen connection closed before task-finished ({audio_bytes} audio bytes delivered)"
+    )))
 }
