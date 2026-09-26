@@ -48,7 +48,7 @@ use rust_tts_wrapper::cloning::{create_cloner, VoiceCorpus};
 let corpus = VoiceCorpus::from_personal_voice_zip("Will's Personal Voice 1 - Recordings.zip")?;
 let identity = corpus.to_identity(Some("en"));
 
-// Enroll (Qwen voice-enrollment and ElevenLabs IVC supported today).
+// Enroll: qwen + elevenlabs are instant; google/azure are consent-gated (below).
 let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#).ok_or("no cloner")?;
 let handle = match cloner.clone_voice(&identity)? {
     rust_tts_wrapper::cloning::CloneOutcome::Ready(h) => h,
@@ -63,8 +63,34 @@ engine.speak("Hello", Some(&handle.voice_id), 1.0, 1.0, 1.0, Some(&mut audio_cb)
 cloner.delete_cloned(&handle)?; // quota hygiene
 ```
 
-- Capture is source-agnostic: `VoiceIdentityBuilder` records live microphone PCM clip-by-clip (`start_clip` / `push_pcm` / `finish_clip`), `VoiceIdentity::from_transcribed_pairs` takes audio files + transcripts, `AudioClip::from_audio_file` loads wav/mp3/m4a/flac. Personal Voice and LJSpeech are just two importers.
-- `CloneRegistry` persists identity → engine handles (`~/.rust-tts-wrapper/clones.json`).
+- Capture is source-agnostic: `VoiceIdentityBuilder` records live microphone PCM clip-by-clip (`start_clip` / `push_pcm` / `finish_clip`), `VoiceIdentity::from_transcribed_pairs` takes audio files + transcripts, `AudioClip::from_audio_file` loads wav/mp3/m4a/flac, `VoiceCorpus::from_audio_dir` imports a folder. Personal Voice and LJSpeech are just two importers.
+- `CloneRegistry` persists identity → engine handles (`~/.rust-tts-wrapper/clones.json`):
+
+```rust
+use rust_tts_wrapper::cloning::{default_registry_path, CloneRegistry};
+let mut registry = CloneRegistry::load(default_registry_path().unwrap())?;
+registry.add(&identity.name, handle.clone());
+registry.save()?;                       // atomic write
+let handles: &[rust_tts_wrapper::cloning::CloneHandle] = registry.handles(&identity.name);
+```
+
+- Consent-gated engines (Google ICV, Azure) need a recording of their fixed script first — discoverable before you ask the user to record:
+
+```rust
+let cloner = create_cloner("google", creds)?;
+if let Some(spec) = cloner.consent_spec() {
+    // record spec.script verbatim, then attach:
+    identity.consent.push(ConsentRecording {
+        engine: "google".into(),
+        pcm,                                    // PCM16 LE mono
+        sample_rate: 24_000,
+        metadata: [("language_code".to_string(), "en-US".to_string())].into(),
+    });
+}
+// azure additionally requires voiceTalentName/companyName/locale metadata
+// and is the one Job-mode engine: clone_voice may return
+// CloneOutcome::Pending { job_id } — resolve it with cloner.poll_clone(&job_id).
+```
 - Personal Voice exports are audio-only (no transcripts); attach them via `VoiceCorpus::phrases` or ASR when an engine needs them (Qwen doesn't).
 - Consent-gated providers are implemented behind their real-world gates: **Google Chirp 3 ICV** (`generateVoiceCloningKey`, allow-listed projects — `consent_spec()` returns the exact script to record) and **Azure Personal Voice** (consent → personal voice → long-running-operation `poll_clone`; intake-gated at aka.ms/customneural; requires a `projectId` Custom Voice project). Azure cloned voices speak via the `"{base_model}/{speakerProfileId}"` voice-string convention (`mstts:ttsembedding`). Neither is live-testable without vendor approval; request shapes are doc-verified and unit-tested.
 - Job-based providers (Murf, Resemble) are not implemented yet.
