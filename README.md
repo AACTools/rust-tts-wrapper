@@ -36,6 +36,37 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 
 - **Streaming**: Audio is delivered through the `on_audio` callback in chunks, as it becomes available. REST engines stream the response body as bytes arrive over the network (MP3 decoded to PCM16 mono incrementally on a background reader thread; raw-PCM providers pass straight through); Azure and Edge deliver real-time over WebSockets; Sherpa-ONNX delivers each sentence batch as it is synthesised (via the generate progress callback — a single-sentence utterance still completes before delivery). Exceptions: Google and ElevenLabs `with-timestamps` return one JSON document with base64 audio, so they can only deliver after the response completes (an API limitation, not buffering). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
 
+## Voice cloning (experimental, `cloning` feature)
+
+Bank a voice once, enroll it with every cloning-capable engine, speak it everywhere. Rust-only for now (no FFI); enable with `--features cloning`.
+
+```rust
+use rust_tts_wrapper::cloning::{create_cloner, VoiceCorpus};
+
+// Import an Apple Personal Voice "Recordings" export (CAF/ALAC → PCM),
+// or an LJSpeech corpus directory (metadata.csv + wav/).
+let corpus = VoiceCorpus::from_personal_voice_zip("Will's Personal Voice 1 - Recordings.zip")?;
+let identity = corpus.to_identity(Some("en"));
+
+// Enroll (Qwen voice-enrollment and ElevenLabs IVC supported today).
+let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#).ok_or("no cloner")?;
+let handle = cloner.clone_voice(&identity)?; // CloneOutcome::Ready(handle)
+
+// Speak it — a cloned voice id is just a voice string; Qwen handles are
+// model-bound, so pass the recorded model via modelId.
+let engine = create_engine("qwen", r#"{"apiKey":"sk-...","modelId":"qwen-audio-3.0-tts-flash"}"#)?;
+engine.speak("Hello", Some(&handle.voice_id), 1.0, 1.0, 1.0, Some(&mut audio_cb), None, None)?;
+
+cloner.delete_cloned(&handle)?; // quota hygiene
+```
+
+- `CloneRegistry` persists identity → engine handles (`~/.rust-tts-wrapper/clones.json`).
+- Personal Voice exports are audio-only (no transcripts); attach them via `VoiceCorpus::phrases` or ASR when an engine needs them (Qwen doesn't).
+- Consent-gated providers (Azure Personal Voice, Google Chirp 3 ICV) and job-based ones (Murf, Resemble) are not implemented yet — see `VOICE_CLONING_PLAN.md` for the roadmap and provider matrix.
+- Cloning someone's voice requires their permission; banked-voice programs' licensed synthetic voices must not be re-cloned.
+
+End-to-end demo: `examples/voice-clone.rs`. Live test: `tests/cloning_live.rs` (`QWEN_API_KEY` + `QWEN_PV_ZIP`, `--ignored`).
+
 ## Formatting & Testing
 
 ```bash

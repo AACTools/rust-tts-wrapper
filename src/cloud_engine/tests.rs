@@ -768,20 +768,46 @@ pub(crate) fn test_qwen_ws_url_unknown_region_rejected() {
 }
 
 #[test]
-pub(crate) fn test_qwen_sentence_clock_advances_by_delivered_bytes() {
+pub(crate) fn test_qwen_sentence_clock_attributes_by_index() {
     use super::qwen::QwenSentenceClock;
     let mut clock = QwenSentenceClock::default();
-    // Sentence 1: 4800 bytes → 100 ms of audio; its base is 0.
-    assert_eq!(clock.sentence_finished(4_800), 0);
-    // Sentence 2: 7200 more bytes (base 100 ms, spans 100–250 ms).
-    assert_eq!(clock.sentence_finished(12_000), 100);
-    // Sentence 3 reports no audio (e.g. empty words + no frames): base
-    // does not advance — later sentences stay aligned.
-    assert_eq!(clock.sentence_finished(12_000), 250);
-    // Sentence 4: 4800 more bytes.
-    assert_eq!(clock.sentence_finished(16_800), 250);
-    // A byte count going backwards saturates rather than panicking.
-    assert_eq!(clock.sentence_finished(1_000), 350);
+    // Sentence 0: 4800 bytes → 100 ms.
+    clock.audio_frame(0, 4_800);
+    assert_eq!(clock.sentence_base_ms(0), 0);
+    // Sentence 1's frames start arriving BEFORE sentence 0's end event
+    // (observed on the live API) — attribution stays per-index.
+    clock.audio_frame(1, 2_400);
+    assert_eq!(clock.sentence_base_ms(0), 0);
+    assert_eq!(clock.sentence_base_ms(1), 100);
+    // More frames for sentence 1 (multiple synthesis markers per
+    // sentence are legal): 2400 + 4800 bytes → 150 ms duration.
+    clock.audio_frame(1, 4_800);
+    // Sentence 2 base = 100 ms + 150 ms.
+    assert_eq!(clock.sentence_base_ms(2), 250);
+    // Out-of-order frame indices never panic; unknown indices only
+    // affect their own totals.
+    clock.audio_frame(4, 48);
+    assert_eq!(clock.sentence_base_ms(2), 250);
+}
+
+#[test]
+pub(crate) fn test_qwen_parse_audio_frame_carries_index() {
+    use super::qwen::QwenServerEvent;
+    assert_eq!(
+        qwen_parse_event(
+            r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-synthesis","sentence":{"index":3,"words":[]}}}}"#
+        ),
+        QwenServerEvent::AudioFrame { sentence: 3 }
+    );
+    match qwen_parse_event(
+        r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-end","sentence":{"index":2,"words":[]}}}}"#,
+    ) {
+        QwenServerEvent::SentenceEnd { sentence, words } => {
+            assert_eq!(sentence, 2);
+            assert!(words.is_empty());
+        }
+        other => panic!("expected SentenceEnd, got {other:?}"),
+    }
 }
 
 #[test]
@@ -813,7 +839,7 @@ pub(crate) fn test_qwen_parse_events() {
         qwen_parse_event(
             r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-synthesis","sentence":{"index":0,"words":[]}}}}"#
         ),
-        QwenServerEvent::AudioFrame
+        QwenServerEvent::AudioFrame { sentence: 0 }
     );
     // sentence-begin is ignored.
     assert_eq!(
@@ -830,7 +856,7 @@ pub(crate) fn test_qwen_parse_sentence_end_words() {
     match qwen_parse_event(
         r#"{"header":{"task_id":"t","event":"result-generated"},"payload":{"output":{"type":"sentence-end","sentence":{"index":0,"words":[{"text":"Before","begin_index":0,"end_index":1,"begin_time":0,"end_time":263},{"text":"my","begin_index":1,"end_index":2,"begin_time":263,"end_time":401}]},"original_text":"Before my bed"}}}"#,
     ) {
-        QwenServerEvent::SentenceEnd { words } => {
+        QwenServerEvent::SentenceEnd { words, .. } => {
             assert_eq!(
                 words,
                 vec![
