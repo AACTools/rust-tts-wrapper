@@ -53,12 +53,18 @@ impl CloneRegistry {
         self.map.get(identity).map_or(&[], Vec::as_slice)
     }
 
-    /// Drop one handle; true when it was found and removed.
+    /// Drop one handle; true when it was found and removed. The last
+    /// handle removes the identity entry entirely (no empty lists in
+    /// the persisted JSON or `identities()`).
     pub fn remove(&mut self, identity: &str, handle: &CloneHandle) -> bool {
         if let Some(list) = self.map.get_mut(identity) {
             let before = list.len();
             list.retain(|h| h != handle);
-            return list.len() != before;
+            let removed = list.len() != before;
+            if list.is_empty() {
+                self.map.remove(identity);
+            }
+            return removed;
         }
         false
     }

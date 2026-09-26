@@ -81,6 +81,13 @@ pub(crate) enum QwenServerEvent {
     /// follows this event immediately. Carries the sentence index so
     /// audio bytes can be attributed to the right sentence even when
     /// `sentence-end` events arrive late (observed on the live API).
+    ///
+    /// A missing `sentence.index` parses as 0: if a server variant ever
+    /// omitted indices entirely, every frame would attribute to sentence
+    /// 0 and later sentences' boundary bases would collapse onto the
+    /// total delivered audio. The live API always sends the index
+    /// (pinned by tests); if that ever changes, treat this as a protocol
+    /// break to fix, not a silent fallback.
     AudioFrame { sentence: u64 },
     /// `result-generated` / `sentence-end` with the word-timestamp array.
     SentenceEnd { sentence: u64, words: Vec<QwenWord> },

@@ -198,11 +198,18 @@ impl VoiceCloning for QwenCloner {
                         .map(str::to_string),
                 });
             }
+            // Continue while the page is accounted for by total_count,
+            // or — if the response omits total_count — while a full page
+            // came back (never silently stop early on a shape change).
+            let full_page = list.len() as u64 == 100;
             let total = output
                 .get("total_count")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            if u64::from(page) * 100 + list.len() as u64 >= total || list.is_empty() {
+                .and_then(serde_json::Value::as_u64);
+            let done = match total {
+                Some(total) => u64::from(page) * 100 + list.len() as u64 >= total,
+                None => !full_page,
+            };
+            if done || list.is_empty() {
                 break;
             }
             page += 1;

@@ -52,8 +52,9 @@ impl VoiceCloning for ElevenLabsCloner {
         let mut form =
             reqwest::blocking::multipart::Form::new().text("name", identity.name.clone());
         for clip in picked {
-            // Per-clip cap: >3 min of audio is detrimental per the docs;
-            // a single long caller-built clip goes out truncated.
+            // Per-clip cap at the 120 s selection target: the docs call
+            // >3 min detrimental; a single long caller-built clip goes
+            // out truncated to the window we selected for.
             #[allow(clippy::cast_possible_truncation)]
             let max_pcm =
                 (clip.sample_rate as usize).saturating_mul(2 * ELEVENLABS_TARGET_SECS as usize);

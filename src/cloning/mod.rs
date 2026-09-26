@@ -11,7 +11,7 @@
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! use rust_tts_wrapper::cloning::{create_cloner, VoiceCorpus};
+//! use rust_tts_wrapper::cloning::{create_cloner, CloneOutcome, VoiceCorpus};
 //!
 //! let corpus = VoiceCorpus::from_personal_voice_zip("Will's Personal Voice 1 - Recordings.zip")?;
 //! let identity = corpus.to_identity(Some("en"));
@@ -165,7 +165,7 @@ pub trait VoiceCloning: Send + Sync {
 ///
 /// `credentials_json` uses the same credential keys as `create_engine`
 /// for the same engine id. Returns `None` for engines without cloning
-/// support (or when the `cloning` feature is off).
+/// support.
 #[must_use]
 pub fn create_cloner(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn VoiceCloning>> {
     let creds: std::collections::HashMap<String, String> = if credentials_json.is_empty() {
