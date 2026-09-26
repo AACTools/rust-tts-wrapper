@@ -324,6 +324,29 @@ pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<
             eprintln!("WARNING: AWS Polly requires AWS Signature V4 authentication which is not implemented. Use a different cloud provider.");
             None
         }
+        // Qwen cloud TTS (Alibaba Cloud Model Studio / DashScope) via the
+        // duplex WS protocol shared by Qwen-Audio-TTS and CosyVoice.
+        // WS-only — no REST synth endpoint (like edge); the speak path
+        // lives in qwen.rs. The `region` credential picks the WS endpoint
+        // (qwencloud default | intl | beijing) and `modelId` selects the
+        // model (default qwen-audio-3.0-tts-flash; any CosyVoice model
+        // works with the same protocol, subject to its own voice list).
+        "qwen" => {
+            let model = creds
+                .get("modelId")
+                .filter(|m| !m.is_empty())
+                .cloned()
+                .unwrap_or_else(|| QWEN_DEFAULT_MODEL.into());
+            Some(CloudConfig {
+                default_voice: Some(QWEN_DEFAULT_VOICE.into()),
+                model_default: Some(model),
+                provider_id: "qwen".into(),
+                // Binary frames are raw PCM16LE mono 24 kHz (format "pcm"
+                // in the run-task parameters) — delivered verbatim.
+                response_is_pcm: true,
+                ..Default::default()
+            })
+        }
         // Microsoft Edge "Read Aloud" — the free, no-subscription Windows
         // neural voices. WS-only (no REST synth endpoint); the URL + Sec-MS-GEC
         // auth are built at speak time in the WS branch below. Voice list shape

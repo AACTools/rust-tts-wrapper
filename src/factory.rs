@@ -204,6 +204,12 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
                 r#"["apiKey","modelId","voice","style"]"#,
             ),
             (
+                "qwen",
+                "Qwen (Alibaba Cloud Model Studio)",
+                true,
+                r#"["apiKey","modelId","region","instruction"]"#,
+            ),
+            (
                 "polly",
                 "Amazon Polly",
                 true,

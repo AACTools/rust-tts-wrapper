@@ -171,12 +171,34 @@ impl TtsEngine for CloudEngine {
         // WebSocket approach: Azure when word boundaries are requested, or
         // Edge always (Edge is WS-only — it has no REST synth endpoint).
         // Edge reuses the identical Azure "Turn" protocol; only the URL/auth
-        // differ (token-based Sec-MS-GEC vs subscription key).
+        // differ (token-based Sec-MS-GEC vs subscription key). Qwen is also
+        // WS-only but speaks the DashScope duplex JSON protocol (qwen.rs).
         #[cfg(feature = "cloud")]
         let use_ws = self.config.provider_id == "edge"
+            || self.config.provider_id == "qwen"
             || (self.config.provider_id == "azure" && on_boundary.is_some());
         #[cfg(feature = "cloud")]
         if use_ws {
+            if self.config.provider_id == "qwen" {
+                let bytes = qwen_speak_ws(
+                    &text,
+                    &voice_to_use,
+                    rate,
+                    pitch,
+                    volume,
+                    &self.api_key,
+                    &self.credentials,
+                    effective_model(&self.config).unwrap_or(QWEN_DEFAULT_MODEL),
+                    self.credentials.get("instruction").map(String::as_str),
+                    on_audio,
+                    on_boundary,
+                    boundary_search_text,
+                )?;
+                if bytes == 0 {
+                    return Err(TtsError("qwen synthesis returned no audio".into()));
+                }
+                return Ok(());
+            }
             let ws_url_str = if self.config.provider_id == "edge" {
                 format!(
                     "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1\
@@ -1063,6 +1085,7 @@ impl TtsEngine for CloudEngine {
             "edge" => "edge",
             "google" => "google",
             "gemini" => "gemini",
+            "qwen" => "qwen",
             "cartesia" => "cartesia",
             "deepgram" => "deepgram",
             "playht" => "playht",
