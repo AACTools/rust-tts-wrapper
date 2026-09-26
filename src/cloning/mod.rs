@@ -1,12 +1,13 @@
 //! Voice cloning: bank a voice once, enroll it with every cloning-capable
 //! engine, speak it everywhere. Experimental, Rust-only (no FFI yet).
 //!
-//! The model is voice *banking*: a [`VoiceIdentity`] (reference clips +
+//! The model is voice *banking*: a `VoiceIdentity` (reference clips +
 //! optional transcripts) is captured or imported once — from an Apple
 //! Personal Voice export ZIP, an LJSpeech-format corpus, or any recorder
-//! — then [`VoiceCloning::clone_voice`] enrolls it per engine and returns
-//! a [`CloneHandle`] the synthesis engines already understand (cloned
-//! voice ids are just voice strings; `tts_set_voice` needs no change).
+//! — then [`trait VoiceCloning`]::`clone_voice` enrolls it per engine
+//! and returns a `CloneHandle` the synthesis engines already understand
+//! (cloned voice ids are just voice strings; `tts_set_voice` needs no
+//! change).
 //!
 //! ```no_run
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,7 +35,6 @@ pub use registry::CloneRegistry;
 
 use crate::types::{TtsError, TtsResult};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -155,15 +155,6 @@ pub trait VoiceCloning: Send + Sync {
     fn delete_cloned(&self, handle: &CloneHandle) -> TtsResult<()>;
 }
 
-/// Caller-side record of which engines hold which handles for each banked
-/// identity. Persisted as JSON (`{"identity": [{"engine": …}]}`); the
-/// cloners themselves stay stateless.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct CloneRecord {
-    /// Registered handles, oldest first.
-    pub handles: Vec<CloneHandle>,
-}
-
 /// Create a voice-cloning client for a cloning-capable engine.
 ///
 /// `credentials_json` uses the same credential keys as `create_engine`
@@ -262,10 +253,6 @@ pub(crate) fn wav_bytes(pcm: &[u8], sample_rate: u32) -> Vec<u8> {
     wav.extend_from_slice(pcm);
     wav
 }
-
-/// A one-shot helper combining registry + handles; kept internal to the
-/// facade docs. (Used by the example.)
-pub(crate) type RegistryMap = BTreeMap<String, CloneRecord>;
 
 /// Default registry location: `~/.rust-tts-wrapper/clones.json`.
 #[must_use]

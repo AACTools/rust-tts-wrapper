@@ -38,12 +38,13 @@ impl CloneRegistry {
         Self::default()
     }
 
-    /// Record a handle for `identity`.
+    /// Record a handle for `identity` (an identical re-registration is
+    /// a no-op).
     pub fn add(&mut self, identity: &str, handle: CloneHandle) {
-        self.map
-            .entry(identity.to_string())
-            .or_default()
-            .push(handle);
+        let list = self.map.entry(identity.to_string()).or_default();
+        if !list.contains(&handle) {
+            list.push(handle);
+        }
     }
 
     /// Handles registered for `identity`.
@@ -83,7 +84,14 @@ impl CloneRegistry {
         }
         let text = serde_json::to_string_pretty(&self.map)
             .map_err(|e| TtsError(format!("serialize registry: {e}")))?;
-        std::fs::write(path, text).map_err(|e| TtsError(format!("write {}: {e}", path.display())))
+        // Atomic write (temp + rename): a crash mid-save must never
+        // leave a truncated clones.json behind — load() would fail
+        // forever until manually deleted.
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, text)
+            .map_err(|e| TtsError(format!("write {}: {e}", tmp.display())))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| TtsError(format!("rename to {}: {e}", path.display())))
     }
 }
 

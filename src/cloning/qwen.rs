@@ -133,6 +133,13 @@ impl VoiceCloning for QwenCloner {
         }
         let wav = wav_bytes(&pcm, rate);
         let b64 = base64::engine::general_purpose::STANDARD.encode(&wav);
+        if b64.len() > 10 * 1024 * 1024 {
+            return Err(TtsError(format!(
+                "qwen cloning: enrollment audio too large ({} MB base64; \
+                 cap is 10 MB / 60 s)",
+                b64.len() / (1024 * 1024)
+            )));
+        }
         let target_model = self.target_model();
         let input = serde_json::json!({
             "action": "create_voice",
@@ -204,15 +211,6 @@ impl VoiceCloning for QwenCloner {
     }
 }
 
-/// Qwen voices are locked to their `target_model`; synthesis must use
-/// the model recorded in the handle. The `qwen` engine's `modelId`
-/// credential must match (or default when the handle model is the
-/// default).
-#[must_use]
-pub fn handle_matches_engine_model(handle: &CloneHandle, engine_model: &str) -> bool {
-    handle.model.as_deref().is_none_or(|m| m == engine_model)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,16 +242,5 @@ mod tests {
             QwenCloner::new(&c).endpoint().unwrap(),
             "https://proxy.example.com"
         );
-    }
-
-    #[test]
-    fn model_binding_check() {
-        let h = CloneHandle {
-            engine: "qwen".into(),
-            voice_id: "v".into(),
-            model: Some("qwen-audio-3.0-tts-flash".into()),
-        };
-        assert!(handle_matches_engine_model(&h, "qwen-audio-3.0-tts-flash"));
-        assert!(!handle_matches_engine_model(&h, "qwen-audio-3.0-tts-plus"));
     }
 }

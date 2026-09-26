@@ -106,8 +106,11 @@ impl VoiceCloning for ElevenLabsCloner {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
+        // /v1/voices includes library and workspace voices; only
+        // category=="cloned" entries are deletable enrollment voices.
         Ok(voices
             .iter()
+            .filter(|v| v.get("category").and_then(|x| x.as_str()) == Some("cloned"))
             .filter_map(|v| {
                 let id = v.get("voice_id").and_then(|x| x.as_str())?;
                 Some(CloneHandle {

@@ -1,5 +1,5 @@
 //! Banked-voice corpora: import from an Apple Personal Voice export ZIP
-//! or an LJSpeech-format directory, and convert to a [`VoiceIdentity`].
+//! or an LJSpeech-format directory, and convert to a `VoiceIdentity`.
 
 use super::{AudioClip, VoiceIdentity};
 use crate::types::{TtsError, TtsResult};
@@ -8,6 +8,11 @@ use crate::types::{TtsError, TtsResult};
 /// (Qwen ≥16 kHz, Murf ≥24 kHz) and keeps enrollment files small
 /// (≤10 MB Qwen cap).
 pub(crate) const CORPUS_SAMPLE_RATE: u32 = 24_000;
+
+/// Per-file read cap for imports (zip entries and corpus wavs): real
+/// clips are a few MB; a zip bomb or misdirected archive must not OOM
+/// the process. Oversized entries are skipped and counted.
+const MAX_IMPORT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
 /// A banked voice on disk: clips + (optional) transcripts. Two on-disk
 /// shapes are understood:
@@ -25,7 +30,7 @@ pub struct VoiceCorpus {
     /// Corpus name — from the ZIP title (`Will's Personal Voice 1`) or
     /// the directory name.
     pub name: String,
-    /// Imported clips, canonical PCM16 LE mono @ [`CORPUS_SAMPLE_RATE`].
+    /// Imported clips, canonical PCM16 LE mono at 24 kHz (CORPUS_SAMPLE_RATE).
     pub clips: Vec<AudioClip>,
 }
 
@@ -65,8 +70,14 @@ impl VoiceCorpus {
             if !entry_name.to_ascii_lowercase().ends_with(".caf") || entry.is_dir() {
                 continue;
             }
+            if entry.size() > MAX_IMPORT_FILE_BYTES {
+                skipped += 1;
+                continue;
+            }
             let mut bytes = Vec::new();
-            if std::io::Read::read_to_end(&mut entry, &mut bytes).is_err() {
+            if std::io::Read::read_to_end(&mut entry, &mut bytes).is_err()
+                || bytes.len() as u64 > MAX_IMPORT_FILE_BYTES
+            {
                 skipped += 1;
                 continue;
             }
@@ -128,6 +139,7 @@ impl VoiceCorpus {
         }
         let wav_dir = dir_path.join("wav");
         let mut clips = Vec::new();
+        let mut skipped = 0usize;
         for entry in std::fs::read_dir(&wav_dir)
             .map_err(|e| TtsError(format!("read {dir}/wav: {e}")))?
             .flatten()
@@ -142,18 +154,37 @@ impl VoiceCorpus {
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let bytes = std::fs::read(&path)
-                .map_err(|e| TtsError(format!("read {}: {e}", path.display())))?;
-            let pcm = decode_to_canonical_pcm(&bytes)?;
-            clips.push(AudioClip {
-                name: stem.to_string(),
-                pcm,
-                sample_rate: CORPUS_SAMPLE_RATE,
-                transcript: transcripts.get(stem).cloned(),
-            });
+            // Same hygiene as the zip importer: cap reads, skip broken
+            // wavs instead of failing the whole corpus.
+            let Ok(meta) = entry.metadata() else {
+                skipped += 1;
+                continue;
+            };
+            if meta.len() > MAX_IMPORT_FILE_BYTES {
+                skipped += 1;
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                skipped += 1;
+                continue;
+            };
+            match decode_to_canonical_pcm(&bytes) {
+                Ok(pcm) => clips.push(AudioClip {
+                    name: stem.to_string(),
+                    pcm,
+                    sample_rate: CORPUS_SAMPLE_RATE,
+                    transcript: transcripts.get(stem).cloned(),
+                }),
+                Err(_) => skipped += 1,
+            }
         }
         if clips.is_empty() {
-            return Err(TtsError(format!("no wavs in {dir}/wav")));
+            return Err(TtsError(format!(
+                "no wavs decoded from {dir}/wav ({skipped} skipped)"
+            )));
+        }
+        if skipped > 0 {
+            eprintln!("rust-tts-wrapper: LJSpeech import skipped {skipped} unreadable wav(s)");
         }
         Ok(Self { name, clips })
     }
@@ -187,7 +218,7 @@ impl VoiceCorpus {
         self.clips.iter().map(AudioClip::duration_secs).sum()
     }
 
-    /// Convert to a [`VoiceIdentity`] for enrollment.
+    /// Convert to a `VoiceIdentity` for enrollment.
     #[must_use]
     pub fn to_identity(&self, language: Option<&str>) -> VoiceIdentity {
         VoiceIdentity {
@@ -301,8 +332,9 @@ pub(crate) fn decode_to_canonical_pcm(bytes: &[u8]) -> TtsResult<Vec<u8>> {
 }
 
 /// Integer decimation when the source is a multiple of the target
-/// (48k→24k Personal Voice case), naive linear interpolation otherwise.
-/// Voice-grade quality; providers re-process anyway.
+/// (48k→24k Personal Voice case), linear interpolation when the target
+/// is a multiple of the source, nearest-neighbour for relatively-prime
+/// ratios (rare). Voice-grade quality; providers re-process anyway.
 #[allow(clippy::cast_precision_loss)]
 fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || input.is_empty() {

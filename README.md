@@ -50,7 +50,10 @@ let identity = corpus.to_identity(Some("en"));
 
 // Enroll (Qwen voice-enrollment and ElevenLabs IVC supported today).
 let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#).ok_or("no cloner")?;
-let handle = cloner.clone_voice(&identity)?; // CloneOutcome::Ready(handle)
+let handle = match cloner.clone_voice(&identity)? {
+    rust_tts_wrapper::cloning::CloneOutcome::Ready(h) => h,
+    _ => unreachable!("qwen cloning is instant"),
+};
 
 // Speak it — a cloned voice id is just a voice string; Qwen handles are
 // model-bound, so pass the recorded model via modelId.
