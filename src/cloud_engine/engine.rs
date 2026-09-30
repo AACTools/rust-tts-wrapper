@@ -197,8 +197,10 @@ impl TtsEngine for CloudEngine {
                 _ => {
                     google_ssml_override = None;
                     // ElevenLabs and Gemini parse no SSML: translate into
-                    // the model-matched dialect (breaks, whisper, styles
-                    // survive) rather than stripping to plain text.
+                    // the model-matched dialect (breaks, whisper, styles,
+                    // and — since speechmarkdown-rust 0.5.2 — SSML
+                    // <phoneme> arriving as ElevenLabs' native inline
+                    // "/IPA/") rather than stripping to plain text.
                     #[cfg(feature = "speechmarkdown")]
                     if self.config.provider_id == "elevenlabs"
                         || self.config.provider_id == "gemini"
@@ -755,6 +757,19 @@ impl TtsEngine for CloudEngine {
                         );
                     }
                 }
+                // ElevenLabs v4 language selector: 90+ languages via
+                // language_code (eng, cmn, fra, …). Optional credential;
+                // v4-family models only (older models 4xx on the field).
+                if self.config.provider_id == "elevenlabs"
+                    && effective_model(&self.config).is_some_and(|m| m.starts_with("eleven_v4"))
+                {
+                    if let Some(lang) = self.credentials.get("language").filter(|l| !l.is_empty()) {
+                        body.insert(
+                            "language_code".to_string(),
+                            serde_json::Value::String(lang.clone()),
+                        );
+                    }
+                }
                 // ElevenLabs: map the wrapper's rate multiplier (1.0 = normal)
                 // onto the deterministic voice_settings.speed API parameter
                 // (valid range 0.7–1.2; clamped). Only sent for explicit
@@ -762,7 +777,14 @@ impl TtsEngine for CloudEngine {
                 // (v3 models: use audio tags). Inserted before extra_body so
                 // a config-supplied voice_settings object (stability,
                 // similarity, …) takes precedence over the derived one.
+                // v4 exposes no Speed setting ("Style and Speed sliders
+                // are not available in Eleven v4") — deriving one would
+                // either error or be silently ignored. Honours the
+                // effective model (extra_body override included).
+                let speed_supported =
+                    !effective_model(&self.config).is_some_and(|m| m.starts_with("eleven_v4"));
                 if self.config.provider_id == "elevenlabs"
+                    && speed_supported
                     && rate > 0.0
                     && (rate - 1.0).abs() > f32::EPSILON
                     && !self.config.extra_body.contains_key("voice_settings")

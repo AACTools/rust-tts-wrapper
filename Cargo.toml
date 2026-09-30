@@ -116,7 +116,7 @@ voicegarden-lexicons = { version = "0.3", optional = true }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=1.13.8", optional = true }
 base64 = { version = "0.23", optional = true }
-speechmarkdown-rust = { version = "0.5.0", optional = true }
+speechmarkdown-rust = { version = "0.5.2", optional = true }
 anyhow = "1"
 tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"], optional = true }
 uuid = { version = "1.23.2", features = ["v4"], optional = true }

@@ -17,7 +17,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | Google Gemini (3.8 TTS) | Cloud | API Key | After response (JSON) | API | Estimated (scaled) | Platform-aware |
 | Qwen (Alibaba Cloud Model Studio / DashScope) | Cloud | API Key (+ optional Model/Region/Instruction) | Real-time (WS) | Static (14 system voices) | **Real** (word timestamps, voice-dependent) | Stripped |
 | OpenAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| ElevenLabs | Cloud | API Key | Streamed (JSON w/ timestamps) | API | Estimated | Platform-aware |
+| ElevenLabs | Cloud | API Key (+ optional Model/Voice/Language) | Streamed (JSON w/ timestamps) | API | Estimated | Platform-aware (v4 default: audio tags + inline IPA) |
 | Cartesia | Cloud | API Key | Streamed | API | Estimated | Platform-aware |
 | Deepgram | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
 | PlayHT | Cloud | API Key + User ID | Streamed | — | Estimated | Platform-aware |

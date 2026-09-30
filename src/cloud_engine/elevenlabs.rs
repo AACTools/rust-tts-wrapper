@@ -9,7 +9,11 @@
 /// needs the audio-tag dialect, every other ElevenLabs model understands
 /// `<break>`.
 pub(crate) fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a str {
-    if provider == "elevenlabs" && model.is_some_and(|m| m.starts_with("eleven_v3")) {
+    // v4 and v3 share the audio-tag dialect: neither parses SSML
+    // (breaks become ellipses/audio tags, styles become [tags]).
+    if provider == "elevenlabs"
+        && model.is_some_and(|m| m.starts_with("eleven_v3") | m.starts_with("eleven_v4"))
+    {
         "elevenlabs-v3"
     } else {
         provider
@@ -21,12 +25,6 @@ pub(crate) fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>
 /// Returns `None` when the input does not parse; callers then fall back
 /// to plain-text stripping.
 #[cfg(feature = "speechmarkdown")]
-/// Translate W3C SSML into a prompt dialect via SpeechMarkdown:
-/// SSML → SpeechMarkdown → the target platform's dialect.
-///
-/// Named for its ElevenLabs origin but shared by every no-SSML dialect
-/// (ElevenLabs pre-v3/v3, Gemini): these engines read stray XML aloud,
-/// so incoming `tts_speak_ssml` input must be translated, not stripped.
 pub(crate) fn ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
     use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
     let platform = Platform::from_platform_str(smd_platform)?;
