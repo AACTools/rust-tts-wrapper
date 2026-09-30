@@ -53,16 +53,17 @@ pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<
                 .cloned()
                 .unwrap_or_else(|| "21m00Tcm4TlvDq8ikWAM".into());
             // Model selection matters for the SpeechMarkdown dialect:
-            // eleven_v3* parses no SSML (audio tags only), pre-v3 models
-            // understand <break> but read audio tags aloud. v3 is the
-            // default — the most capable model, and the dialects keep the
-            // markup correct for it. Unrecognized model IDs surface as
+            // eleven_v4*/v3* parse no SSML (audio tags only; v4 also
+            // takes inline "/IPA/" pronunciation), pre-v3 models
+            // understand <break> but read audio tags aloud. v4 is the
+            // default — the current flagship and a net upgrade per
+            // ElevenLabs' own guidance. Unrecognized model IDs surface as
             // API errors rather than being masked.
             let model = creds
                 .get("modelId")
                 .filter(|m| !m.is_empty())
                 .cloned()
-                .unwrap_or_else(|| "eleven_v3".into());
+                .unwrap_or_else(|| "eleven_v4".into());
             Some(CloudConfig {
                 synth_url: format!("https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"),
                 auth_header: "xi-api-key".into(),

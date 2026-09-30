@@ -193,7 +193,12 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
     {
         let cloud = [
             ("openai", "OpenAI", true, r#"["apiKey"]"#),
-            ("elevenlabs", "ElevenLabs", true, r#"["apiKey"]"#),
+            (
+                "elevenlabs",
+                "ElevenLabs",
+                true,
+                r#"["apiKey","modelId","voiceId","language"]"#,
+            ),
             ("azure", "Azure", true, r#"["subscriptionKey","region"]"#),
             ("edge", "Microsoft Edge (Read Aloud)", false, "[]"),
             ("google", "Google Cloud", true, r#"["apiKey"]"#),

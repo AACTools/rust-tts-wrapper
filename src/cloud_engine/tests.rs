@@ -1994,7 +1994,7 @@ pub(crate) fn test_elevenlabs_model_id_from_creds() {
     // v3 audio-tag dialect — the invariant that makes SpeechMarkdown
     // correct out of the box.
     let cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
-    assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+    assert_eq!(cfg.model_default.as_deref(), Some("eleven_v4"));
     assert_eq!(
         elevenlabs_smd_platform("elevenlabs", cfg.model_default.as_deref()),
         "elevenlabs-v3"
@@ -2020,7 +2020,7 @@ pub(crate) fn test_elevenlabs_model_id_from_creds() {
     let mut c = engine_creds("elevenlabs");
     c.insert("modelId".into(), String::new());
     let cfg = build_config("elevenlabs", &c).unwrap();
-    assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+    assert_eq!(cfg.model_default.as_deref(), Some("eleven_v4"));
 }
 
 #[test]
@@ -2062,7 +2062,7 @@ pub(crate) fn test_elevenlabs_dialect_follows_extra_body_model_id() {
     // The JSON body lets extra_body override model_id; the SpeechMarkdown
     // dialect must follow the model that is actually sent.
     let mut cfg = build_config("elevenlabs", &engine_creds("elevenlabs")).unwrap();
-    assert_eq!(cfg.model_default.as_deref(), Some("eleven_v3"));
+    assert_eq!(cfg.model_default.as_deref(), Some("eleven_v4"));
     cfg.extra_body.insert(
         "model_id".to_string(),
         serde_json::json!("eleven_multilingual_v2"),
@@ -2097,7 +2097,45 @@ pub(crate) fn test_elevenlabs_dialect_follows_model() {
         "elevenlabs"
     );
     assert_eq!(elevenlabs_smd_platform("azure", Some("eleven_v3")), "azure");
+    // No model at all → the plain provider platform.
     assert_eq!(elevenlabs_smd_platform("elevenlabs", None), "elevenlabs");
+}
+
+#[test]
+pub(crate) fn test_elevenlabs_v4_shares_the_audio_tag_dialect() {
+    assert_eq!(
+        elevenlabs_smd_platform("elevenlabs", Some("eleven_v4")),
+        "elevenlabs-v3"
+    );
+    assert_eq!(
+        elevenlabs_smd_platform("elevenlabs", Some("eleven_v4_turbo")),
+        "elevenlabs-v3"
+    );
+    assert!(elevenlabs_takes_inline_ipa(Some("eleven_v4")));
+    assert!(elevenlabs_takes_inline_ipa(Some("eleven_v4_turbo")));
+    assert!(!elevenlabs_takes_inline_ipa(Some("eleven_v3")));
+    assert!(!elevenlabs_takes_inline_ipa(Some("eleven_flash_v2")));
+}
+
+#[test]
+pub(crate) fn test_elevenlabs_inline_phonemes() {
+    // IPA phoneme → v4's native "/IPA/" inline syntax.
+    let out = elevenlabs_inline_phonemes(
+        "the city of <phoneme alphabet=\"ipa\" ph=\"ˌsænfrənˈsɪskoʊ\">San Francisco</phoneme> awaits",
+    );
+    assert!(out.contains("\"/ˌsænfrənˈsɪskoʊ/\""), "{out}");
+    assert!(!out.contains('<'), "{out}");
+    // Non-IPA alphabets (cmu-arpabet, flash-v2-only) degrade to the word.
+    let out = elevenlabs_inline_phonemes(
+        "<phoneme alphabet=\"cmu-arpabet\" ph=\"M AE1 D IH0 S AH0 N\">Madison</phoneme>",
+    );
+    assert!(out.contains("Madison"));
+    assert!(!out.contains("phoneme"), "{out}");
+    // Text without phonemes is untouched.
+    assert_eq!(
+        elevenlabs_inline_phonemes("plain [whispers] text"),
+        "plain [whispers] text"
+    );
 }
 
 // ===== Auth-header composition per provider =====

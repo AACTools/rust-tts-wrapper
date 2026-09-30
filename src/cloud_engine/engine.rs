@@ -199,11 +199,18 @@ impl TtsEngine for CloudEngine {
                     // ElevenLabs and Gemini parse no SSML: translate into
                     // the model-matched dialect (breaks, whisper, styles
                     // survive) rather than stripping to plain text.
+                    // ElevenLabs first: <phoneme> tags become v4's inline
+                    // "/IPA/" where the model takes it, or just the word.
                     #[cfg(feature = "speechmarkdown")]
                     if self.config.provider_id == "elevenlabs"
                         || self.config.provider_id == "gemini"
                     {
-                        text = ssml_to_dialect(&original_text, smd_platform)
+                        let dialect_source = if self.config.provider_id == "elevenlabs" {
+                            elevenlabs_inline_phonemes(&original_text)
+                        } else {
+                            original_text.clone()
+                        };
+                        text = ssml_to_dialect(&dialect_source, smd_platform)
                             .unwrap_or_else(|| crate::engine::strip_ssml_to_text(&original_text));
                     } else {
                         text = crate::engine::strip_ssml_to_text(&original_text);
@@ -755,6 +762,16 @@ impl TtsEngine for CloudEngine {
                         );
                     }
                 }
+                // ElevenLabs v4 language selector: 90+ languages via
+                // language_code (eng, cmn, fra, …). Optional credential.
+                if self.config.provider_id == "elevenlabs" {
+                    if let Some(lang) = self.credentials.get("language").filter(|l| !l.is_empty()) {
+                        body.insert(
+                            "language_code".to_string(),
+                            serde_json::Value::String(lang.clone()),
+                        );
+                    }
+                }
                 // ElevenLabs: map the wrapper's rate multiplier (1.0 = normal)
                 // onto the deterministic voice_settings.speed API parameter
                 // (valid range 0.7–1.2; clamped). Only sent for explicit
@@ -762,7 +779,14 @@ impl TtsEngine for CloudEngine {
                 // (v3 models: use audio tags). Inserted before extra_body so
                 // a config-supplied voice_settings object (stability,
                 // similarity, …) takes precedence over the derived one.
+                // v4 exposes no Speed setting ("Style and Speed sliders
+                // are not available in Eleven v4") — deriving one would
+                // either error or be silently ignored. Honours the
+                // effective model (extra_body override included).
+                let speed_supported =
+                    !effective_model(&self.config).is_some_and(|m| m.starts_with("eleven_v4"));
                 if self.config.provider_id == "elevenlabs"
+                    && speed_supported
                     && rate > 0.0
                     && (rate - 1.0).abs() > f32::EPSILON
                     && !self.config.extra_body.contains_key("voice_settings")
