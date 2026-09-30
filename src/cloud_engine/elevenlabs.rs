@@ -20,82 +20,11 @@ pub(crate) fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>
     }
 }
 
-/// Does this model take the inline `"/IPA/"` pronunciation syntax?
-/// (v4's native IPA; v3 ignores phoneme tags entirely, eleven_flash_v2
-/// is the only model family that parses XML `<phoneme>`.)
-#[must_use]
-pub(crate) fn elevenlabs_takes_inline_ipa(model: Option<&str>) -> bool {
-    model.is_some_and(|m| m.starts_with("eleven_v4"))
-}
-
-/// Rewrite SSML `<phoneme>` tags into the model-appropriate form:
-///
-/// - inline-IPA models (v4): `<phoneme alphabet="ipa" ph="X">w</phoneme>`
-///   becomes `"/X/"` (ElevenLabs' native syntax);
-/// - everything else: the tag is unsupported, keep just the word.
-///
-/// Applied before SSML→dialect conversion so the inline form rides
-/// through SpeechMarkdown untouched.
-#[must_use]
-pub(crate) fn elevenlabs_inline_phonemes(ssml: &str) -> String {
-    let mut out = String::with_capacity(ssml.len());
-    let mut rest = ssml;
-    while let Some(start) = rest.find('<') {
-        let after = &rest[start..];
-        if let Some(tag_end) = after.find('>') {
-            let tag = &after[..=tag_end];
-            if tag.starts_with("<phoneme") {
-                // Find the ph="..." attribute: splitting on quotes
-                // yields name and value as separate parts, so the value
-                // is the part AFTER the one ending in `ph=`.
-                let parts: Vec<&str> = tag.split(['"', '\'']).collect();
-                let ph = parts
-                    .iter()
-                    .position(|p| p.trim() == "ph=" || p.trim_end() == "ph=")
-                    .and_then(|i| parts.get(i + 1).copied());
-                let alphabet_is_ipa =
-                    tag.contains("alphabet=\"ipa\"") || !tag.contains("alphabet=");
-                // Skip to the closing </phoneme>, keeping the inner word
-                // only when we cannot produce an inline form.
-                let remaining = &after[tag_end + 1..];
-                let close = remaining.find("</phoneme>").map_or(remaining.len(), |i| i);
-                let inner = &remaining[..close];
-                let word = inner.trim();
-                match ph {
-                    Some(ipa) if alphabet_is_ipa => {
-                        out.push_str(&rest[..start]);
-                        out.push_str("\"/");
-                        out.push_str(ipa);
-                        out.push_str("/\"");
-                    }
-                    _ => {
-                        out.push_str(&rest[..start]);
-                        out.push_str(word);
-                    }
-                }
-                rest = &remaining[close.min(remaining.len())..];
-                rest = rest.strip_prefix("</phoneme>").unwrap_or(rest);
-                continue;
-            }
-        }
-        out.push_str(&rest[..=start]);
-        rest = &rest[start + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
 /// Translate W3C (or Alexa/Azure-flavoured) SSML into an ElevenLabs
 /// dialect prompt: SSML → SpeechMarkdown → the model-matched dialect.
 /// Returns `None` when the input does not parse; callers then fall back
 /// to plain-text stripping.
 #[cfg(feature = "speechmarkdown")]
-/// Translate W3C SSML into a prompt dialect via SpeechMarkdown:
-/// SSML → SpeechMarkdown → the target platform's dialect.
-///
-/// Named for its ElevenLabs origin but shared by every no-SSML dialect
-/// (ElevenLabs pre-v3/v3, Gemini): these engines read stray XML aloud,
-/// so incoming `tts_speak_ssml` input must be translated, not stripped.
 pub(crate) fn ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
     use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
     let platform = Platform::from_platform_str(smd_platform)?;

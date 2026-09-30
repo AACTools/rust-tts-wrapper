@@ -2111,31 +2111,26 @@ pub(crate) fn test_elevenlabs_v4_shares_the_audio_tag_dialect() {
         elevenlabs_smd_platform("elevenlabs", Some("eleven_v4_turbo")),
         "elevenlabs-v3"
     );
-    assert!(elevenlabs_takes_inline_ipa(Some("eleven_v4")));
-    assert!(elevenlabs_takes_inline_ipa(Some("eleven_v4_turbo")));
-    assert!(!elevenlabs_takes_inline_ipa(Some("eleven_v3")));
-    assert!(!elevenlabs_takes_inline_ipa(Some("eleven_flash_v2")));
 }
 
 #[test]
-pub(crate) fn test_elevenlabs_inline_phonemes() {
-    // IPA phoneme → v4's native "/IPA/" inline syntax.
-    let out = elevenlabs_inline_phonemes(
-        "the city of <phoneme alphabet=\"ipa\" ph=\"ˌsænfrənˈsɪskoʊ\">San Francisco</phoneme> awaits",
-    );
-    assert!(out.contains("\"/ˌsænfrənˈsɪskoʊ/\""), "{out}");
-    assert!(!out.contains('<'), "{out}");
-    // Non-IPA alphabets (cmu-arpabet, flash-v2-only) degrade to the word.
-    let out = elevenlabs_inline_phonemes(
-        "<phoneme alphabet=\"cmu-arpabet\" ph=\"M AE1 D IH0 S AH0 N\">Madison</phoneme>",
-    );
-    assert!(out.contains("Madison"));
+pub(crate) fn test_elevenlabs_ssml_phoneme_round_trips_to_native_ipa() {
+    // Since speechmarkdown-rust 0.5.2: SSML <phoneme alphabet="ipa">
+    // survives the dialect conversion as ElevenLabs' native inline
+    // form — quotes added once by the formatter, never by us.
+    let out = ssml_to_dialect(
+        "<speak>city of <phoneme alphabet=\"ipa\" ph=\"ˌsænfrənˈsɪskoʊ\">San Francisco</phoneme></speak>",
+        "elevenlabs-v3",
+    )
+    .expect("dialect conversion");
+    assert_eq!(out, "city of \"/ˌsænfrənˈsɪskoʊ/\"");
+    // cmu-arpabet (flash-v2-only) degrades to the word, not XML read aloud.
+    let out = ssml_to_dialect(
+        "<speak><phoneme alphabet=\"cmu-arpabet\" ph=\"M AE1 D\">Madison</phoneme></speak>",
+        "elevenlabs-v3",
+    )
+    .expect("dialect conversion");
     assert!(!out.contains("phoneme"), "{out}");
-    // Text without phonemes is untouched.
-    assert_eq!(
-        elevenlabs_inline_phonemes("plain [whispers] text"),
-        "plain [whispers] text"
-    );
 }
 
 // ===== Auth-header composition per provider =====

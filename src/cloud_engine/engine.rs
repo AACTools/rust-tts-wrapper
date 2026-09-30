@@ -197,20 +197,15 @@ impl TtsEngine for CloudEngine {
                 _ => {
                     google_ssml_override = None;
                     // ElevenLabs and Gemini parse no SSML: translate into
-                    // the model-matched dialect (breaks, whisper, styles
-                    // survive) rather than stripping to plain text.
-                    // ElevenLabs first: <phoneme> tags become v4's inline
-                    // "/IPA/" where the model takes it, or just the word.
+                    // the model-matched dialect (breaks, whisper, styles,
+                    // and — since speechmarkdown-rust 0.5.2 — SSML
+                    // <phoneme> arriving as ElevenLabs' native inline
+                    // "/IPA/") rather than stripping to plain text.
                     #[cfg(feature = "speechmarkdown")]
                     if self.config.provider_id == "elevenlabs"
                         || self.config.provider_id == "gemini"
                     {
-                        let dialect_source = if self.config.provider_id == "elevenlabs" {
-                            elevenlabs_inline_phonemes(&original_text)
-                        } else {
-                            original_text.clone()
-                        };
-                        text = ssml_to_dialect(&dialect_source, smd_platform)
+                        text = ssml_to_dialect(&original_text, smd_platform)
                             .unwrap_or_else(|| crate::engine::strip_ssml_to_text(&original_text));
                     } else {
                         text = crate::engine::strip_ssml_to_text(&original_text);
@@ -763,8 +758,11 @@ impl TtsEngine for CloudEngine {
                     }
                 }
                 // ElevenLabs v4 language selector: 90+ languages via
-                // language_code (eng, cmn, fra, …). Optional credential.
-                if self.config.provider_id == "elevenlabs" {
+                // language_code (eng, cmn, fra, …). Optional credential;
+                // v4-family models only (older models 4xx on the field).
+                if self.config.provider_id == "elevenlabs"
+                    && effective_model(&self.config).is_some_and(|m| m.starts_with("eleven_v4"))
+                {
                     if let Some(lang) = self.credentials.get("language").filter(|l| !l.is_empty()) {
                         body.insert(
                             "language_code".to_string(),
