@@ -23,7 +23,17 @@ fn main() {
             s.push(v);
         }
     };
-    engine.speak("Where is the bathroom", None, 1.0, 1.0, 1.0, Some(&mut on_audio), None, None)
+    engine
+        .speak(
+            "Where is the bathroom",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut on_audio),
+            None,
+            None,
+        )
         .expect("speak");
     println!("got {} samples", s.len());
     // write wav
