@@ -9,6 +9,38 @@
 
 use wasm_bindgen::prelude::*;
 
+mod edge;
+
+/// Test hook: speak against a mock Edge WS server at `url`.
+#[wasm_bindgen]
+pub async fn edge_speak_mock(url: String, voice: String, rate: f32, pitch: f32, text: String) -> Result<JsValue, JsError> {
+    let out = edge::edge_speak_ws(&url, &voice, rate, pitch, &text).await?;
+    serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Speak through Microsoft Edge "Read Aloud" (free, no API key).
+/// `voice` = Azure short name (e.g. "en-US-AriaNeural"); text may be
+/// SpeechMarkdown. Returns { audio, mime, boundaries: [[word, offset_ms, duration_ms]] }.
+#[wasm_bindgen]
+pub async fn edge_speak(voice: String, rate: f32, pitch: f32, text: String) -> Result<JsValue, JsError> {
+    let out = edge::edge_speak(&voice, rate, pitch, &text).await?;
+    serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
+}
+
+/// Yield to the browser event loop once (setTimeout 0).
+pub(crate) async fn next_tick() -> Result<(), JsError> {
+    let w = web_sys::window().ok_or_else(|| JsError::new("no window"))?;
+    let promise = js_sys::Promise::new(&mut |resolve, _| {
+        let resolve = resolve.clone();
+        let cb: js_sys::Function = Closure::once_into_js(move |_: JsValue| {
+            let _ = resolve.call0(&JsValue::NULL);
+        })
+        .unchecked_into();
+        let _ = w.set_timeout_with_callback_and_timeout_and_arguments_0(&cb, 0);
+    });
+    wasm_bindgen_futures::JsFuture::from(promise).await.map(|_| ()).map_err(|e| JsError::new(&format!("tick: {e:?}")))
+}
+
 #[derive(serde::Deserialize)]
 pub struct CloudRequest {
     /// "elevenlabs" | "azure" (google/gemini/polly on the way)
