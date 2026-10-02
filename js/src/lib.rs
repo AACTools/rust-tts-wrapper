@@ -9,18 +9,13 @@
 
 use wasm_bindgen::prelude::*;
 
+#[cfg(feature = "edge")]
 mod edge;
 
-/// Test hook: speak against a mock Edge WS server at `url`.
-#[wasm_bindgen]
-pub async fn edge_speak_mock(url: String, voice: String, rate: f32, pitch: f32, text: String) -> Result<JsValue, JsError> {
-    let out = edge::edge_speak_ws(&url, &voice, rate, pitch, &text).await?;
-    serde_wasm_bindgen::to_value(&out).map_err(|e| JsError::new(&e.to_string()))
-}
-
-/// Speak through Microsoft Edge "Read Aloud" (free, no API key).
-/// `voice` = Azure short name (e.g. "en-US-AriaNeural"); text may be
-/// SpeechMarkdown. Returns { audio, mime, boundaries: [[word, offset_ms, duration_ms]] }.
+/// Speak through Microsoft Edge "Read Aloud" — feature-gated off the
+/// browser surface (Microsoft closes browser-origin handshakes; see
+/// src/edge.rs). Enable the `edge` feature + a proxy if ever needed.
+#[cfg(feature = "edge")]
 #[wasm_bindgen]
 pub async fn edge_speak(voice: String, rate: f32, pitch: f32, text: String) -> Result<JsValue, JsError> {
     let out = edge::edge_speak(&voice, rate, pitch, &text).await?;

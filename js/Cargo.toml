@@ -7,6 +7,12 @@ description = "rust-tts-wrapper for JavaScript: cloud TTS engines on web APIs (w
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# Edge Read Aloud pump: protocol-complete + mock-proven, but Microsoft closes
+# browser-origin handshakes. Off the browser surface by default; enable if a
+# proxy (e.g. a Worker adding the extension Origin header) ever exists.
+edge = []
+
 [dependencies]
 rust-tts-wrapper = { path = "..", default-features = false }
 speechmarkdown-rust = "0.5"

@@ -8,15 +8,12 @@ rust-tts-wrapper for JavaScript (wasm32). Cloud TTS engines on web APIs.
   end-to-end (CORS OK).
 - **azure**: REST (region endpoint, SSML body, X-Microsoft-OutputFormat).
   Browser-verified end-to-end.
-- **edge (protocol-complete, blocked by origin policy)**: the full Read
-  Aloud pump is implemented and PROVEN against a mock server (speech.config
-  + ssml frames, binary audio pump with 2-be header prefix, WordBoundary
-  parsing with correct 100ns->ms conversion, turn.end). LIVE USE IS BLOCKED:
-  Microsoft's endpoint closes browser handshakes — it expects the Edge
-  extension Origin header, which browsers cannot set. Options: a ~20-line
-  Cloudflare Worker adding the header (free tier, one shared proxy), or use
-  the native wrapper's Edge engine for Edge voices. edge_speak_mock(url,...)
-  is the test hook.
+- **edge: DROPPED from the browser surface** (2026-10-02). The full Read
+  Aloud pump is implemented and mock-proven (see src/edge.rs), but
+  Microsoft's endpoint closes browser-origin handshakes — it expects the
+  Edge extension Origin header, which browsers cannot set. The pump is
+  preserved behind the off-by-default `edge` feature for if a proxy ever
+  exists. Edge voices on desktop: the native wrapper's Edge engine.
 - coming: google, gemini, polly (sigv4 is pure Rust — signs fine in wasm),
   qwen (duplex WS pump — same web-sys pattern as edge)
 - out of scope by design: sapi/avsynth (OS synthesizers), sherpaonnx (C++).
