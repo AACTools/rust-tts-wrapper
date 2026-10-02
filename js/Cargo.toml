@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 edge = []
 
 [dependencies]
-rust-tts-wrapper = { path = "..", default-features = false }
+rust-tts-wrapper = { path = "..", default-features = false, features = ["cloud-core"] }
 floravox-wasm = "0.1.1"
 speechmarkdown-rust = "0.5"
 serde = { version = "1", features = ["derive"] }

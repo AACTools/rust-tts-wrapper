@@ -42,7 +42,10 @@ required-features = ["cloning"]
 [features]
 default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
 system = ["speech-dispatcher"]
-cloud = ["reqwest", "dep:serde_json", "base64", "speechmarkdown", "tungstenite", "uuid", "url", "symphonia", "sha2"]
+# cloud-core: the pure provider shapes shared by native + wasm (config,
+# sigv4, request builders, response parsers) — no HTTP stack
+cloud-core = ["dep:serde_json", "base64", "speechmarkdown", "sha2"]
+cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)

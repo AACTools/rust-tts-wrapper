@@ -43,7 +43,8 @@ pub(crate) fn gemini_style_from_params(rate: f32, pitch: f32, volume: f32) -> St
 /// be a prebuilt name ("Kore"), an Extended Voice Library ID, a voice
 /// design ID (`voice_...`) or a stateless replication key
 /// (`voicekey_...`) — all pass through in `speech_config`.
-pub(crate) fn build_gemini_request(
+#[must_use]
+pub fn build_gemini_request(
     text: &str,
     voice: &str,
     rate: f32,
@@ -74,7 +75,7 @@ pub(crate) fn build_gemini_request(
 
 /// Outcome of scanning an Interactions API response for audio.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GeminiAudioBlock {
+pub enum GeminiAudioBlock {
     /// The last audio block, decoded from base64.
     Present(Vec<u8>),
     /// No audio block in the response (text-only reply, refusal).
@@ -91,7 +92,8 @@ pub(crate) enum GeminiAudioBlock {
 /// matches the SDK's `output_audio` convenience property. Base64
 /// corruption is reported distinctly from absence so the caller can
 /// produce an accurate diagnostic.
-pub(crate) fn parse_gemini_interaction_audio(json: &serde_json::Value) -> GeminiAudioBlock {
+#[must_use]
+pub fn parse_gemini_interaction_audio(json: &serde_json::Value) -> GeminiAudioBlock {
     use base64::Engine;
     let Some(steps) = json.get("steps").and_then(|v| v.as_array()) else {
         return GeminiAudioBlock::Absent;

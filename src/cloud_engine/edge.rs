@@ -1,26 +1,27 @@
 // The split modules resolve shared names through the parent glob.
 #![allow(clippy::wildcard_imports)]
 
+#[cfg(feature = "cloud")]
 use super::*;
 
 /// Microsoft Edge "Read Aloud" constants. The trusted client token is the
 /// well-known value used by edge-tts / VoiceGarden-SAPI; `Sec-MS-GEC` is
 /// derived from it and the current time (see `edge_sec_ms_gec`).
-#[cfg(feature = "cloud")]
+#[cfg(feature = "cloud-core")]
 pub(crate) const EDGE_TRUSTED_CLIENT_TOKEN: &str = "6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 
-#[cfg(feature = "cloud")]
+#[cfg(feature = "cloud-core")]
 pub(crate) const EDGE_VOICE_LIST_URL: &str = "https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4";
 
-#[cfg(feature = "cloud")]
+#[cfg(feature = "cloud-core")]
 pub(crate) const EDGE_DEFAULT_VOICE: &str = "en-US-AriaNeural";
 
 /// Edge's WS endpoint 403-rejects bare handshakes — it expects the Edge
 /// browser's Read Aloud User-Agent (and the Read Aloud extension Origin).
-#[cfg(feature = "cloud")]
+#[cfg(feature = "cloud-core")]
 pub(crate) const EDGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36 Edg/142.0.0.0";
 
-#[cfg(feature = "cloud")]
+#[cfg(feature = "cloud-core")]
 pub(crate) const EDGE_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold";
 
 /// Generate the `Sec-MS-GEC` token Microsoft Edge "Read Aloud" requires.
@@ -30,14 +31,13 @@ pub(crate) const EDGE_ORIGIN: &str = "chrome-extension://jdiccldimpdaibmpdkjnbmc
 /// down to the nearest 5-minute boundary (3,000,000,000 ticks), concatenate
 /// with the trusted client token, and SHA-256 → uppercase hex. Returns a
 /// fresh token valid for up to 5 minutes.
-#[cfg(feature = "cloud")]
-pub(crate) fn edge_sec_ms_gec() -> String {
+/// `Sec-MS-GEC` from caller-supplied Unix nanos (pure: wasm callers pass
+/// the JS clock — wasm32-unknown-unknown has no SystemTime).
+#[must_use]
+#[cfg(feature = "cloud-core")]
+pub fn edge_sec_ms_gec_at(unix_nanos: u128) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write;
-    let unix_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     // FILETIME epoch (1601-01-01) is 116_444_736_000s before Unix (1970-01-01);
     // 100-ns ticks = nanos/100 + that offset in ticks.
     #[allow(clippy::cast_possible_truncation)]
@@ -52,12 +52,24 @@ pub(crate) fn edge_sec_ms_gec() -> String {
     token
 }
 
+/// `Sec-MS-GEC` from the system clock (native).
+#[cfg(feature = "cloud")]
+pub fn edge_sec_ms_gec() -> String {
+    let unix_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    edge_sec_ms_gec_at(unix_nanos)
+}
+
 /// The concrete WebSocket stream type returned by tungstenite's `connect` for a
 /// `wss://` URL. Stored in the connection pool between synthesis calls.
+#[cfg(feature = "cloud")]
 #[cfg(feature = "cloud")]
 pub(crate) type WsStream =
     tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>;
 
+#[cfg(feature = "cloud")]
 #[cfg(feature = "cloud")]
 pub(crate) struct PooledConn {
     socket: WsStream,
@@ -91,6 +103,7 @@ pub(crate) const WS_POOL_MAX_PER_URL: usize = 4;
 
 /// Take a live connection for `url`, dropping any that have aged out.
 #[cfg(feature = "cloud")]
+#[cfg(feature = "cloud")]
 pub(crate) fn ws_checkout(url: &str) -> Option<WsStream> {
     let mut pool = WS_POOL.lock().ok()?;
     let conns = pool.get_mut(url)?;
@@ -103,6 +116,7 @@ pub(crate) fn ws_checkout(url: &str) -> Option<WsStream> {
 }
 
 /// Return a connection for reuse, respecting the per-URL cap.
+#[cfg(feature = "cloud")]
 #[cfg(feature = "cloud")]
 pub(crate) fn ws_checkin(url: String, socket: WsStream) {
     let Ok(mut pool) = WS_POOL.lock() else {
@@ -124,7 +138,8 @@ pub(crate) fn ws_checkin(url: String, socket: WsStream) {
 /// Azure encodes offsets in 100-nanosecond ticks; we convert to milliseconds
 /// here so the caller doesn't have to.
 #[must_use]
-pub(crate) fn azure_ws_parse_word_boundary(
+#[cfg(feature = "cloud-core")]
+pub fn azure_ws_parse_word_boundary(
     item: &serde_json::Value,
 ) -> Option<(&str, u64, u64, i32, i32)> {
     let data = item.get("Data")?;
@@ -176,7 +191,8 @@ pub(crate) fn azure_ws_parse_word_boundary(
 
 /// Parse one `Viseme` metadata item into `(viseme_id, offset_sec)`.
 #[must_use]
-pub(crate) fn azure_ws_parse_viseme(item: &serde_json::Value) -> Option<(i32, f32)> {
+#[cfg(feature = "cloud-core")]
+pub fn azure_ws_parse_viseme(item: &serde_json::Value) -> Option<(i32, f32)> {
     let data = item.get("Data")?;
     let viseme_id = data
         .get("VisemeId")

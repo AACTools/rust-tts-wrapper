@@ -39,11 +39,7 @@ pub(crate) const QWEN_WS_URL_INTL: &str = "wss://dashscope-intl.aliyuncs.com/api
 pub(crate) const QWEN_WS_URL_BEIJING: &str = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
 
 #[cfg(feature = "cloud")]
-pub(crate) const QWEN_DEFAULT_MODEL: &str = "qwen-audio-3.0-tts-flash";
-
 #[cfg(feature = "cloud")]
-pub(crate) const QWEN_DEFAULT_VOICE: &str = "longanhuan_v3.6";
-
 /// continue-task hard limit per message (protocol caps at 20 000 chars;
 /// leave headroom so a chunk never straddles the boundary).
 #[cfg(feature = "cloud")]

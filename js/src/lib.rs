@@ -181,22 +181,20 @@ async fn azure(req: &CloudRequest, text: &str) -> Result<CloudAudio, JsError> {
 
 /// Google JSON body: SSML input when markup, else plain text; MP3 out.
 pub(crate) fn build_google_body(req: &CloudRequest, text: &str, voice: &str) -> serde_json::Value {
-    let input = if text.trim_start().starts_with('<') || (text.contains('[') && text.contains(']')) {
-        let ssml = crate::prepare_text(req, text);
-        serde_json::json!({ "ssml": ssml })
+    let add_marks = false; // marks-driven word timing is a follow-up
+    let input_ssml = if text.trim_start().starts_with('<') {
+        Some(text.to_string())
     } else {
-        serde_json::json!({ "text": text })
+        None
     };
-    let voice_obj = if voice.len() >= 5 && voice.as_bytes().get(2) == Some(&b'-') {
-        serde_json::json!({ "languageCode": &voice[..5], "name": voice })
+    let prepared = if input_ssml.is_none() && text.contains('[') && text.contains(']') {
+        crate::prepare_text(req, text)
     } else {
-        serde_json::json!({ "name": voice })
+        text.to_string()
     };
-    serde_json::json!({
-        "input": input,
-        "voice": voice_obj,
-        "audioConfig": { "audioEncoding": "MP3" },
-    })
+    let (body, _words) = rust_tts_wrapper::cloud_core::build_google_request(
+        &prepared, voice, add_marks, input_ssml.as_deref());
+    body
 }
 
 fn crate_escape(s: &str) -> String {

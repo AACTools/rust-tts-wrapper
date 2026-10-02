@@ -7,12 +7,16 @@
 // Thread-local bridge for viseme callbacks. The FFI layer sets this before
 // calling speak(); the Azure WS loop reads it when viseme events arrive.
 // This avoids a trait-level change to add a viseme callback parameter.
+#[cfg(feature = "cloud")]
 use crate::boundaries::{EstimateFirer, EstimatePlan};
+#[cfg(feature = "cloud")]
 use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
+#[cfg(feature = "cloud")]
 use crate::types::{
     normalize_gender, Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary,
 };
 use std::collections::HashMap;
+#[cfg(feature = "cloud")]
 use std::sync::Arc;
 
 #[cfg(feature = "cloud")]
@@ -69,34 +73,58 @@ pub(crate) fn azure_ws_extract_error(body: &str) -> Option<String> {
     Some(reason.to_string())
 }
 
+#[cfg(feature = "cloud-core")]
 mod config;
+#[cfg(feature = "cloud")]
 mod decode;
+#[cfg(feature = "cloud-core")]
 mod edge;
+#[cfg(feature = "cloud-core")]
 mod elevenlabs;
+#[cfg(feature = "cloud")]
 mod engine;
+#[cfg(feature = "cloud-core")]
 mod gemini;
+#[cfg(feature = "cloud-core")]
 mod google;
+#[cfg(feature = "cloud")]
 mod qwen;
+#[cfg(feature = "cloud-core")]
 mod sigv4;
+#[cfg(feature = "cloud-core")]
 mod ssml;
-#[cfg(test)]
+#[cfg(all(test, feature = "cloud"))]
 mod tests;
+#[cfg(feature = "cloud")]
 mod voices;
 
 // Re-exported so the facade (`crate::cloud_engine::*`) and the tests see
 // the moved items with one glob.
-pub(crate) use config::*;
+#[cfg(feature = "cloud-core")]
+pub use config::*;
+#[cfg(feature = "cloud")]
 pub(crate) use decode::*;
-pub(crate) use edge::*;
-pub(crate) use elevenlabs::*;
-pub(crate) use gemini::*;
-pub(crate) use google::*;
+#[cfg(feature = "cloud-core")]
+pub use edge::*;
+#[cfg(feature = "cloud-core")]
+pub use elevenlabs::*;
+#[cfg(feature = "cloud-core")]
+pub use gemini::*;
+#[cfg(feature = "cloud-core")]
+pub use google::*;
+#[cfg(feature = "cloud")]
 pub(crate) use qwen::*;
-pub(crate) use sigv4::*;
-pub(crate) use ssml::*;
+#[cfg(feature = "cloud-core")]
+pub use sigv4::*;
+#[cfg(feature = "cloud-core")]
+pub use ssml::*;
+#[cfg(feature = "cloud")]
 pub(crate) use voices::*;
 
+#[cfg(feature = "cloud")]
 pub use engine::create_cloud_engine;
+#[cfg(feature = "cloud")]
 pub use engine::set_viseme_callback;
 #[allow(unused_imports)] // external facade: consumers use cloud_engine::CloudEngine
+#[cfg(feature = "cloud")]
 pub use engine::CloudEngine;

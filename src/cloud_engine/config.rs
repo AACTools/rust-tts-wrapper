@@ -3,37 +3,40 @@
 
 use super::*;
 
+pub const QWEN_DEFAULT_MODEL: &str = "qwen-audio-3.0-tts-flash";
+pub const QWEN_DEFAULT_VOICE: &str = "longanhuan_v3.6";
+
 /// Configuration for a single cloud TTS provider.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CloudConfig {
-    pub(crate) synth_url: String,
-    pub(crate) auth_header: String,
-    pub(crate) auth_prefix: String,
-    pub(crate) voice_param: String,
-    pub(crate) model_param: Option<String>,
-    pub(crate) model_default: Option<String>,
-    pub(crate) default_voice: Option<String>,
-    pub(crate) text_field: String,
-    pub(crate) extra_body: HashMap<String, serde_json::Value>,
+pub struct CloudConfig {
+    pub synth_url: String,
+    pub auth_header: String,
+    pub auth_prefix: String,
+    pub voice_param: String,
+    pub model_param: Option<String>,
+    pub model_default: Option<String>,
+    pub default_voice: Option<String>,
+    pub text_field: String,
+    pub extra_body: HashMap<String, serde_json::Value>,
     /// Whether this engine requires SSML in the request body (Azure).
-    pub(crate) body_is_ssml: bool,
+    pub body_is_ssml: bool,
     /// Content-Type header override for the synthesis request.
-    pub(crate) content_type: Option<String>,
+    pub content_type: Option<String>,
     /// Additional headers to send with synthesis requests.
-    pub(crate) extra_headers: HashMap<String, String>,
+    pub extra_headers: HashMap<String, String>,
     /// URL for the voice listing endpoint, if available.
-    pub(crate) voices_url: Option<String>,
+    pub voices_url: Option<String>,
     /// Provider ID string for voice mapping.
-    pub(crate) provider_id: String,
+    pub provider_id: String,
     /// Whether this engine's synthesis response body is already raw PCM16
     /// (delivered verbatim) rather than MP3 (decoded to PCM before delivery).
     /// Azure returns PCM because we request `raw-24khz-16bit-mono-pcm`;
     /// Cartesia returns raw PCM by design. Everything else returns MP3.
-    pub(crate) response_is_pcm: bool,
+    pub response_is_pcm: bool,
 }
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig> {
+pub fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudConfig> {
     match id {
         "openai" => Some(CloudConfig {
             synth_url: "https://api.openai.com/v1/audio/speech".into(),
@@ -395,7 +398,7 @@ pub(crate) fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<
 /// The model that will actually be sent: an `extra_body["model_id"]`
 /// override wins over `model_default` (the JSON-body insert order gives
 /// extra_body the last write).
-pub(crate) fn effective_model(config: &CloudConfig) -> Option<&str> {
+pub fn effective_model(config: &CloudConfig) -> Option<&str> {
     config
         .extra_body
         .get("model_id")

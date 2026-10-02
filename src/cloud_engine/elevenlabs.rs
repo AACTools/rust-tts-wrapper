@@ -8,7 +8,8 @@
 /// ElevenLabs markup is model-dependent: `eleven_v3*` parses no SSML and
 /// needs the audio-tag dialect, every other ElevenLabs model understands
 /// `<break>`.
-pub(crate) fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a str {
+#[must_use]
+pub fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>) -> &'a str {
     // v4 and v3 share the audio-tag dialect: neither parses SSML
     // (breaks become ellipses/audio tags, styles become [tags]).
     if provider == "elevenlabs"
@@ -25,7 +26,8 @@ pub(crate) fn elevenlabs_smd_platform<'a>(provider: &'a str, model: Option<&str>
 /// Returns `None` when the input does not parse; callers then fall back
 /// to plain-text stripping.
 #[cfg(feature = "speechmarkdown")]
-pub(crate) fn ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
+#[must_use]
+pub fn ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> {
     use speechmarkdown_rust::{Platform, SpeechMarkdownParser};
     let platform = Platform::from_platform_str(smd_platform)?;
     let smd = SpeechMarkdownParser::to_smd(ssml).ok()?;
@@ -47,7 +49,8 @@ pub(crate) fn ssml_to_dialect(ssml: &str, smd_platform: &str) -> Option<String> 
 /// Defensive against arrays of mismatched lengths — uses `.get(i)` rather
 /// than indexing, mirroring the safety fix in the original inline code.
 /// Extracted from `speak()` so it can be unit-tested with sample payloads.
-pub(crate) fn parse_elevenlabs_alignment(
+#[must_use]
+pub fn parse_elevenlabs_alignment(
     alignment: &serde_json::Map<String, serde_json::Value>,
 ) -> Vec<(String, f32, f32)> {
     let Some(chars) = alignment.get("characters").and_then(|v| v.as_array()) else {

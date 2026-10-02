@@ -147,6 +147,7 @@ pub fn engine_count() -> usize {
 #[must_use]
 #[allow(clippy::vec_init_then_push)]
 pub fn engine_list() -> Vec<EngineDescriptor> {
+    #[allow(unused_mut)]
     let mut engines = Vec::new();
 
     #[cfg(all(feature = "system", target_os = "linux"))]

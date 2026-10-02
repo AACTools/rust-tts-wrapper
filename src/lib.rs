@@ -40,8 +40,20 @@ pub mod boundaries;
 /// Rust-only for now; enable the `cloning` feature.
 #[cfg(feature = "cloning")]
 pub mod cloning;
-#[cfg(feature = "cloud")]
+#[cfg(any(feature = "cloud", feature = "cloud-core"))]
 mod cloud_engine;
+
+/// The pure cloud provider shapes shared by the native engine and the
+/// wasm/js crate: sigv4 signing, request builders, response parsers,
+/// provider configs. Enabled by `cloud-core` (implied by `cloud`).
+#[cfg(feature = "cloud-core")]
+pub mod cloud_core {
+    pub use crate::cloud_engine::{
+        authorization_header, build_gemini_request, build_google_request, edge_sec_ms_gec_at,
+        elevenlabs_smd_platform, parse_elevenlabs_alignment, parse_gemini_interaction_audio,
+        sha256_hex, ssml_to_dialect, CloudConfig, GeminiAudioBlock, SigV4Credentials, SignedUrl,
+    };
+}
 pub mod engine;
 pub mod factory;
 #[cfg(feature = "floravox")]

@@ -2,7 +2,8 @@
 #![allow(clippy::wildcard_imports)]
 
 /// Base64 encode for auth tokens.
-pub(crate) fn base64_encode(data: &str) -> String {
+#[must_use]
+pub fn base64_encode(data: &str) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(data.as_bytes())
 }
@@ -11,7 +12,8 @@ pub(crate) fn base64_encode(data: &str) -> String {
 /// name so that `tts_set_voice` takes effect when using `tts_speak_ssml`.
 /// The SSML is otherwise passed through unchanged.
 #[cfg(feature = "cloud")]
-pub(crate) fn inject_voice_if_missing(ssml: &str, voice: &str) -> String {
+#[must_use]
+pub fn inject_voice_if_missing(ssml: &str, voice: &str) -> String {
     if ssml.contains("<voice") || voice.is_empty() {
         return ssml.to_string();
     }
@@ -47,7 +49,8 @@ pub(crate) const SSML_XMLNS: &str = "http://www.w3.org/2001/10/synthesis";
 /// Derive a BCP-47 language tag from an Azure/Edge voice name
 /// (`en-GB-SoniaNeural` → `en-GB`), defaulting to `en-US` when the name
 /// doesn't look like a locale.
-pub(crate) fn voice_lang(voice: &str) -> String {
+#[must_use]
+pub fn voice_lang(voice: &str) -> String {
     let head: String = voice.chars().take(5).collect();
     let chars: Vec<char> = head.chars().collect();
     let locale_like = chars.len() == 5

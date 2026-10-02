@@ -12,7 +12,8 @@
 use sha2::{Digest, Sha256};
 
 /// HMAC-SHA256 (RFC 2104). Key-block size for SHA-256 is 64 bytes.
-pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+#[must_use]
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     fn pad(key: &[u8], byte: u8) -> [u8; 64] {
         let mut block = [0u8; 64];
         if key.len() > 64 {
@@ -49,7 +50,8 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// Lowercase hex of a SHA-256 digest.
-pub(crate) fn sha256_hex(data: &[u8]) -> String {
+#[must_use]
+pub fn sha256_hex(data: &[u8]) -> String {
     to_hex(&Sha256::digest(data))
 }
 
@@ -73,26 +75,27 @@ fn uri_encode(value: &str) -> String {
 }
 
 /// A parsed `https://host/path?query` split for canonicalization.
-pub(crate) struct SignedUrl {
-    pub(crate) host: String,
-    pub(crate) path: String,
+pub struct SignedUrl {
+    pub host: String,
+    pub path: String,
     /// (name, value) pairs; canonicalization sorts by encoded name.
-    pub(crate) query: Vec<(String, String)>,
+    pub query: Vec<(String, String)>,
 }
 
 /// The credentials a SigV4 request carries.
-pub(crate) struct SigV4Credentials<'a> {
-    pub(crate) access_key: &'a str,
-    pub(crate) secret_key: &'a str,
-    pub(crate) region: &'a str,
-    pub(crate) service: &'a str,
+pub struct SigV4Credentials<'a> {
+    pub access_key: &'a str,
+    pub secret_key: &'a str,
+    pub region: &'a str,
+    pub service: &'a str,
 }
 
 /// Build the `Authorization` header value for a request.
 ///
 /// `amz_date` is `YYYYMMDDTHHMMSSZ`; `payload_hash` is the hex SHA-256
 /// of the exact body bytes sent (`GET` uses the empty-body hash).
-pub(crate) fn authorization_header(
+#[must_use]
+pub fn authorization_header(
     method: &str,
     url: &SignedUrl,
     creds: &SigV4Credentials<'_>,
@@ -174,7 +177,7 @@ pub(crate) fn authorization_header(
 }
 
 /// Current UTC as SigV4 needs it: (`YYYYMMDDTHHMMSSZ`, `YYYYMMDD`).
-pub(crate) fn amz_date_now() -> (String, String) {
+pub fn amz_date_now() -> (String, String) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -203,7 +206,7 @@ pub(crate) fn amz_date_now() -> (String, String) {
 }
 
 /// The empty-payload hash (`GET` requests).
-pub(crate) const EMPTY_PAYLOAD_SHA256: &str =
+pub const EMPTY_PAYLOAD_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 #[cfg(test)]

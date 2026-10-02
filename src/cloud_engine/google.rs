@@ -1,7 +1,7 @@
 // The split modules resolve shared names through the parent glob.
 #![allow(clippy::wildcard_imports)]
 
-use super::*;
+use crate::types::WordBoundary;
 
 /// Build JSON body for Google TTS REST API.
 ///
@@ -9,7 +9,8 @@ use super::*;
 /// (used when `tts_speak_ssml` passes W3C SSML with the `<voice>` wrapper
 /// already stripped). Otherwise the text/marks path builds Google SSML or plain
 /// text from `text`.
-pub(crate) fn build_google_request(
+#[must_use]
+pub fn build_google_request(
     text: &str,
     voice: &str,
     add_marks: bool,

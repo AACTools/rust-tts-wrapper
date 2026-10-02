@@ -59,11 +59,13 @@ wasm module — handles live in the wrapper's embedded engine.
 
 ## Architecture
 The native `cloud` feature is reqwest::blocking + tokio (impossible in
-wasm). This crate is the async twin: same request shapes, same
-speechmarkdown pipeline, `fetch` transport. Follow-up: a `cloud-core`
-feature in the parent that shares config/sigv4/alignment parsing natively
-instead of the twins. Offline floravox synthesis lives in the floravox
-wasm engine (floravox-web/wasm) — unify behind one JS surface next.
+wasm). The parent crate now exposes `cloud-core` — the pure provider
+shapes (sigv4 signer, google/gemini request builders + response parsers,
+elevenlabs platform/alignment helpers, provider configs) compiled for
+native AND wasm — and this crate is a thin fetch-transport over it. No
+twins, no drift: the js polly path signs with the same `authorization_header`
+the native engine uses. Offline floravox synthesis is the floravox-wasm
+crate (published), embedded here behind the unified `speak()`.
 
 ## Build
 ```
