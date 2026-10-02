@@ -21,7 +21,7 @@ fn main() {
         // 16-bit PCM LE frames
         let (pairs, _) = chunk.as_chunks::<2>();
         for pair in pairs {
-            let v = i16::from_le_bytes(*pair) as f32 / 32767.0;
+            let v = f32::from(i16::from_le_bytes(*pair)) / 32767.0;
             s.push(v);
         }
     };
@@ -41,7 +41,7 @@ fn main() {
     // write wav
     let mut wav = Vec::with_capacity(44 + s.len() * 2);
     wav.extend_from_slice(b"RIFF");
-    let data_len = (s.len() * 2) as u32;
+    let data_len = u32::try_from(s.len() * 2).expect("wav too large");
     wav.extend_from_slice(&(36 + data_len).to_le_bytes());
     wav.extend_from_slice(b"WAVEfmt ");
     wav.extend_from_slice(&16u32.to_le_bytes());
@@ -54,7 +54,7 @@ fn main() {
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
     for x in s.iter() {
-        let v = (x.clamp(-1.0, 1.0) * 32767.0) as i16;
+        let v = i16::try_from((x.clamp(-1.0, 1.0) * 32767.0).round() as i64).expect("clamp");
         wav.extend_from_slice(&v.to_le_bytes());
     }
     std::fs::write("/tmp/opencode/wrapper-pocket-smoke.wav", wav).unwrap();
