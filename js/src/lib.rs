@@ -169,3 +169,78 @@ async fn azure(req: &CloudRequest, text: &str) -> Result<CloudAudio, JsError> {
 fn crate_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
+
+// ---------------------------------------------------------------- floravox
+// Re-export the floravox engine surface so JS loads ONE wasm module: the
+// wrapper's binary embeds the engine (single registry of voices/langs).
+// Loading the standalone floravox_wasm.js alongside would create a second,
+// separate instance whose handles the wrapper cannot see.
+
+pub use floravox_wasm::g2p::g2p_load_lang;
+pub use floravox_wasm::g2p::g2p_word;
+pub use floravox_wasm::onnx::onnx_init;
+pub use floravox_wasm::engine::student_stack_load;
+pub use floravox_wasm::engine::student_stack_run;
+pub use floravox_wasm::engine::teacher_load;
+pub use floravox_wasm::engine::teacher_run;
+pub use floravox_wasm::orchestrate::voice_load_student;
+pub use floravox_wasm::orchestrate::voice_speak;
+pub use floravox_wasm::smd::smd_parse;
+
+// ---------------------------------------------------------------- unified
+// One speak() for every engine: offline floravox (onnxruntime-web) and the
+// cloud providers, dispatched by config.
+
+#[derive(serde::Deserialize)]
+struct UnifiedConfig {
+    /// "floravox" (offline) | "elevenlabs" | "azure" | ...
+    engine: String,
+    /// floravox: voice handle from floravox_wasm::voice_load_student
+    voice: Option<usize>,
+    /// cloud: provider request (credentials etc.)
+    credentials: Option<serde_json::Value>,
+    #[allow(dead_code)]
+    model: Option<String>,
+}
+
+/// The one entry point: speak `text` (plain, SSML, or SpeechMarkdown —
+/// each engine compiles it per its dialect) through the configured engine.
+/// Returns { audio: Float32Array|Uint8Array, sr, spans, marks } for
+/// floravox or { audio: Uint8Array, mime } for cloud.
+#[wasm_bindgen]
+pub async fn speak(config_json: String, text: String) -> Result<JsValue, JsError> {
+    let cfg: UnifiedConfig = serde_json::from_str(&config_json).map_err(|e| JsError::new(&e.to_string()))?;
+    match cfg.engine.as_str() {
+        "floravox" => {
+            let voice = cfg.voice.ok_or_else(|| JsError::new("floravox engine needs a voice handle (voice_load_student)"))?;
+            // SpeechMarkdown compiles to SSML (the engine's input); plain
+            // text and SSML pass through untouched.
+            let text = if text.contains('[') && text.contains(']') {
+                match floravox_wasm::smd::smd_parse(&text) {
+                    Ok(v) => {
+                        let ssml = js_sys::Reflect::get(&v, &JsValue::from_str("ssml"))
+                            .ok()
+                            .and_then(|s| s.as_string())
+                            .unwrap_or(text);
+                        ssml
+                    }
+                    Err(_) => text,
+                }
+            } else {
+                text
+            };
+            floravox_wasm::orchestrate::voice_speak(voice, &text).await
+        }
+        "elevenlabs" | "azure" => {
+            let creds = cfg.credentials.unwrap_or(serde_json::Value::Null);
+            let req = serde_json::json!({
+                "provider": cfg.engine,
+                "credentials": creds,
+                "voice": null,
+                "model": cfg.model,
+            });
+            cloud_speak(req.to_string(), &text).await
+        }
+        other => Err(JsError::new(&format!("unknown engine '{other}'"))),
+    }
+}

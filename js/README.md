@@ -18,17 +18,32 @@ rust-tts-wrapper for JavaScript (wasm32). Cloud TTS engines on web APIs.
   qwen (duplex WS pump — same web-sys pattern as edge)
 - out of scope by design: sapi/avsynth (OS synthesizers), sherpaonnx (C++).
 
-## Usage
+## Usage — the one speak()
 ```js
-import init, { cloud_speak } from "./pkg/rust_tts_wrapper_js.js";
+import init, { speak, onnx_init, student_stack_load, g2p_load_lang, voice_load_student }
+  from "./pkg/rust_tts_wrapper_js.js";
 await init();
-const out = await cloud_speak(JSON.stringify({
-  provider: "elevenlabs",
+
+// offline floravox (embedded engine, onnxruntime-web):
+await onnx_init();
+const st = await student_stack_load(dur, aco, dec, 22050, 256);
+const lang = g2p_load_lang(lexiconTxt, null);
+const v = voice_load_student(st, lang, phonemeIdMapJson, 22050, 256);
+const out = await speak(JSON.stringify({ engine: "floravox", voice: v }),
+  "Hello [mark:m1] world [300ms] (thank you)[rate:slow]");
+// out: { audio: Float32Array, sr, spans: [{word,start,end}], marks, oov }
+
+// cloud (elevenlabs/azure):
+const mp3 = await speak(JSON.stringify({
+  engine: "elevenlabs",
   credentials: { api_key: "..." },
-  voice: "21m00Tcm4TlvDq8ikWAM",
 }), "Hello [500ms] ++world++");
-// out.audio: Uint8Array (mp3), out.mime
+// mp3: { audio: Uint8Array, mime }
 ```
+SpeechMarkdown is compiled per-engine (W3C SSML for floravox, provider
+dialects for cloud); plain text and raw SSML pass through. The floravox
+surface (teacher/student/g2p/smd_parse) is re-exported so JS loads ONE
+wasm module — handles live in the wrapper's embedded engine.
 
 ## Architecture
 The native `cloud` feature is reqwest::blocking + tokio (impossible in
