@@ -53,8 +53,10 @@ fn main() {
     wav.extend_from_slice(&16u16.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_len.to_le_bytes());
-    for x in s.iter() {
-        let v = i16::try_from((x.clamp(-1.0, 1.0) * 32767.0).round() as i64).expect("clamp");
+    for x in &s {
+        let scaled = (x.clamp(-1.0, 1.0) * 32767.0).round();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let v = scaled as i16;
         wav.extend_from_slice(&v.to_le_bytes());
     }
     std::fs::write("/tmp/opencode/wrapper-pocket-smoke.wav", wav).unwrap();
