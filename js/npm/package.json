@@ -1,0 +1,26 @@
+{
+  "name": "rust-tts-wrapper",
+  "version": "0.1.0",
+  "description": "Text-to-speech for JavaScript: offline floravox voices (onnxruntime-web) + ElevenLabs, Azure, Google, Gemini and Polly cloud engines — SpeechMarkdown everywhere, word timings included. Rust core, compiled to wasm.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AACTools/rust-tts-wrapper",
+    "directory": "js"
+  },
+  "keywords": ["tts", "text-to-speech", "speech", "speechmarkdown", "ssml", "wasm", "aac", "floravox", "elevenlabs", "azure", "polly"],
+  "files": ["browser", "node", "README.md"],
+  "main": "./node/rust_tts_wrapper_js.js",
+  "types": "./node/rust_tts_wrapper_js.d.ts",
+  "browser": "./browser/rust_tts_wrapper_js.js",
+  "exports": {
+    ".": {
+      "types": "./node/rust_tts_wrapper_js.d.ts",
+      "browser": "./browser/rust_tts_wrapper_js.js",
+      "node": "./node/rust_tts_wrapper_js.js",
+      "default": "./browser/rust_tts_wrapper_js.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "engines": { "node": ">=18" }
+}

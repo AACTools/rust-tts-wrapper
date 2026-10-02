@@ -67,16 +67,7 @@ twins, no drift: the js polly path signs with the same `authorization_header`
 the native engine uses. Offline floravox synthesis is the floravox-wasm
 crate (published), embedded here behind the unified `speak()`.
 
-## Install (npm)
+## Build
 ```
-npm install rust-tts-wrapper
-```
-- Node 18+: `require("rust-tts-wrapper")` or `import` — cloud engines ready;
-  fetch is Node's global.
-- Browsers/bundlers: the `browser` condition serves the ESM+wasm build;
-  offline floravox runs on onnxruntime-web, cloud engines on fetch.
-
-## Build (from source)
-```
-cd js && ./npm-build.sh   # both targets into npm/
+cd js && RUSTUP_TOOLCHAIN=stable wasm-pack build --target web --release
 ```

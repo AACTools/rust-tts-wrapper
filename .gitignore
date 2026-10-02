@@ -20,3 +20,4 @@ node_modules/
 
 .voicegarden-lexicons/
 js/target/
+node_modules/
