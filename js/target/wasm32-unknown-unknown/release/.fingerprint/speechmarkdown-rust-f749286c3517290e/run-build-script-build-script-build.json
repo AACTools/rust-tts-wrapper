@@ -1,0 +1,1 @@
+{"rustc":5244445300240561903,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[4911108467491959688,"build_script_build",false,8580085589267621044]],"local":[{"RerunIfChanged":{"output":"wasm32-unknown-unknown/release/build/speechmarkdown-rust-f749286c3517290e/output","paths":["src/"]}}],"rustflags":[],"config":0,"compile_kind":0}

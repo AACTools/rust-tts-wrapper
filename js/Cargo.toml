@@ -1,0 +1,23 @@
+[package]
+name = "rust-tts-wrapper-js"
+version = "0.1.0"
+edition = "2021"
+description = "rust-tts-wrapper for JavaScript: cloud TTS engines on web APIs (wasm32)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rust-tts-wrapper = { path = "..", default-features = false }
+speechmarkdown-rust = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Request", "RequestInit", "Response", "Headers"] }
+
+[profile.release]
+opt-level = 3
+lto = true
