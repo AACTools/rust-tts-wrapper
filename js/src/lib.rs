@@ -11,6 +11,7 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(feature = "edge")]
 mod edge;
+mod providers;
 
 /// Speak through Microsoft Edge "Read Aloud" — feature-gated off the
 /// browser surface (Microsoft closes browser-origin handshakes; see
@@ -37,7 +38,7 @@ pub(crate) async fn next_tick() -> Result<(), JsError> {
 }
 
 #[derive(serde::Deserialize)]
-pub struct CloudRequest {
+pub(crate) struct CloudRequest {
     /// "elevenlabs" | "azure" (google/gemini/polly on the way)
     pub provider: String,
     /// provider credentials: {"api_key": "..."} / azure: {"key": "...", "region": "..."}
@@ -51,18 +52,22 @@ pub struct CloudRequest {
 }
 
 #[derive(serde::Serialize)]
-pub struct CloudAudio {
+pub(crate) struct CloudAudio {
     /// synthesized audio bytes (mp3 for both providers today)
     pub audio: Vec<u8>,
     pub mime: String,
 }
 
-fn window() -> Result<web_sys::Window, JsError> {
-    web_sys::window().ok_or_else(|| JsError::new("no window — browser only"))
+/// Global `fetch` bound via `globalThis` — works in browsers AND Node 18+.
+fn global_fetch() -> Result<js_sys::Function, JsError> {
+    js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("fetch"))
+        .map_err(|e| JsError::new(&format!("no global fetch: {e:?}")))?
+        .dyn_into()
+        .map_err(|_| JsError::new("global fetch is not a function"))
 }
 
-async fn fetch_bytes(method: &str, url: &str, headers: &[(&str, &str)], body: Option<String>) -> Result<(Vec<u8>, u16, String), JsError> {
-    let w = window()?;
+pub(crate) async fn fetch_bytes(method: &str, url: &str, headers: &[(&str, &str)], body: Option<String>) -> Result<(Vec<u8>, u16, String), JsError> {
+    let fetch = global_fetch()?;
     let mut init = web_sys::RequestInit::new();
     init.method(method);
     if let Some(b) = &body {
@@ -73,9 +78,14 @@ async fn fetch_bytes(method: &str, url: &str, headers: &[(&str, &str)], body: Op
     for (k, v) in headers {
         req.headers().set(k, v).map_err(|e| JsError::new(&format!("header {k}: {e:?}")))?;
     }
-    let resp = wasm_bindgen_futures::JsFuture::from(w.fetch_with_request(&req))
+    let resp_p = fetch
+        .call1(&JsValue::NULL, &req)
+        .map_err(|e| JsError::new(&format!("fetch call: {}", js_err_str(&e))))?;
+    let resp_p = js_sys::Promise::from(resp_p);
+    let resp = wasm_bindgen_futures::JsFuture::from(resp_p)
         .await
         .map_err(|e| JsError::new(&format!("fetch: {}", js_err_str(&e))))?;
+    let resp: web_sys::Response = resp.dyn_into().map_err(|_| JsError::new("fetch did not return a Response"))?;
     let resp: web_sys::Response = resp.into();
     let status = resp.status();
     let mime = resp.headers().get("content-type").unwrap_or_default().unwrap_or_else(|| "audio/mpeg".into());
@@ -101,7 +111,10 @@ pub async fn cloud_speak(request_json: String, text: &str) -> Result<JsValue, Js
     let audio = match req.provider.as_str() {
         "elevenlabs" => elevenlabs(&req, text).await?,
         "azure" => azure(&req, text).await?,
-        other => return Err(JsError::new(&format!("provider '{other}' not yet in the js crate — coming: google/gemini/polly/edge/qwen"))),
+        "google" => providers::google(&req, text).await?,
+        "gemini" => providers::gemini(&req, text).await?,
+        "polly" => providers::polly(&req, text).await?,
+        other => return Err(JsError::new(&format!("provider '{other}' not in the js crate"))),
     };
     serde_wasm_bindgen::to_value(&audio).map_err(|e| JsError::new(&e.to_string()))
 }
@@ -164,6 +177,26 @@ async fn azure(req: &CloudRequest, text: &str) -> Result<CloudAudio, JsError> {
     }
     let mime = if mime.starts_with("audio") { mime } else { "audio/mpeg".into() };
     Ok(CloudAudio { audio: bytes, mime })
+}
+
+/// Google JSON body: SSML input when markup, else plain text; MP3 out.
+pub(crate) fn build_google_body(req: &CloudRequest, text: &str, voice: &str) -> serde_json::Value {
+    let input = if text.trim_start().starts_with('<') || (text.contains('[') && text.contains(']')) {
+        let ssml = crate::prepare_text(req, text);
+        serde_json::json!({ "ssml": ssml })
+    } else {
+        serde_json::json!({ "text": text })
+    };
+    let voice_obj = if voice.len() >= 5 && voice.as_bytes().get(2) == Some(&b'-') {
+        serde_json::json!({ "languageCode": &voice[..5], "name": voice })
+    } else {
+        serde_json::json!({ "name": voice })
+    };
+    serde_json::json!({
+        "input": input,
+        "voice": voice_obj,
+        "audioConfig": { "audioEncoding": "MP3" },
+    })
 }
 
 fn crate_escape(s: &str) -> String {

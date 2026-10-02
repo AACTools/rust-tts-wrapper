@@ -8,6 +8,18 @@ rust-tts-wrapper for JavaScript (wasm32). Cloud TTS engines on web APIs.
   end-to-end (CORS OK).
 - **azure**: REST (region endpoint, SSML body, X-Microsoft-OutputFormat).
   Browser-verified end-to-end.
+- **google**: texttospeech:v1, key-in-URL, base64 audioContent out
+  (languageCode derived from voice names, named Chirp/Gemini voices pass
+  name-only). Node-verified (structured invalid-key response).
+- **gemini**: 3.8 TTS via the Interactions API (x-goog-api-key), last
+  audio block from steps[*].content[*], defaults gemini-3.8-flash-tts/Kore.
+  Node-verified.
+- **polly**: sigv4-signed POST (pure Rust HMAC-SHA256 chain, amz-date from
+  the JS clock), Engine/VoiceId/TextType per native shapes. Node-verified —
+  AWS validated the signature format and rejected only fake credentials.
+- **Node.js**: supported. Cloud paths use `globalThis.fetch` (Node 18+);
+  `wasm-pack build --target nodejs` for the CJS package. Floravox-offline
+  in Node is future work (onnxruntime-node backend).
 - **edge: DROPPED from the browser surface** (2026-10-02). The full Read
   Aloud pump is implemented and mock-proven (see src/edge.rs), but
   Microsoft's endpoint closes browser-origin handshakes — it expects the
