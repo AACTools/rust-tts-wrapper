@@ -1519,8 +1519,8 @@ mod tests {
 
     #[test]
     fn test_apply_volume_and_pitch_empty_input() {
-        assert!(apply_volume_and_pitch(&[], 1.0, 1.0).is_empty());
-        assert!(apply_volume_and_pitch(&[], 2.0, 0.5).is_empty());
+        assert_eq!(apply_volume_and_pitch(&[], 1.0, 1.0).first(), None);
+        assert_eq!(apply_volume_and_pitch(&[], 2.0, 0.5).first(), None);
     }
 
     #[test]
