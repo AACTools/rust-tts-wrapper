@@ -445,7 +445,7 @@ pub(crate) fn test_inject_voice_preserves_ssml_tags() {
 pub(crate) fn test_build_google_request_basic() {
     let (body, words) = build_google_request("Hello world", "en-US-Wavenet-D", false, None);
     assert_eq!(body["input"]["text"].as_str().unwrap(), "Hello world");
-    assert!(words.is_empty());
+    assert_eq!(words.first(), None);
 }
 
 #[test]
@@ -650,8 +650,8 @@ pub(crate) fn test_edge_config_is_credential_free_ws() {
     // must expose the bing.com voice list and a default voice.
     let cfg = build_config("edge", &HashMap::new()).expect("edge config");
     assert_eq!(cfg.provider_id, "edge");
-    assert!(cfg.synth_url.is_empty());
-    assert!(cfg.auth_header.is_empty());
+    assert_eq!(cfg.synth_url, "");
+    assert_eq!(cfg.auth_header, "");
     assert!(cfg
         .voices_url
         .as_deref()
@@ -754,7 +754,7 @@ pub(crate) fn test_polly_config_matrix() {
         Some("https://polly.eu-west-1.amazonaws.com/v1/voices")
     );
     assert_eq!(cfg.provider_id, "polly");
-    assert!(cfg.auth_header.is_empty());
+    assert_eq!(cfg.auth_header, "");
     assert_eq!(cfg.text_field, "Text");
     assert_eq!(cfg.voice_param, "VoiceId");
     assert_eq!(cfg.model_param.as_deref(), Some("Engine"));
@@ -776,7 +776,7 @@ pub(crate) fn test_qwen_config_matrix() {
     assert_eq!(cfg.default_voice.as_deref(), Some("longanhuan_v3.6"));
     // WS-only engine: no REST synth URL or voice-list endpoint; PCM flows
     // straight from the binary frames.
-    assert!(cfg.synth_url.is_empty());
+    assert_eq!(cfg.synth_url, "");
     assert!(cfg.voices_url.is_none());
     assert!(cfg.response_is_pcm);
 }
@@ -860,7 +860,7 @@ pub(crate) fn test_qwen_parse_audio_frame_carries_index() {
     ) {
         QwenServerEvent::SentenceEnd { sentence, words } => {
             assert_eq!(sentence, 2);
-            assert!(words.is_empty());
+            assert_eq!(words.first(), None);
         }
         other => panic!("expected SentenceEnd, got {other:?}"),
     }
@@ -1436,7 +1436,7 @@ pub(crate) fn test_map_generic_voices_cartesia_simple() {
     assert_eq!(voices.len(), 1);
     assert_eq!(voices[0].id, "692f0249-6e6b-4a48-8b07-0f8f8a3f3a15");
     assert_eq!(voices[0].name, "Octopus");
-    assert!(voices[0].language_codes.is_empty());
+    assert_eq!(voices[0].language_codes.first(), None);
 }
 
 #[test]
@@ -1586,7 +1586,7 @@ pub(crate) fn test_parse_elevenlabs_alignment_handles_mismatched_arrays() {
 #[test]
 pub(crate) fn test_parse_elevenlabs_alignment_missing_arrays_returns_empty() {
     let alignment = serde_json::Map::new(); // no keys
-    assert!(parse_elevenlabs_alignment(&alignment).is_empty());
+    assert_eq!(parse_elevenlabs_alignment(&alignment).first(), None);
 }
 
 // ===== Azure WS message parser =====
@@ -1613,8 +1613,11 @@ pub(crate) fn test_looks_like_mp3_raw_pcm_is_false() {
 #[test]
 pub(crate) fn test_decode_mp3_garbage_returns_empty_without_panicking() {
     // Empty / non-MP3 input must not panic and must yield no PCM.
-    assert!(decode_mp3_to_pcm16_mono(&[]).is_empty());
-    assert!(decode_mp3_to_pcm16_mono(b"definitely not mp3").is_empty());
+    assert_eq!(decode_mp3_to_pcm16_mono(&[]).first(), None);
+    assert_eq!(
+        decode_mp3_to_pcm16_mono(b"definitely not mp3").first(),
+        None
+    );
 }
 
 #[test]

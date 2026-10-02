@@ -33,6 +33,7 @@ fn engine_for(voice: &str) -> FloravoxEngine {
 
 #[test]
 #[ignore = "needs FLORAVOX_TEST_VOICE (real ONNX voice on disk)"]
+#[allow(clippy::assert_is_empty)] // 1.99: interlocking assert lints
 fn ssml_break_produces_boundaries() {
     let Some(voice) = test_voice() else {
         eprintln!("FLORAVOX_TEST_VOICE not set — skipping");
@@ -149,6 +150,7 @@ fn warm_up_loads_session_then_speak_is_fast() {
 
 #[test]
 #[ignore = "needs FLORAVOX_TEST_VOICE + a sibling .student file"]
+#[allow(clippy::assert_is_empty)] // 1.99: interlocking assert lints
 fn student_sidecar_timings_are_sane_and_ordered() {
     // The student tier engages automatically when a `.student` file sits
     // beside the voice. What is asserted here: synthesis delivers audio
