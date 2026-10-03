@@ -36,10 +36,9 @@ impl RunCell {
 unsafe impl Send for RunCell {}
 unsafe impl Sync for RunCell {}
 
-/// Audio seconds per latent step (measured on the Python reference:
-/// 1.44s audio / 18 steps; 2.56s / 32 steps — both ~0.08).
-pub const STEP_SECONDS: f32 = 0.08;
-pub const SAMPLE_RATE: u32 = 24_000;
+/// Audio seconds per latent step (measured: 1.44s/18 steps; 2.56s/32 — ~0.08).
+pub(crate) const STEP_SECONDS: f32 = 0.08;
+pub(crate) const SAMPLE_RATE: u32 = 24_000;
 
 pub struct PocketConfig {
     pub lm_main: PathBuf,
