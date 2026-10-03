@@ -14,6 +14,11 @@ pub struct PocketTokenizer {
 const NEG: f32 = -1.0e30;
 
 impl PocketTokenizer {
+    /// Load vocab + scores.
+    ///
+    /// # Errors
+    ///
+    /// IO or JSON parse failures.
     pub fn load(vocab_json: &Path, token_scores_json: &Path) -> Result<Self, String> {
         let vocab: HashMap<String, u32> =
             serde_json::from_str(&std::fs::read_to_string(vocab_json).map_err(|e| e.to_string())?)
@@ -36,6 +41,7 @@ impl PocketTokenizer {
     }
 
     /// Encode text to token ids (Viterbi over scores; byte fallback).
+    #[must_use]
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut s = text.replace(' ', "\u{2581}");
         if !s.starts_with('\u{2581}') {
@@ -82,6 +88,7 @@ impl PocketTokenizer {
     }
 
     /// Map token ids back to piece strings (for word grouping).
+    #[must_use]
     pub fn id_to_piece(&self, id: u32) -> String {
         self.token2id
             .iter()

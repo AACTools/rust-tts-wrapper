@@ -15,6 +15,7 @@ pub struct WordTiming {
 /// those tokens. `step_dur_s`: audio seconds per step. Tokens sharing a
 /// word (no ▁ marker) merge; boundary = dominance transitions.
 #[must_use]
+#[allow(clippy::cast_precision_loss)]
 pub fn word_boundaries(
     tokenizer: &PocketTokenizer,
     target_ids: &[u32],
@@ -82,8 +83,8 @@ pub fn word_boundaries(
         .filter_map(|(sp, word)| {
             sp.map(|(s0, s1)| WordTiming {
                 word: word.clone(),
-                start_s: s0 as f32 * step_dur_s,
-                end_s: (s1 + 1) as f32 * step_dur_s,
+                start_s: (s0 as f32) * step_dur_s,
+                end_s: ((s1 + 1) as f32) * step_dur_s,
             })
         })
         .collect()

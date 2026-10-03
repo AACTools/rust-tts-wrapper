@@ -24,6 +24,7 @@ pub struct PocketConfig {
 impl PocketConfig {
     /// Sherpa's standard bundle layout: files directly in `dir`, or under
     /// `<dir>/<model-id>/` (our fleet convention).
+    #[must_use]
     pub fn from_dir(dir: &Path) -> Option<Self> {
         let probe = |d: &Path| d.join("lm_main.onnx").is_file() && d.join("vocab.json").is_file();
         let base = if probe(dir) {
@@ -60,6 +61,11 @@ pub struct PocketTtsModel {
 }
 
 impl PocketTtsModel {
+    /// Load the graphs + tokenizer.
+    ///
+    /// # Errors
+    ///
+    /// IO or ONNX session failures.
     pub fn load(cfg: &PocketConfig) -> Result<Self, String> {
         let err = |e: ort::Error| e.to_string();
         Ok(Self {
