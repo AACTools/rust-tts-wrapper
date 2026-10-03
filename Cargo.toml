@@ -48,7 +48,7 @@ cloud-core = ["dep:serde_json", "base64", "speechmarkdown", "sha2"]
 cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 # pocket-tts with REAL word timings: our own streaming loop over the tapped
 # Kyutai ONNX graphs (attention = the model's own alignment)
-pocket-timing = ["dep:ort", "dep:ndarray", "dep:serde_json"]
+pocket-timing = ["dep:ort", "dep:ndarray", "dep:serde_json", "dep:hound"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
@@ -110,6 +110,7 @@ serde_json = { version = "1", optional = true }
 sherpa-onnx = { version = "=1.13.8", optional = true }
 ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
 ndarray = { version = "0.17", optional = true, features = ["std"] }
+hound = { version = "3", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
 sherpa-onnx-models = { version = "1.0.2", optional = true }
 # floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha, Kokoro)

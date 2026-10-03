@@ -10,6 +10,6 @@ pub mod model;
 pub mod timings;
 pub mod tokenizer;
 
-pub use model::PocketTtsModel;
+pub use model::{PocketConfig, PocketTtsModel};
 pub use timings::word_boundaries;
 pub use tokenizer::PocketTokenizer;
