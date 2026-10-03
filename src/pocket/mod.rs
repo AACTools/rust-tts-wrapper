@@ -11,5 +11,7 @@ pub mod timings;
 pub mod tokenizer;
 
 pub use model::{PocketConfig, PocketTtsModel};
+pub mod engine;
+pub use engine::PocketTtsEngine;
 pub use timings::word_boundaries;
 pub use tokenizer::PocketTokenizer;
