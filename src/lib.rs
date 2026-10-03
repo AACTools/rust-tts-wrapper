@@ -68,6 +68,11 @@ pub mod timeline;
 pub mod types;
 pub mod word_search;
 
+/// Pocket-TTS with real word timings (own streaming loop over the tapped
+/// Kyutai ONNX graphs; attention-based alignment — no estimator).
+#[cfg(feature = "pocket-timing")]
+pub mod pocket;
+
 // Re-exports for user-friendly API
 pub use engine::TtsEngine;
 pub use factory::create_engine;
