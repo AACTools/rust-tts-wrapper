@@ -1,12 +1,10 @@
 //! PocketTtsEngine: the tapped pocket model behind the [`TtsEngine`] trait —
 //! cloned voices with REAL attention-measured word boundaries (no
-//! estimator), raw LE PCM audio callbacks, marks via SSML pass-through.
+//! estimator), raw LE PCM audio callbacks.
 //!
-//! SpeechMarkdown/SSML: the model is text-in; breaks are realized by
-//! splitting at `<break>`/SpeechMarkdown pauses and inserting silence,
-//! matching the demo's segmentation convention. Rate scales the
-//! temperature-independent pacing via simple linear time-scale on the
-//! generated audio (pocket has no native rate parameter).
+//! SpeechMarkdown/SSML: compiled to a floravox-ssml plan; `<break>`
+//! pauses become real silence between synthesized segments, `<mark>`
+//! events fire at their exact inter-segment positions.
 
 use crate::engine::TtsEngine;
 use crate::pocket::model::{GeneratedSpeech, PocketConfig, PocketTtsModel};
@@ -14,8 +12,30 @@ use crate::pocket::timings::word_boundaries;
 use crate::types::{TtsError, TtsResult, Voice, WordBoundary};
 use crate::word_search::WordSearch;
 use std::fmt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+
+/// A mark event with its position in the assembled audio.
+pub struct MarkTiming {
+    pub name: String,
+    pub t_s: f32,
+}
+
+/// The fully-assembled result: audio + word timings + marks.
+pub struct SynthesisResult {
+    pub speech: GeneratedSpeech,
+    pub words: Vec<WordTimingOwned>,
+    pub marks: Vec<MarkTiming>,
+    /// the spoken text (SSML stripped) — for char-mapping callbacks
+    pub spoken_text: String,
+}
+
+pub struct WordTimingOwned {
+    pub word: String,
+    pub start_s: f32,
+    pub end_s: f32,
+}
 
 pub struct PocketTtsEngine {
     inner: Mutex<Option<PocketTtsModel>>,
@@ -40,7 +60,7 @@ impl PocketTtsEngine {
     /// Create with a model bundle directory and a cloning reference wav
     /// (16-bit PCM, any sample rate; converted to 24 kHz mono f32).
     #[must_use]
-    pub fn new(bundle_dir: &std::path::Path, reference_wav: &std::path::Path) -> Self {
+    pub fn new(bundle_dir: &Path, reference_wav: &Path) -> Self {
         let cfg = PocketConfig::from_dir(bundle_dir).unwrap_or(PocketConfig {
             lm_main: bundle_dir.join("lm_main_tapped.onnx"),
             lm_flow: bundle_dir.join("lm_flow.onnx"),
@@ -73,12 +93,11 @@ impl PocketTtsEngine {
     }
 
     /// Swap the cloning reference (a new donor recording).
-    /// Swap the cloning reference (a new donor recording).
     ///
     /// # Errors
     ///
     /// wav read failures.
-    pub fn set_reference_wav(&self, wav: &std::path::Path) -> TtsResult<()> {
+    pub fn set_reference_wav(&self, wav: &Path) -> TtsResult<()> {
         let audio = read_reference(wav).map_err(TtsError)?;
         *self
             .reference_audio
@@ -87,11 +106,11 @@ impl PocketTtsEngine {
         Ok(())
     }
 
-    fn synthesize(
-        &self,
-        text: &str,
-        rate: f32,
-    ) -> TtsResult<(GeneratedSpeech, Vec<WordTimingOwned>, String)> {
+    /// Generate with SSML semantics: split at breaks, insert real silence,
+    /// fire marks at exact positions. Rate scales the per-step duration.
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
+    fn synthesize(&self, text: &str, rate: f32) -> TtsResult<SynthesisResult> {
         let reference = self
             .reference_audio
             .lock()
@@ -100,48 +119,139 @@ impl PocketTtsEngine {
         if reference.is_empty() {
             return Err(TtsError("no reference audio configured".into()));
         }
-        // SpeechMarkdown -> plain (model is text-in); pause splits come later
-        let (plain, _was_smd) = crate::engine::preprocess_speech_markdown(text, "plain");
-        let plain = strip_ssml_tags(&plain);
 
-        let (speech, timings) = self.with_model(|m| {
-            let s = m
-                .generate(
-                    &plain,
-                    &reference,
-                    self.temperature,
-                    self.num_steps,
-                    self.max_frames,
-                )
-                .map_err(TtsError)?;
-            let t = word_boundaries(
-                &m.tokenizer,
-                &s.target_token_ids,
-                &s.text_attention,
-                crate::pocket::model::STEP_SECONDS / rate.max(0.1),
-            );
-            Ok((s, t))
-        })?;
-        let timings: Vec<WordTimingOwned> = timings
-            .into_iter()
-            .map(|t| WordTimingOwned {
-                word: t.word,
-                start_s: t.start_s,
-                end_s: t.end_s,
-            })
-            .collect();
-        Ok((speech, timings, plain))
+        // SpeechMarkdown -> W3C SSML; plain text wrapped for uniform parsing
+        let (ssml, _) = crate::engine::preprocess_speech_markdown(text, "plain");
+        let ssml = if ssml.trim_start().to_ascii_lowercase().starts_with("<speak") {
+            ssml
+        } else {
+            format!("<speak>{ssml}</speak>")
+        };
+        let doc = floravox_ssml::parse(&ssml).map_err(|e| TtsError(format!("SSML: {}", e.0)))?;
+
+        // plan: word segments separated by breaks; marks recorded between them
+        struct Seg {
+            words: Vec<String>,
+        }
+        impl Seg {
+            fn text(&self) -> String {
+                self.words.join(" ")
+            }
+        }
+        let mut segs: Vec<Seg> = vec![Seg { words: Vec::new() }];
+        let mut pause_after: Vec<u32> = Vec::new(); // per-segment pause in ms
+        let mut pending_marks: Vec<String> = Vec::new(); // marks before next segment
+
+        for seg in &doc.segments {
+            match seg {
+                floravox_ssml::Segment::Words { words } => {
+                    for w in words {
+                        let spoken = if w.spoken.is_empty() {
+                            &w.text
+                        } else {
+                            &w.spoken
+                        };
+                        segs.last_mut()
+                            .expect("always one")
+                            .words
+                            .push(spoken.clone());
+                    }
+                }
+                floravox_ssml::Segment::Break { ms, .. } => {
+                    pause_after.push(*ms);
+                    segs.push(Seg { words: Vec::new() });
+                }
+                floravox_ssml::Segment::Mark { name, .. } => {
+                    pending_marks.push(name.clone());
+                }
+                _ => {}
+            }
+        }
+
+        // synthesize each non-empty segment; concatenate with silence
+        let sr = crate::pocket::model::SAMPLE_RATE;
+        let mut samples: Vec<f32> = Vec::new();
+        let mut all_words: Vec<WordTimingOwned> = Vec::new();
+        let mut marks: Vec<MarkTiming> = Vec::new();
+        let mut spoken_text = String::new();
+        let step_dur = crate::pocket::model::STEP_SECONDS / rate.max(0.1);
+
+        for (si, seg) in segs.iter().enumerate() {
+            let seg_text = seg.text();
+            // fire any marks queued before this segment (or at the end)
+            for name in &pending_marks {
+                marks.push(MarkTiming {
+                    name: name.clone(),
+                    t_s: f64::from(samples.len() as u32) as f32 / f64::from(sr) as f32,
+                });
+            }
+            pending_marks.clear();
+            if seg_text.is_empty() {
+                continue;
+            }
+            let (speech, seg_words) = self.with_model(|m| {
+                let s = m
+                    .generate(
+                        &seg_text,
+                        &reference,
+                        self.temperature,
+                        self.num_steps,
+                        self.max_frames,
+                    )
+                    .map_err(TtsError)?;
+                let t = word_boundaries(
+                    &m.tokenizer,
+                    &s.target_token_ids,
+                    &s.text_attention,
+                    step_dur,
+                );
+                Ok((s, t))
+            })?;
+            let seg_start_s = f64::from(samples.len() as u32) as f32 / f64::from(sr) as f32;
+            samples.extend_from_slice(&speech.samples);
+            for w in seg_words {
+                all_words.push(WordTimingOwned {
+                    word: w.word,
+                    start_s: seg_start_s + w.start_s,
+                    end_s: seg_start_s + w.end_s,
+                });
+            }
+            if !spoken_text.is_empty() {
+                spoken_text.push(' ');
+            }
+            spoken_text.push_str(&seg_text);
+            // silence after this segment (break), except after the last
+            if si < segs.len() - 1 {
+                let ms = pause_after.get(si).copied().unwrap_or(0);
+                let silence = ((f64::from(ms) / 1000.0) * f64::from(sr)) as usize;
+                samples.resize(samples.len() + silence, 0.0);
+            }
+        }
+        // trailing marks (after the final segment)
+        for name in &pending_marks {
+            marks.push(MarkTiming {
+                name: name.clone(),
+                t_s: f64::from(samples.len() as u32) as f32 / f64::from(sr) as f32,
+            });
+        }
+
+        Ok(SynthesisResult {
+            speech: GeneratedSpeech {
+                samples,
+                sample_rate: sr,
+                text_attention: Vec::new(),
+                target_token_ids: Vec::new(),
+                voice_len: 0,
+            },
+            words: all_words,
+            marks,
+            spoken_text,
+        })
     }
 }
 
-struct WordTimingOwned {
-    word: String,
-    start_s: f32,
-    end_s: f32,
-}
-
 #[allow(clippy::cast_precision_loss)]
-fn read_reference(wav: &std::path::Path) -> Result<Vec<f32>, String> {
+fn read_reference(wav: &Path) -> Result<Vec<f32>, String> {
     let mut reader = hound::WavReader::open(wav).map_err(|e| e.to_string())?;
     let spec = reader.spec();
     let chans: usize = spec.channels.max(1) as usize;
@@ -157,7 +267,11 @@ fn read_reference(wav: &std::path::Path) -> Result<Vec<f32>, String> {
     }
 }
 
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn resample_linear(x: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || x.is_empty() {
         return x.to_vec();
@@ -175,55 +289,45 @@ fn resample_linear(x: &[f32], from: u32, to: u32) -> Vec<f32> {
         .collect()
 }
 
-/// Remove SSML tags, keeping inner text; `<break>` becomes a comma-space so
-/// the model still breathes (full silence-splitting is a follow-up).
-fn strip_ssml_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    while let Some(open) = rest.find('<') {
-        if let Some(close) = rest[open..].find('>') {
-            let tag = &rest[open..=open + close];
-            if tag.starts_with("<break") {
-                out.push_str(", ");
-            }
-            out.push_str(&rest[..open]);
-            rest = &rest[open + close + 1..];
-        } else {
-            break;
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn speech_to_pcm16(speech: &GeneratedSpeech, volume: f32) -> Vec<u8> {
+fn speech_to_pcm16(samples: &[f32], sample_rate: u32, volume: f32) -> Vec<u8> {
     let vol = volume.clamp(0.0, 4.0);
-    speech
-        .samples
-        .iter()
-        .flat_map(|s| {
-            let v = ((*s) * vol).clamp(-1.0, 1.0);
-            let pcm = (v * 32767.0).round() as i16;
-            pcm.to_le_bytes()
-        })
-        .collect()
+    let mut pcm = Vec::with_capacity(samples.len() * 2 + 44);
+    write_wav_header(&mut pcm, samples.len(), sample_rate);
+    for s in samples {
+        let v = ((*s) * vol).clamp(-1.0, 1.0);
+        let p = (v * 32767.0).round() as i16;
+        pcm.extend_from_slice(&p.to_le_bytes());
+    }
+    pcm
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::used_underscore_binding
-)]
+fn write_wav_header(out: &mut Vec<u8>, n_samples: usize, sample_rate: u32) {
+    let data_len = (n_samples * 2) as u32;
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+}
+
+/// Fire boundary + mark callbacks and produce typed boundaries.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 fn fire_callbacks(
     text: &str,
-    speech: &GeneratedSpeech,
-    timings: &[WordTimingOwned],
+    result: &SynthesisResult,
     mut on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
     mut on_mark: Option<crate::engine::OnMarkCallback<'_>>,
 ) -> Vec<WordBoundary> {
     let mut search = WordSearch::new(text);
-    let mut out = Vec::with_capacity(timings.len());
-    for t in timings {
+    let mut out = Vec::with_capacity(result.words.len());
+    for t in &result.words {
         if t.word.trim().is_empty() {
             continue;
         }
@@ -238,17 +342,17 @@ fn fire_callbacks(
             estimated: false,
         });
     }
-    let _ = (
-        on_boundary.is_some(),
-        on_mark.take().is_some(),
-        speech.samples.len(),
-    );
+    for m in &result.marks {
+        if let Some(cb) = on_mark.as_mut() {
+            let (char_offset, _len) = search.find_next("");
+            cb(&m.name, m.t_s, m.t_s, char_offset.max(0));
+        }
+    }
     out
 }
 
-#[allow(clippy::used_underscore_binding)]
 impl TtsEngine for PocketTtsEngine {
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::used_underscore_binding)]
     fn speak(
         &self,
         text: &str,
@@ -258,25 +362,25 @@ impl TtsEngine for PocketTtsEngine {
         volume: f32,
         on_audio: Option<crate::engine::OnAudioCallback<'_>>,
         on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
-        _on_mark: Option<crate::engine::OnMarkCallback<'_>>,
+        on_mark: Option<crate::engine::OnMarkCallback<'_>>,
     ) -> TtsResult<()> {
         let generation = self.generation.fetch_add(1, Ordering::SeqCst);
         self.stop_flag.store(false, Ordering::SeqCst);
-        let (speech, timings, spoken) = self.synthesize(text, rate)?;
+        let result = self.synthesize(text, rate)?;
         if self.stop_flag.load(Ordering::SeqCst)
             || self.generation.load(Ordering::SeqCst) != generation + 1
         {
             return Ok(());
         }
-        let pcm = speech_to_pcm16(&speech, volume);
+        let pcm = speech_to_pcm16(&result.speech.samples, result.speech.sample_rate, volume);
         if let Some(cb) = on_audio {
             cb(&pcm);
         }
-        fire_callbacks(&spoken, &speech, &timings, on_boundary, _on_mark);
+        fire_callbacks(&result.spoken_text, &result, on_boundary, on_mark);
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::used_underscore_binding)]
     fn speak_sync(
         &self,
         text: &str,
@@ -332,22 +436,25 @@ impl TtsEngine for PocketTtsEngine {
         _pitch: f32,
         volume: f32,
     ) -> TtsResult<Vec<u8>> {
-        let (speech, _timings, _spoken) = self.synthesize(text, rate)?;
-        Ok(speech_to_pcm16(&speech, volume))
+        let result = self.synthesize(text, rate)?;
+        Ok(speech_to_pcm16(
+            &result.speech.samples,
+            result.speech.sample_rate,
+            volume,
+        ))
     }
 
     fn synth_with_boundaries(
         &self,
         text: &str,
-        voice: Option<&str>,
+        _voice: Option<&str>,
         rate: f32,
-        pitch: f32,
+        _pitch: f32,
         volume: f32,
     ) -> TtsResult<(Vec<u8>, Vec<WordBoundary>)> {
-        let (speech, timings, spoken) = self.synthesize(text, rate)?;
-        let pcm = speech_to_pcm16(&speech, volume);
-        let boundaries = fire_callbacks(&spoken, &speech, &timings, None, None);
-        let _ = (voice, pitch);
+        let result = self.synthesize(text, rate)?;
+        let pcm = speech_to_pcm16(&result.speech.samples, result.speech.sample_rate, volume);
+        let boundaries = fire_callbacks(&result.spoken_text, &result, None, None);
         Ok((pcm, boundaries))
     }
 }

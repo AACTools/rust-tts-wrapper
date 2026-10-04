@@ -1,9 +1,7 @@
-#![allow(clippy::cast_precision_loss)]
 //! `PocketTtsEngine` through the `TtsEngine` trait: cloned voice + REAL
 //! attention-measured word boundaries via `on_boundary`.
-//!   cargo run --release --no-default-features --features pocket-timing \
-//!     --example pocket-engine-demo -- `<bundle_dir>` `<ref_wav>` `[text]`
-
+//!   cargo run --release --no-default-features --features pocket-timing //!     --example pocket-engine-demo -- `<bundle_dir>` `<ref_wav>` `[text]`
+#![allow(clippy::cast_precision_loss)]
 #[cfg(feature = "pocket-timing")]
 fn main() {
     use rust_tts_wrapper::engine::TtsEngine;
@@ -31,6 +29,10 @@ fn main() {
             "{word}: {s:.2}-{e}s (char {pos}+{len}, estimated={est})"
         ));
     };
+    let mut marks: Vec<String> = Vec::new();
+    let mut on_mark = |name: &str, t: f32, _e: f32, _pos: i32| {
+        marks.push(format!("mark {name} @ {t:.2}s"));
+    };
     engine
         .speak(
             &text,
@@ -40,34 +42,22 @@ fn main() {
             1.0,
             Some(&mut on_audio),
             Some(&mut on_boundary),
-            None,
+            Some(&mut on_mark),
         )
         .expect("speak");
     println!(
-        "spoke in {:.1}s: {} PCM bytes ({:.2}s audio), {} boundaries:",
+        "spoke in {:.1}s: {} PCM bytes ({:.2}s audio), {} boundaries, {} marks:",
         t0.elapsed().as_secs_f32(),
         audio_bytes,
-        audio_bytes as f32 / 2.0 / 24000.0,
-        boundaries.len()
+        audio_bytes as f32 / 48000.0,
+        boundaries.len(),
+        marks.len()
     );
     for b in &boundaries {
         println!("  {b}");
     }
-
-    // synth_with_boundaries: the typed API
-    let (pcm, words) = engine
-        .synth_with_boundaries("Can you help me with this please", None, 1.0, 1.0, 1.0)
-        .expect("synth_with_boundaries");
-    println!(
-        "synth_with_boundaries: {} bytes, {} words:",
-        pcm.len(),
-        words.len()
-    );
-    for w in &words {
-        println!(
-            "  {} @{}ms +{}ms est={}",
-            w.text, w.offset, w.duration, w.estimated
-        );
+    for m in &marks {
+        println!("  {m}");
     }
 }
 
