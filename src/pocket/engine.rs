@@ -8,7 +8,7 @@
 
 use crate::engine::TtsEngine;
 use crate::pocket::model::{GeneratedSpeech, PocketConfig, PocketTtsModel};
-use crate::pocket::timings::word_boundaries;
+use crate::pocket::timings::{word_boundaries, word_boundaries_grouped};
 use crate::types::{TtsError, TtsResult, Voice, WordBoundary};
 use crate::word_search::WordSearch;
 use std::fmt;
@@ -67,8 +67,10 @@ impl PocketTtsEngine {
             encoder: bundle_dir.join("encoder.onnx"),
             decoder: bundle_dir.join("decoder.onnx"),
             text_conditioner: bundle_dir.join("text_conditioner.onnx"),
-            vocab: bundle_dir.join("vocab.json"),
-            token_scores: bundle_dir.join("token_scores.json"),
+            vocab: Some(bundle_dir.join("vocab.json")),
+            token_scores: Some(bundle_dir.join("token_scores.json")),
+            tokenizer_json: None,
+            bos: None,
         });
         let reference_audio = read_reference(reference_wav).unwrap_or_default();
         Self {
@@ -120,6 +122,35 @@ impl PocketTtsEngine {
             return Err(TtsError("no reference audio configured".into()));
         }
 
+        // Raw phoneme input uses '|' as a word-group separator; the SSML
+        // tokenizer would shred it into bare phones (losing grouping for
+        // word timings). Convert pipe groups to <phoneme> elements first,
+        // unwrapping/re-wrapping any <speak> shell so tags survive intact.
+        let pipe_converted;
+        let text: &str = if text.contains('|') {
+            let inner = text
+                .trim()
+                .trim_start_matches("<speak>")
+                .trim_end_matches("</speak>")
+                .trim();
+            let mut out = String::from("<speak>");
+            for part in inner.split('|') {
+                let part = part.trim();
+                if part.is_empty() {
+                    continue;
+                }
+                let safe = part.replace('"', "");
+                out.push_str("<phoneme ph=\"");
+                out.push_str(&safe);
+                out.push_str("\"/> ");
+            }
+            out.push_str("</speak>");
+            pipe_converted = out;
+            &pipe_converted
+        } else {
+            text
+        };
+
         // SpeechMarkdown -> W3C SSML; plain text wrapped for uniform parsing
         let (ssml, _) = crate::engine::preprocess_speech_markdown(text, "plain");
         let ssml = if ssml.trim_start().to_ascii_lowercase().starts_with("<speak") {
@@ -146,15 +177,29 @@ impl PocketTtsEngine {
             match seg {
                 floravox_ssml::Segment::Words { words } => {
                     for w in words {
-                        let spoken = if w.spoken.is_empty() {
-                            &w.text
-                        } else {
-                            &w.spoken
+                        // `<phoneme ph="...">`: speak the override symbols
+                        // (each Vec element is one IPA symbol)
+                        let spoken: String = match &w.phonemes {
+                            Some(ph) if !ph.is_empty() => ph.join(" "),
+                            _ if w.spoken.is_empty() => w.text.clone(),
+                            _ => w.spoken.clone(),
                         };
-                        segs.last_mut()
-                            .expect("always one")
-                            .words
-                            .push(spoken.clone());
+                        // raw phoneme input may carry '|' word groups; the
+                        // SSML tokenizer only splits whitespace, so pipes
+                        // arrive glued to phones — re-split into groups
+                        if spoken.contains('|') {
+                            for part in spoken.split('|') {
+                                let part = part.trim();
+                                if !part.is_empty() {
+                                    segs.last_mut()
+                                        .expect("always one")
+                                        .words
+                                        .push(part.to_string());
+                                }
+                            }
+                        } else {
+                            segs.last_mut().expect("always one").words.push(spoken);
+                        }
                     }
                 }
                 floravox_ssml::Segment::Break { ms, .. } => {
@@ -166,6 +211,67 @@ impl PocketTtsEngine {
                 }
                 _ => {}
             }
+        }
+
+        // Long inputs make the model ramble past the text (a 9-word fox
+        // sentence rendered 20s): sub-segment so each generate() call stays
+        // in the length range where EOS is reliable. Phoneme mode: ~15
+        // tokens per chunk (a bathroom-length phrase); orthographic: ~8-12
+        // words, preferring sentence-punctuation cuts.
+        let phoneme_mode = self.with_model(|m| {
+            Ok(matches!(
+                m.tokenizer,
+                crate::pocket::tokenizer::AnyTokenizer::WordLevel(_)
+            ))
+        })?;
+        const PHONEME_TOKENS_PER_CHUNK: usize = 10;
+        const TARGET_WORDS: usize = 8;
+        const MAX_WORDS: usize = 12;
+        {
+            let words_tokens = |w: &str| w.split_whitespace().count().max(1);
+            let mut chunked: Vec<Seg> = Vec::new();
+            let mut pauses: Vec<u32> = Vec::new();
+            for (si, seg) in segs.iter().enumerate() {
+                let pause = pause_after.get(si).copied().unwrap_or(0);
+                let (target, max): (usize, usize) = if phoneme_mode {
+                    (PHONEME_TOKENS_PER_CHUNK, PHONEME_TOKENS_PER_CHUNK + 1)
+                } else {
+                    (TARGET_WORDS, MAX_WORDS)
+                };
+                let seg_units: usize = if phoneme_mode {
+                    seg.words.iter().map(|w| words_tokens(w)).sum()
+                } else {
+                    seg.words.len()
+                };
+                if seg_units <= max {
+                    chunked.push(Seg {
+                        words: seg.words.clone(),
+                    });
+                    pauses.push(pause);
+                    continue;
+                }
+                let mut cur: Vec<String> = Vec::new();
+                let mut cur_units = 0usize;
+                for w in &seg.words {
+                    cur.push(w.clone());
+                    cur_units += if phoneme_mode { words_tokens(w) } else { 1 };
+                    let sentence_end =
+                        !phoneme_mode && w.chars().last().is_some_and(|c| ".!?;:,".contains(c));
+                    if (cur_units >= target && sentence_end) || cur_units >= max {
+                        chunked.push(Seg {
+                            words: std::mem::take(&mut cur),
+                        });
+                        pauses.push(0); // flow-continuous within one sentence
+                        cur_units = 0;
+                    }
+                }
+                if !cur.is_empty() {
+                    chunked.push(Seg { words: cur });
+                    pauses.push(pause); // the explicit break belongs to the last chunk
+                }
+            }
+            segs = chunked;
+            pause_after = pauses;
         }
 
         // synthesize each non-empty segment; concatenate with silence
@@ -190,21 +296,41 @@ impl PocketTtsEngine {
                 continue;
             }
             let (speech, seg_words) = self.with_model(|m| {
+                // phoneme bundles: words carry `|` separators so the
+                // tokenizer keeps word grouping for attention timings
+                let synth_text = match &m.tokenizer {
+                    crate::pocket::tokenizer::AnyTokenizer::WordLevel(_) => seg.words.join("|"),
+                    crate::pocket::tokenizer::AnyTokenizer::Viterbi(_) => seg_text.clone(),
+                };
                 let s = m
                     .generate(
-                        &seg_text,
+                        &synth_text,
                         &reference,
                         self.temperature,
                         self.num_steps,
                         self.max_frames,
                     )
                     .map_err(TtsError)?;
-                let t = word_boundaries(
-                    &m.tokenizer,
-                    &s.target_token_ids,
-                    &s.text_attention,
-                    step_dur,
-                );
+                let t = match &s.grouped {
+                    Some((tok2word, words)) => {
+                        word_boundaries_grouped(words, tok2word, &s.text_attention, step_dur)
+                    }
+                    None => match &m.tokenizer {
+                        crate::pocket::tokenizer::AnyTokenizer::Viterbi(vt) => {
+                            word_boundaries(vt, &s.target_token_ids, &s.text_attention, step_dur)
+                        }
+                        crate::pocket::tokenizer::AnyTokenizer::WordLevel(wt) => {
+                            // plain (ungrouped) phoneme input: one "word" per token
+                            let words: Vec<String> = s
+                                .target_token_ids
+                                .iter()
+                                .map(|id| wt.id_to_piece(*id))
+                                .collect();
+                            let tok2word: Vec<usize> = (0..words.len()).collect();
+                            word_boundaries_grouped(&words, &tok2word, &s.text_attention, step_dur)
+                        }
+                    },
+                };
                 Ok((s, t))
             })?;
             let seg_start_s = f64::from(samples.len() as u32) as f32 / f64::from(sr) as f32;
@@ -239,6 +365,7 @@ impl PocketTtsEngine {
             speech: GeneratedSpeech {
                 samples,
                 sample_rate: sr,
+                grouped: None,
                 text_attention: Vec::new(),
                 target_token_ids: Vec::new(),
                 voice_len: 0,

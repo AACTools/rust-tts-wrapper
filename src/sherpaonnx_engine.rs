@@ -2406,10 +2406,19 @@ mod tests {
         // tests is now: registry is large, typed, and defaults sane.
         let models = load_models();
         assert!(models.len() > 1700, "registry shrank: {}", models.len());
-        // engines covers every model and matches the family rule
+        // engines matches the family rule: upstream graphs are
+        // sherpa-onnx-drivable; AACTools artifacts may list floravox /
+        // rust-tts-wrapper (or a combination) instead
         for m in models.values() {
-            let expected = "sherpa-onnx";
-            assert_eq!(m.engines, expected, "{}", m.id);
+            assert!(!m.engines.is_empty(), "{} has no engines value", m.id);
+            assert!(
+                m.engines.split(',').any(|e| e.trim() == "sherpa-onnx")
+                    || m.engines.contains("floravox")
+                    || m.engines.contains("rust-tts-wrapper"),
+                "{} has an unknown engines value: {}",
+                m.id,
+                m.engines
+            );
         }
         // a known MMS entry (no explicit model_type in raw data) parses
         // with the vits-family default

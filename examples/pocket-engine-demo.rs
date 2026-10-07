@@ -23,7 +23,11 @@ fn main() {
     let t0 = std::time::Instant::now();
     let mut boundaries: Vec<String> = Vec::new();
     let mut audio_bytes = 0usize;
-    let mut on_audio = |pcm: &[u8]| audio_bytes += pcm.len();
+    let mut pcm_all: Vec<u8> = Vec::new();
+    let mut on_audio = |pcm: &[u8]| {
+        audio_bytes += pcm.len();
+        pcm_all.extend_from_slice(pcm);
+    };
     let mut on_boundary = |word: &str, s: f32, e: f32, pos: i32, len: i32, est: bool| {
         boundaries.push(format!(
             "{word}: {s:.2}-{e}s (char {pos}+{len}, estimated={est})"
@@ -53,6 +57,31 @@ fn main() {
         boundaries.len(),
         marks.len()
     );
+    if let Some(out) = std::env::args().nth(4) {
+        // pcm is 16-bit LE mono 24 kHz
+        let mut wav: Vec<u8> = Vec::with_capacity(44 + pcm_all.len());
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(
+            &(36 + u32::try_from(pcm_all.len()).unwrap_or(u32::MAX)).to_le_bytes(),
+        );
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes());
+        wav.extend_from_slice(&24_000u32.to_le_bytes());
+        wav.extend_from_slice(&48_000u32.to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(
+            &u32::try_from(pcm_all.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        wav.extend_from_slice(&pcm_all);
+        std::fs::write(&out, wav).expect("write wav");
+        println!("wrote {out}");
+    }
     for b in &boundaries {
         println!("  {b}");
     }

@@ -2,7 +2,7 @@
 
 *Local engineering notes for the floravox engine integration
 (`src/floravox_engine.rs`, PR #42). Companion to floravox's own
-`docs/handoff-floravox-engine.md`. Last updated 2026-09-24.*
+(the floravox-side handoff doc was deleted 2026-10-06 — the work shipped)
 
 ## Status: engine implemented, PR open
 

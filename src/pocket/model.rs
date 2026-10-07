@@ -6,7 +6,7 @@
 //! lm_main (capturing attention over the text tokens) -> Euler-integrated
 //! flow -> chunked mimi decode.
 
-use crate::pocket::tokenizer::PocketTokenizer;
+use crate::pocket::tokenizer::{AnyTokenizer, PocketTokenizer, WordLevelTokenizer};
 use ort::session::Session;
 use ort::value::Tensor;
 use std::path::{Path, PathBuf};
@@ -46,46 +46,86 @@ pub struct PocketConfig {
     pub encoder: PathBuf,
     pub decoder: PathBuf,
     pub text_conditioner: PathBuf,
-    pub vocab: PathBuf,
-    pub token_scores: PathBuf,
+    pub vocab: Option<PathBuf>,
+    pub token_scores: Option<PathBuf>,
+    /// WordLevel tokenizer.json (phoneme bundles) — mutually exclusive with
+    /// vocab/token_scores.
+    pub tokenizer_json: Option<PathBuf>,
+    /// `bos_before_voice` embedding prepended to voice conditioning
+    /// (phoneme bundles ship it as .npy; sherpa bundles bake it into the
+    /// encoder graph and ship nothing).
+    pub bos: Option<PathBuf>,
 }
 
 impl PocketConfig {
-    /// Sherpa's standard bundle layout: files directly in `dir`, or under
-    /// `<dir>/<model-id>/` (our fleet convention).
+    /// Bundle layouts: sherpa (lm_main*.onnx + vocab.json) or phoneme
+    /// (flow_lm_main*.onnx + tokenizer json + bundle.json). Files directly
+    /// in `dir`, or under `<dir>/<model-id>/`.
     #[must_use]
     pub fn from_dir(dir: &Path) -> Option<Self> {
-        let probe = |d: &Path| {
-            d.join("lm_main_tapped.onnx").is_file() && d.join("vocab.json").is_file()
-                || d.join("lm_main.onnx").is_file() && d.join("vocab.json").is_file()
+        let sherpa = |d: &Path| {
+            (d.join("lm_main_tapped.onnx").is_file() || d.join("lm_main.onnx").is_file())
+                && d.join("vocab.json").is_file()
         };
-        let base = if probe(dir) {
+        let phoneme = |d: &Path| {
+            (d.join("flow_lm_main_tapped.onnx").is_file() || d.join("flow_lm_main.onnx").is_file())
+                && d.join("bundle.json").is_file()
+                && (d.join("tokenizer4.json").is_file() || d.join("tokenizer.json").is_file())
+        };
+        let base = if sherpa(dir) || phoneme(dir) {
             dir.to_path_buf()
         } else {
             let mut found = None;
             for entry in std::fs::read_dir(dir).ok()?.flatten() {
-                if entry.path().is_dir() && probe(&entry.path()) {
+                if entry.path().is_dir() && (sherpa(&entry.path()) || phoneme(&entry.path())) {
                     found = Some(entry.path());
                     break;
                 }
             }
             found?
         };
-        // prefer the tapped graph when present
-        let lm = if base.join("lm_main_tapped.onnx").is_file() {
-            base.join("lm_main_tapped.onnx")
+        if sherpa(&base) {
+            // prefer the tapped graph when present
+            let lm = if base.join("lm_main_tapped.onnx").is_file() {
+                base.join("lm_main_tapped.onnx")
+            } else {
+                base.join("lm_main.onnx")
+            };
+            Some(Self {
+                lm_main: lm,
+                lm_flow: base.join("lm_flow.onnx"),
+                encoder: base.join("encoder.onnx"),
+                decoder: base.join("decoder.onnx"),
+                text_conditioner: base.join("text_conditioner.onnx"),
+                vocab: Some(base.join("vocab.json")),
+                token_scores: Some(base.join("token_scores.json")),
+                tokenizer_json: None,
+                bos: None,
+            })
         } else {
-            base.join("lm_main.onnx")
-        };
-        Some(Self {
-            lm_main: lm,
-            lm_flow: base.join("lm_flow.onnx"),
-            encoder: base.join("encoder.onnx"),
-            decoder: base.join("decoder.onnx"),
-            text_conditioner: base.join("text_conditioner.onnx"),
-            vocab: base.join("vocab.json"),
-            token_scores: base.join("token_scores.json"),
-        })
+            let lm = if base.join("flow_lm_main_tapped.onnx").is_file() {
+                base.join("flow_lm_main_tapped.onnx")
+            } else {
+                base.join("flow_lm_main.onnx")
+            };
+            let tok = if base.join("tokenizer4.json").is_file() {
+                base.join("tokenizer4.json")
+            } else {
+                base.join("tokenizer.json")
+            };
+            let bos = base.join("bos_before_voice.npy");
+            Some(Self {
+                lm_main: lm,
+                lm_flow: base.join("flow_lm_flow.onnx"),
+                encoder: base.join("mimi_encoder.onnx"),
+                decoder: base.join("mimi_decoder.onnx"),
+                text_conditioner: base.join("text_conditioner.onnx"),
+                vocab: None,
+                token_scores: None,
+                tokenizer_json: Some(tok),
+                bos: bos.is_file().then_some(bos),
+            })
+        }
     }
 }
 
@@ -98,6 +138,9 @@ pub struct GeneratedSpeech {
     pub target_token_ids: Vec<u32>,
     /// leading KV positions occupied by the voice conditioning
     pub voice_len: usize,
+    /// phoneme mode: explicit token->word grouping (None = derive from
+    /// piece markers in `timings`)
+    pub grouped: Option<(Vec<usize>, Vec<String>)>,
 }
 
 /// A raw state tensor fed back between lm_main/decoder calls.
@@ -114,10 +157,15 @@ pub struct PocketTtsModel {
     encoder: RunCell,
     decoder: RunCell,
     conditioner: RunCell,
-    pub tokenizer: PocketTokenizer,
+    pub tokenizer: AnyTokenizer,
+    /// [1,1,1024] prepended to voice embeddings when the bundle ships it
+    bos: Option<Vec<f32>>,
     lm_state_names: Vec<String>,
     lm_out_state_count: usize,
-    lm_attn_name: Option<String>,
+    /// attention-tap output names to average (6L: single Softmax tap;
+    /// phoneme 24L: attn_tap_8..attn_tap_15 — measured 2026-10: layers
+    /// 8-15 mean + per-token peak-step gives monotonic word order)
+    lm_attn_names: Vec<String>,
     dec_state_names: Vec<String>,
     dec_out_state_count: usize,
     lm_init: Vec<RawTensor>,
@@ -157,29 +205,44 @@ impl PocketTtsModel {
     /// # Errors
     ///
     /// IO or ONNX session failures.
+    #[allow(clippy::too_many_lines)]
     pub fn load(cfg: &PocketConfig) -> Result<Self, String> {
-        let err = |e: ort::Error| e.to_string();
-        let lm_main = Session::builder()
-            .map_err(err)?
-            .commit_from_file(&cfg.lm_main)
-            .map_err(err)?;
-        let lm_flow = Session::builder()
-            .map_err(err)?
-            .commit_from_file(&cfg.lm_flow)
-            .map_err(err)?;
-        let encoder = Session::builder()
-            .map_err(err)?
-            .commit_from_file(&cfg.encoder)
-            .map_err(err)?;
-        let decoder = Session::builder()
-            .map_err(err)?
-            .commit_from_file(&cfg.decoder)
-            .map_err(err)?;
+        fn err<E: std::fmt::Display>(e: E) -> String {
+            e.to_string()
+        }
+        // small sequential matmuls in the AR loop oversubscribe with default
+        // threading; cap intra-op (measured ~2x on the pocket graphs)
+        fn mk_session(path: &Path) -> Result<Session, String> {
+            Session::builder()
+                .map_err(|e| e.to_string())?
+                .with_intra_threads(6)
+                .map_err(|e| e.to_string())?
+                .with_inter_threads(1)
+                .map_err(|e| e.to_string())?
+                .commit_from_file(path)
+                .map_err(err)
+        }
+        let lm_main = mk_session(&cfg.lm_main)?;
+        let lm_flow = mk_session(&cfg.lm_flow)?;
+        let encoder = mk_session(&cfg.encoder)?;
+        let decoder = mk_session(&cfg.decoder)?;
         let conditioner = Session::builder()
             .map_err(err)?
             .commit_from_file(&cfg.text_conditioner)
             .map_err(err)?;
-        let tokenizer = PocketTokenizer::load(&cfg.vocab, &cfg.token_scores)?;
+        let tokenizer = match (&cfg.vocab, &cfg.token_scores, &cfg.tokenizer_json) {
+            (Some(v), Some(s), _) => AnyTokenizer::Viterbi(PocketTokenizer::load(v, s)?),
+            (_, _, Some(t)) => AnyTokenizer::WordLevel(WordLevelTokenizer::load(t)?),
+            _ => return Err("bundle has neither vocab.json nor tokenizer json".into()),
+        };
+        let bos = match &cfg.bos {
+            Some(p) => match read_npy_f32(p) {
+                Ok(v) if !v.is_empty() => Some(v),
+                Ok(_) => None,
+                Err(e) => return Err(format!("bos npy: {e}")),
+            },
+            None => None,
+        };
 
         let lm_state_names = lm_main
             .inputs()
@@ -192,11 +255,40 @@ impl PocketTtsModel {
             .iter()
             .filter(|o| o.name().starts_with("out_state"))
             .count();
-        let lm_attn_name = lm_main
+        let tap_names: Vec<String> = lm_main
             .outputs()
             .iter()
-            .find(|o| o.name().contains("layers.3") && o.name().contains("Softmax"))
-            .map(|o| o.name().to_string());
+            .map(|o| o.name().to_string())
+            .filter(|n| {
+                n.as_str() != "conditioning"
+                    && n.as_str() != "eos_logit"
+                    && !n.starts_with("out_state")
+            })
+            .collect();
+        let lm_attn_names = if let Some(six) = tap_names
+            .iter()
+            .find(|n| n.contains("layers.3") && n.contains("Softmax"))
+        {
+            vec![six.clone()]
+        } else {
+            // phoneme graphs: layers 8-15 mean (validated monotonic);
+            // fall back to every tap if the suffix parse fails
+            let picked: Vec<String> = tap_names
+                .iter()
+                .filter(|n| {
+                    n.rsplit('_')
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .is_some_and(|i| (8..16).contains(&i))
+                })
+                .cloned()
+                .collect();
+            if picked.len() == 8 {
+                picked
+            } else {
+                tap_names.clone()
+            }
+        };
         let dec_state_names = decoder
             .inputs()
             .iter()
@@ -251,9 +343,10 @@ impl PocketTtsModel {
             decoder: RunCell(std::cell::UnsafeCell::new(decoder)),
             conditioner: RunCell(std::cell::UnsafeCell::new(conditioner)),
             tokenizer,
+            bos,
             lm_state_names,
             lm_out_state_count,
-            lm_attn_name,
+            lm_attn_names,
             dec_state_names,
             dec_out_state_count,
             lm_init,
@@ -282,7 +375,17 @@ impl PocketTtsModel {
     ) -> Result<GeneratedSpeech, String> {
         let err = |e: ort::Error| e.to_string();
         // --- 1. text embeddings
-        let tok_ids = self.tokenizer.encode(text);
+        // phoneme bundles: `|`-separated phoneme words carry the word
+        // grouping (needed for attention timings); plain text for Viterbi.
+        let (tok_ids, grouped) = match &self.tokenizer {
+            AnyTokenizer::WordLevel(t) => {
+                // always grouped: `|`-separated words carry explicit
+                // grouping; bare phoneme text becomes one word per token
+                let (ids, tok2word, words) = t.encode_grouped(text);
+                (ids, Some((tok2word, words)))
+            }
+            AnyTokenizer::Viterbi(_) => (self.tokenizer.encode(text), None),
+        };
         if tok_ids.is_empty() {
             return Err("empty text".into());
         }
@@ -326,6 +429,16 @@ impl PocketTtsModel {
             vshape[vshape.len() - 2]
         } else {
             0
+        };
+        // phoneme bundles: prepend the bos_before_voice row ([1,1,1024])
+        let (voice, voice_len) = match &self.bos {
+            Some(b) => {
+                let mut v = Vec::with_capacity(b.len() + voice.len());
+                v.extend_from_slice(b);
+                v.extend_from_slice(&voice);
+                (v, voice_len + 1)
+            }
+            None => (voice, voice_len),
         };
         let voice_dims = vec![1i64, voice_len as i64, 1024];
 
@@ -375,7 +488,12 @@ impl PocketTtsModel {
             (u * 2.0 - 1.0) as f32
         };
         let empty_emb: Vec<f32> = Vec::new();
-        for step in 0..max_frames {
+        // Kyutai-calibrated budget: (tokens/3 + 2s) of frames, hard-capped
+        // by the caller. A missed EOS cannot ramble past ~1.3x the estimate.
+        let est_frames = ((tok_ids.len() as f32 / 3.0) + 2.0) * 12.5;
+        let frame_budget = max_frames.min((est_frames * 1.3).ceil() as usize);
+        let mut eos_fired = false;
+        for step in 0..frame_budget {
             let (cond, eos, attn) = self.run_lm_step(
                 &lm_names,
                 (cur.clone(), vec![1i64, 1, 32]),
@@ -384,6 +502,7 @@ impl PocketTtsModel {
             )?;
             if eos_step < 0 && eos > -4.0 {
                 eos_step = step as i64;
+                eos_fired = true;
             }
             if eos_step >= 0 && step as i64 >= eos_step + 3 {
                 break;
@@ -448,8 +567,9 @@ impl PocketTtsModel {
                 ort::session::SessionInputValue<'_>,
             )> = Vec::new();
             inputs.push(("latent".into(), (&ct).into()));
-            for (name, raw) in self.dec_state_names.iter().zip(dstate.iter()) {
-                let t = raw.to_tensor()?;
+            let mut dstate_in = std::mem::take(&mut dstate);
+            for (name, raw) in self.dec_state_names.iter().zip(dstate_in.drain(..)) {
+                let t = raw.into_tensor()?;
                 inputs.push((name.as_str().into(), t));
             }
             let outs = unsafe { self.decoder.get_mut() }.run(inputs).map_err(err)?;
@@ -471,12 +591,32 @@ impl PocketTtsModel {
             i += 1;
         }
 
+        // Ramble guard: EOS never fired -> the tail past the spoken estimate
+        // is looping babble. Trim to ~est duration with a short fade.
+        if !eos_fired {
+            let est_samples = (est_frames * 0.08 * SAMPLE_RATE as f32) as usize;
+            if samples.len() > est_samples {
+                let cut = est_samples.min(samples.len());
+                let fade = (0.15 * SAMPLE_RATE as f32) as usize;
+                for (i, s) in samples[cut.saturating_sub(fade)..cut]
+                    .iter_mut()
+                    .enumerate()
+                {
+                    #[allow(clippy::cast_precision_loss)]
+                    let g = 1.0 - (i as f32 / fade as f32);
+                    *s *= g;
+                }
+                samples.truncate(cut);
+            }
+        }
+
         Ok(GeneratedSpeech {
             samples,
             sample_rate: SAMPLE_RATE,
             text_attention: attn_target,
             target_token_ids: tok_ids,
             voice_len,
+            grouped,
         })
     }
 }
@@ -500,15 +640,15 @@ fn dec_out_state_names(m: &PocketTtsModel) -> Vec<String> {
 }
 
 impl RawTensor {
-    fn to_tensor(&self) -> Result<ort::session::SessionInputValue<'static>, String> {
+    fn into_tensor(self) -> Result<ort::session::SessionInputValue<'static>, String> {
         match self {
-            RawTensor::F32(data, dims) => Ok(Tensor::from_array((dims.clone(), data.clone()))
+            RawTensor::F32(data, dims) => Ok(Tensor::from_array((dims, data))
                 .map_err(|e| e.to_string())?
                 .into()),
-            RawTensor::I64(data, dims) => Ok(Tensor::from_array((dims.clone(), data.clone()))
+            RawTensor::I64(data, dims) => Ok(Tensor::from_array((dims, data))
                 .map_err(|e| e.to_string())?
                 .into()),
-            RawTensor::Bool(data, dims) => Ok(Tensor::from_array((dims.clone(), data.clone()))
+            RawTensor::Bool(data, dims) => Ok(Tensor::from_array((dims, data))
                 .map_err(|e| e.to_string())?
                 .into()),
         }
@@ -533,8 +673,9 @@ impl PocketTtsModel {
         let emb_t =
             Tensor::from_array((embeddings.1.to_vec(), embeddings.0.to_vec())).map_err(err)?;
         inputs.push(("text_embeddings".into(), (&emb_t).into()));
-        for (name, raw) in self.lm_state_names.iter().zip(state.iter()) {
-            let t = raw.to_tensor()?;
+        let mut state_in = std::mem::take(state);
+        for (name, raw) in self.lm_state_names.iter().zip(state_in.drain(..)) {
+            let t = raw.into_tensor()?;
             inputs.push((name.as_str().into(), t));
         }
         let outs = unsafe { self.lm_main.get_mut() }.run(inputs).map_err(err)?;
@@ -561,27 +702,33 @@ impl PocketTtsModel {
             .first()
             .copied()
             .unwrap_or(-99.0);
+        // average the selected taps (heads within each, then across taps)
         let mut attn_row = Vec::new();
-        if let Some(aname) = &self.lm_attn_name {
-            if let Some(o) = outs.get(aname) {
-                let (a_shape, a_data) = o.try_extract_tensor::<f32>().map_err(err)?;
-                let dims: Vec<usize> = a_shape.iter().map(|d| *d as usize).collect();
-                if dims.len() == 4 {
-                    let heads = dims[1];
-                    let kv = dims[3];
-                    let mut row = vec![0f32; kv];
-                    for h in 0..heads {
-                        for k in 0..kv {
-                            row[k] += a_data[h * kv + k];
-                        }
-                    }
-                    for r in &mut row {
-                        #[allow(clippy::cast_precision_loss)]
-                        let hn = heads as f32;
-                        *r /= hn;
-                    }
-                    attn_row = row;
+        let mut taps_used = 0usize;
+        for aname in &self.lm_attn_names {
+            let Some(o) = outs.get(aname) else { continue };
+            let (a_shape, a_data) = o.try_extract_tensor::<f32>().map_err(err)?;
+            let dims: Vec<usize> = a_shape.iter().map(|d| *d as usize).collect();
+            if dims.len() != 4 {
+                continue;
+            }
+            let heads = dims[1];
+            let kv = dims[3];
+            if attn_row.len() != kv {
+                attn_row = vec![0f32; kv];
+            }
+            for h in 0..heads {
+                for k in 0..kv {
+                    attn_row[k] += a_data[h * kv + k];
                 }
+            }
+            taps_used += heads.max(1);
+        }
+        if taps_used > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            let n = taps_used as f32;
+            for r in &mut attn_row {
+                *r /= n;
             }
         }
         Ok((cond, eos, attn_row))
@@ -610,4 +757,23 @@ impl RawTensor {
             String::from("unsupported state dtype"),
         ))
     }
+}
+
+/// Minimal .npy reader for a flat f32 array (little-endian, C order) —
+/// enough for bos_before_voice.npy.
+fn read_npy_f32(path: &Path) -> Result<Vec<f32>, String> {
+    let b = std::fs::read(path).map_err(|e| e.to_string())?;
+    if b.len() < 10 || &b[..6] != b"\x93NUMPY" {
+        return Err("not an npy file".into());
+    }
+    let hlen = u16::from_le_bytes([b[8], b[9]]) as usize;
+    let header = std::str::from_utf8(&b[10..10 + hlen]).map_err(|e| e.to_string())?;
+    if !header.contains("'<f4'") {
+        return Err("npy is not f32".into());
+    }
+    let data = &b[10 + hlen..];
+    Ok(data
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }

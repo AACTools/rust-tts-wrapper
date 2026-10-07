@@ -97,3 +97,103 @@ impl PocketTokenizer {
             .unwrap_or_default()
     }
 }
+
+/// WordLevel whitespace tokenizer (HF `tokenizers` json, WordLevel model) —
+/// the phoneme bundles: one id per whitespace-separated phone, `<unk>` = 0.
+/// Word structure is supplied by the caller (`|`-separated phoneme words).
+pub struct WordLevelTokenizer {
+    token2id: HashMap<String, u32>,
+    id2token: Vec<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct TokenizersJson {
+    model: WordLevelModel,
+}
+
+#[derive(serde::Deserialize)]
+struct WordLevelModel {
+    vocab: HashMap<String, u32>,
+}
+
+impl WordLevelTokenizer {
+    /// Load a tokenizer.json (WordLevel).
+    ///
+    /// # Errors
+    ///
+    /// IO or JSON parse failures.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let j: TokenizersJson =
+            serde_json::from_str(&std::fs::read_to_string(path).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        let max_id = j.model.vocab.values().copied().max().unwrap_or(0) as usize;
+        let mut id2token = vec![String::new(); max_id + 1];
+        for (tok, id) in &j.model.vocab {
+            if let Some(slot) = id2token.get_mut(*id as usize) {
+                slot.clone_from(tok);
+            }
+        }
+        Ok(Self {
+            token2id: j.model.vocab,
+            id2token,
+        })
+    }
+
+    /// Encode a raw phoneme string (whitespace-split tokens; unknown -> 0).
+    #[must_use]
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        text.split_whitespace()
+            .map(|t| self.token2id.get(t).copied().unwrap_or(0))
+            .collect()
+    }
+
+    /// Encode `|`-separated phoneme words -> (ids, tok2word, words).
+    #[must_use]
+    pub fn encode_grouped(&self, text: &str) -> (Vec<u32>, Vec<usize>, Vec<String>) {
+        let mut ids = Vec::new();
+        let mut tok2word = Vec::new();
+        let mut words = Vec::new();
+        for w in text.split('|') {
+            let w = w.trim();
+            if w.is_empty() {
+                continue;
+            }
+            words.push(w.to_string());
+            for t in w.split_whitespace() {
+                ids.push(self.token2id.get(t).copied().unwrap_or(0));
+                tok2word.push(words.len() - 1);
+            }
+        }
+        (ids, tok2word, words)
+    }
+
+    /// Piece for an id (for display).
+    #[must_use]
+    pub fn id_to_piece(&self, id: u32) -> String {
+        self.id2token.get(id as usize).cloned().unwrap_or_default()
+    }
+}
+
+/// Either tokenizer flavor, chosen by the bundle layout.
+pub enum AnyTokenizer {
+    Viterbi(PocketTokenizer),
+    WordLevel(WordLevelTokenizer),
+}
+
+impl AnyTokenizer {
+    #[must_use]
+    pub fn encode(&self, text: &str) -> Vec<u32> {
+        match self {
+            Self::Viterbi(t) => t.encode(text),
+            Self::WordLevel(t) => t.encode(text),
+        }
+    }
+
+    #[must_use]
+    pub fn id_to_piece(&self, id: u32) -> String {
+        match self {
+            Self::Viterbi(t) => t.id_to_piece(id),
+            Self::WordLevel(t) => t.id_to_piece(id),
+        }
+    }
+}

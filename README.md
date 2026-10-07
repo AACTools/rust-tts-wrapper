@@ -2,7 +2,7 @@
 
 Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
 
-## Engines (27 total)
+## Engines (28 total)
 
 | Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
 |--------|------|-------------|-----------|------------|-----------------|-----------------|
@@ -11,6 +11,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | SAPI (Windows) | Local | None | — (system plays) | — | Estimated (SAPI events) | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
 | floravox | Local (piper/MMS/Matcha/Kokoro ONNX — 1,100+ voices across ~1,100 languages) | Model dir | Streamed (per segment) | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
+| Pocket (Kyutai) | Local (phoneme ONNX bundle + any donor wav) | None | Frame-by-frame | Reference wav | **Measured** (attention tap) | Native SSML + IPA phonemes |
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
 | Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
 | Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
@@ -137,6 +138,51 @@ let CloneOutcome::Ready(handle) = cloner.clone_voice(&identity)? else { unreacha
 import → clone → list → speak → delete against a real export.
 
 End-to-end demo: `examples/voice-clone.rs`. Live test: `tests/cloning_live.rs` (`QWEN_API_KEY` + `QWEN_PV_ZIP`, `--ignored`).
+
+## Pocket TTS (offline phoneme voice cloning)
+
+`pocket-timing` feature — Kyutai pocket-tts as a fully local engine: clone a
+voice from any donor wav and speak **IPA phonemes** with attention-measured
+word boundaries (`estimated=false`). Enable with
+`--no-default-features --features pocket-timing`.
+
+```bash
+cargo run --release --no-default-features --features pocket-timing \
+  --example pocket-engine-demo -- <bundle_dir> <reference.wav> \
+  "w ˈɛ ɹ| ɪ z| ð ə| b æ θ ɹ u m"
+```
+
+Two bundle layouts are auto-detected:
+
+- **Sherpa 6L** (`lm_main*.onnx` + `vocab.json`): orthographic text,
+  Viterbi tokenizer
+- **Phoneme 24L** (`flow_lm_main*.onnx` + `bundle.json` +
+  `tokenizer4.json`): our published phoneme fine-tune
+  ([`willwade/pocket-tts-en-phonemes-24l`](https://huggingface.co/willwade/pocket-tts-en-phonemes-24l),
+  CC-BY-4.0), WordLevel whitespace tokenizer, `bos_before_voice.npy`
+  prepended to voice conditioning
+
+Phoneme input uses `|` to mark word boundaries (the model tokenizes single
+phones; the separators carry word grouping for the timing output):
+
+```
+"w ˈɛ ɹ| ɪ z| ð ə| b æ θ ɹ u m"  →  "Where is the bathroom"
+```
+
+SSML/SpeechMarkdown is compiled via floravox-ssml: `<break>` pauses become
+real silence between segments, `<mark>` events fire at exact positions.
+
+**Honest caveats (measured, 2026-10):**
+
+- Zero-shot cloning is timbre-approximate: donor style dominates — clean
+  narrator-style prompts read far more intelligibly than casual/filler-style
+  donors. Validate clones for intelligibility, not just similarity.
+- For a true personal voice, a ~600-step adaptation fine-tune on a 15-min
+  Personal Voice corpus embeds the speaker's timbre in the weights
+  (~$0.50 GPU; see `floravox/docs/PHONEME-POCKET.md` for the recipe and the
+  frozen-latent-stats requirement).
+- English (en-US phoneme inventory); first word of an utterance is
+  occasionally fragile; 1-step flow decode is intended.
 
 ## Formatting & Testing
 
@@ -371,6 +417,8 @@ cargo build --all-features
 - `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
 - `floravox` — floravox offline TTS (piper/MMS/Matcha/Kokoro ONNX voices, ~1,100 languages; native SSML — `<break>`/`<prosody>`/`<mark>`/`<phoneme>`/`<sub>` — with three-tier word timings: measured on patched voices, student sidecar, proportional. See the [floravox Voices](#floravox-voices) section)
 - `floravox-lexicons` — adds the lexicon+Phonetisaurus G2P chain and the `lang` credential that auto-fetches published bundles (non-English phoneme voices)
+- `pocket-timing` — PocketTtsEngine: Kyutai pocket-tts ONNX bundle with real attention-measured word boundaries, voice cloning from any donor wav, and IPA-phoneme input (see the [Pocket TTS](#pocket-tts-offline-phoneme-voice-cloning) section)
+- `cloning` — voice banking: import an Apple Personal Voice zip or LJSpeech corpus, enroll with cloud cloning engines (see [Voice cloning](#voice-cloning-experimental-cloning-feature))
 
 ### Lint & Test
 
@@ -451,13 +499,13 @@ cdylib; `make -C bindings/c test` builds, compiles the header with
 ## Architecture
 
 ```
-               TtsEngine (trait)
-                     |
-      +--------------+--------------+
-      |              |              |
-  SystemEngine   CloudEngine   SherpaOnnxEngine
-  (speech-       (20 cloud      (1300+ local
-  dispatcher)    providers)     models)
+                    TtsEngine (trait)
+                          |
+   +----------+----------+----------+----------+
+   |          |          |          |          |
+SystemEngine CloudEngine SherpaOnnx Floravox  PocketTts
+(speech-     (20 cloud   (1300+     (student  (cloning +
+dispatcher)  providers)  models)    fleet)    phonemes)
 ```
 
 Cloud engines use provider-specific `CloudConfig`:
@@ -551,9 +599,11 @@ pipeline into the SSML dialect floravox parses natively.
   neurally instead of letter-spelling. Chain order: lexicon →
   Phonetisaurus → ByT5 → letter spelling.
 
-wasm32 is planned but not yet available: ort-sys ships no wasm32
-binaries — the floravox web-demo plan bridges ORT to onnxruntime-web in
-a future `floravox-wasm` crate.
+wasm32 is available for the floravox offline engine via the published
+[`floravox-wasm`](https://crates.io/crates/floravox-wasm) crate (ort-web
+backend), consumed by the floravox-web demo; the JavaScript/Node package
+in `js/` (unified `speak()` across floravox + cloud engines) is built and
+awaiting `npm publish`.
 
 ## License
 

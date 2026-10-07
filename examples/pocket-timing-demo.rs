@@ -66,15 +66,38 @@ fn main() {
     );
 
     // word timings from the model's own attention
-    let words = word_boundaries(
-        &model.tokenizer,
-        &out.target_token_ids,
-        &out.text_attention,
-        0.08,
-    );
+    let words = match (&model.tokenizer, &out.grouped) {
+        (rust_tts_wrapper::pocket::tokenizer::AnyTokenizer::Viterbi(vt), None) => {
+            word_boundaries(vt, &out.target_token_ids, &out.text_attention, 0.08)
+                .into_iter()
+                .map(|w| (w.word, w.start_s, w.end_s))
+                .collect::<Vec<_>>()
+        }
+        (_, Some((tok2word, words))) => rust_tts_wrapper::pocket::word_boundaries_grouped(
+            words,
+            tok2word,
+            &out.text_attention,
+            0.08,
+        )
+        .into_iter()
+        .map(|w| (w.word, w.start_s, w.end_s))
+        .collect(),
+        (rust_tts_wrapper::pocket::tokenizer::AnyTokenizer::WordLevel(wt), None) => {
+            let ws: Vec<String> = out
+                .target_token_ids
+                .iter()
+                .map(|id| wt.id_to_piece(*id))
+                .collect();
+            let t2w: Vec<usize> = (0..ws.len()).collect();
+            rust_tts_wrapper::pocket::word_boundaries_grouped(&ws, &t2w, &out.text_attention, 0.08)
+                .into_iter()
+                .map(|w| (w.word, w.start_s, w.end_s))
+                .collect()
+        }
+    };
     println!("word timings (attention):");
     for w in &words {
-        println!("  {:?}: {:.2}-{:.2}s", w.word, w.start_s, w.end_s);
+        println!("  {:?}: {:.2}-{:.2}s", w.0, w.1, w.2);
     }
 
     // write 24k 16-bit wav
