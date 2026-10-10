@@ -3,7 +3,7 @@
 //! the engine itself links.
 
 /// Speaker-embedding size reported by the C++ pipeline (ECAPA x-vector).
-pub const EMBEDDING_SIZE: usize = 1024;
+pub(crate) const EMBEDDING_SIZE: usize = 1024;
 
 /// Qwen3-TTS's ten supported languages and their codec language token
 /// IDs (from qwen3-tts.cpp's main.cpp — the IDs are model constants).
@@ -52,13 +52,8 @@ pub fn language_id_for(voice_or_lang: &str) -> Option<i32> {
         .map(|(_, _, _, lid)| *lid)
 }
 
-/// Process-wide lock around every C++ entry point: the upstream
-/// library is NOT safe with concurrent `Qwen3Tts` instances in one
-/// process (GGML backend state is shared — concurrent engines corrupt
-/// the heap; observed as `corrupted double-linked list` under parallel
-/// test creation). Callers can create/destroy/speak from any threads;
 /// Decode an `emb:<base64>` voice string into raw embedding floats.
-#[cfg(feature = "qwen3-local")]
+#[cfg(any(feature = "qwen3-local", feature = "cloud"))]
 /// # Errors
 /// When the payload is not valid base64 or its byte length is not a
 /// multiple of 4 (f32 LE samples).
@@ -78,7 +73,7 @@ pub fn decode_embedding(v: &str) -> Result<Vec<f32>, String> {
 }
 
 /// Encode raw embedding floats into an `emb:<base64>` voice string.
-#[cfg(feature = "qwen3-local")]
+#[cfg(any(feature = "qwen3-local", feature = "cloud"))]
 #[must_use]
 pub fn encode_embedding(embedding: &[f32]) -> String {
     use base64::Engine as _;
@@ -134,7 +129,7 @@ mod tests {
         assert_eq!(id_to_iso639_3("en"), "eng");
     }
 
-    #[cfg(feature = "qwen3-local")]
+    #[cfg(any(feature = "qwen3-local", feature = "cloud"))]
     #[test]
     fn embedding_codec_round_trips() {
         let emb: Vec<f32> = (0..EMBEDDING_SIZE)

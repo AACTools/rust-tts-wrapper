@@ -44,10 +44,17 @@ impl VoiceCloning for Qwen3LocalCloner {
             ));
         };
         // The C API extracts embeddings from a WAV path: materialise the
-        // clip in the system temp dir (deleted after).
+        // clip in the system temp dir (deleted after). pid + nanos keeps
+        // concurrent clone_voice calls from racing on the file name.
         let wav = wav_bytes(&clip.pcm, clip.sample_rate);
-        let path =
-            std::env::temp_dir().join(format!("rust-tts-qwen3-emb-{}.wav", std::process::id()));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rust-tts-qwen3-emb-{}-{nanos}.wav",
+            std::process::id()
+        ));
         std::fs::write(&path, &wav).map_err(|e| TtsError(format!("write temp reference: {e}")))?;
         let result = self.engine.extract_embedding(&path.to_string_lossy());
         let _ = std::fs::remove_file(&path);
