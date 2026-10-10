@@ -9,6 +9,8 @@ use std::sync::Arc;
 use crate::avsynth_engine::AvSynthEngine;
 #[cfg(feature = "cloud")]
 use crate::cloud_engine;
+#[cfg(feature = "qwen3-local")]
+use crate::qwen3_local_engine::Qwen3LocalEngine;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 use crate::sapi_engine::SapiEngine;
 #[cfg(feature = "sherpaonnx")]
@@ -85,6 +87,32 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
                 return None;
             }
         }
+        "qwen3-local" => {
+            #[cfg(feature = "qwen3-local")]
+            {
+                let creds: std::collections::HashMap<String, String> =
+                    if credentials_json.is_empty() {
+                        std::collections::HashMap::new()
+                    } else {
+                        serde_json::from_str(credentials_json).unwrap_or_default()
+                    };
+                return match Qwen3LocalEngine::new(&creds) {
+                    Ok(engine) => Some(Arc::new(engine)),
+                    Err(e) => {
+                        eprintln!("Engine 'qwen3-local' failed to load: {e}");
+                        None
+                    }
+                };
+            }
+            #[cfg(not(feature = "qwen3-local"))]
+            {
+                eprintln!(
+                    "Engine 'qwen3-local' is not enabled in this build. \
+                     Rebuild with --features qwen3-local."
+                );
+                return None;
+            }
+        }
         "floravox" => {
             #[cfg(feature = "floravox")]
             {
@@ -146,6 +174,7 @@ pub fn engine_count() -> usize {
 /// Return a list of all registered engine descriptors.
 #[must_use]
 #[allow(clippy::vec_init_then_push)]
+#[allow(clippy::too_many_lines)]
 pub fn engine_list() -> Vec<EngineDescriptor> {
     #[allow(unused_mut)]
     let mut engines = Vec::new();
@@ -180,6 +209,14 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         name: "Sherpa-ONNX".into(),
         needs_credentials: false,
         credential_keys_json: "[]".into(),
+    });
+
+    #[cfg(feature = "qwen3-local")]
+    engines.push(EngineDescriptor {
+        id: "qwen3-local".into(),
+        name: "Qwen3-TTS local (qwen3-tts.cpp)".into(),
+        needs_credentials: true,
+        credential_keys_json: r#"["modelsDir","threads","temperature","topK","maxTokens"]"#.into(),
     });
 
     #[cfg(feature = "floravox")]

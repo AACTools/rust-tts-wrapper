@@ -94,6 +94,7 @@ if let Some(spec) = cloner.consent_spec() {
 ```
 - Personal Voice exports are audio-only (no transcripts); attach them via `VoiceCorpus::phrases` or ASR when an engine needs them (Qwen doesn't).
 - Consent-gated providers are implemented behind their real-world gates: **Google Chirp 3 ICV** (`generateVoiceCloningKey`, allow-listed projects — `consent_spec()` returns the exact script to record) and **Azure Personal Voice** (consent → personal voice → long-running-operation `poll_clone`; intake-gated at aka.ms/customneural; requires a `projectId` Custom Voice project). Azure cloned voices speak via the `"{base_model}/{speakerProfileId}"` voice-string convention (`mstts:ttsembedding`). Neither is live-testable without vendor approval; request shapes are doc-verified and unit-tested.
+- **qwen3-local** cloner (with `--features qwen3-local,cloning`): zero-shot and fully offline — extracts an ECAPA speaker embedding from the identity's best clip; the resulting `emb:` handle is reused per utterance without re-encoding. No upload, no consent gate, no quota (live-verified).
 - Job-based providers (Murf, Resemble) are not implemented yet.
 - Cloning someone's voice requires their permission; banked-voice programs' licensed synthetic voices must not be re-cloned.
 
