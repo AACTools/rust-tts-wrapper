@@ -66,10 +66,8 @@ pub fn decode_embedding(v: &str) -> Result<Vec<f32>, String> {
     if bytes.len() % 4 != 0 {
         return Err("embedding byte length not a multiple of 4".into());
     }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    let (chunks, _rem) = bytes.as_chunks::<4>();
+    Ok(chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
 
 /// Encode raw embedding floats into an `emb:<base64>` voice string.
@@ -91,8 +89,8 @@ pub fn encode_embedding(embedding: &[f32]) -> String {
 #[must_use]
 pub fn apply_gain(pcm: &[u8], gain: f32) -> Vec<u8> {
     let mut out = Vec::with_capacity(pcm.len());
-    for s in pcm.chunks_exact(2) {
-        let sample = i16::from_le_bytes([s[0], s[1]]);
+    for s in pcm.as_chunks::<2>().0 {
+        let sample = i16::from_le_bytes(*s);
         #[allow(clippy::cast_possible_truncation)]
         let scaled = (f32::from(sample) * gain).clamp(-32767.0, 32767.0) as i16;
         out.extend_from_slice(&scaled.to_le_bytes());
