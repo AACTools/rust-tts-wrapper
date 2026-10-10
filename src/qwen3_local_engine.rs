@@ -22,6 +22,10 @@
 //! voice-cloning plan notes (kept out of the repository).
 
 use crate::engine::{estimate_word_boundaries, strip_ssml_to_text, TtsEngine};
+use crate::qwen3_local_support::{
+    apply_gain, decode_embedding, id_to_iso639_3, language_id_for, supported_languages,
+    EMBEDDING_SIZE,
+};
 use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -32,6 +36,12 @@ use std::os::raw::{c_char, c_float, c_int};
 // Wrapped in a macro: cbindgen's synth parser cannot expand
 // macro_rules!, keeping these external-library bindings out of the
 // generated C header (rustc expands this normally).
+/// Process-wide lock around every C++ entry point (moved rationale:
+/// upstream is not concurrent-safe — see qwen3_local_support for the
+/// testable pure helpers). Callers can create/destroy/speak from any
+/// threads; this serializes the calls.
+static CPP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 macro_rules! qwen3_ffi {
     () => {
         #[derive(Clone)]
@@ -97,63 +107,6 @@ macro_rules! qwen3_ffi {
 
 qwen3_ffi!();
 
-/// Speaker-embedding size reported by the C++ pipeline (ECAPA x-vector).
-pub(crate) const EMBEDDING_SIZE: usize = 1024;
-
-/// Qwen3-TTS's ten supported languages and their codec language token
-/// IDs (from qwen3-tts.cpp's main.cpp — the IDs are model constants).
-#[must_use]
-pub fn supported_languages() -> &'static [(&'static str, &'static str, &'static str, i32)] {
-    // (id, bcp47, display, language_id) — id is the voice string users
-    // pass to set_voice/speak.
-    &[
-        ("en", "en", "English", 2050),
-        ("zh", "zh-CN", "Chinese (Mandarin)", 2055),
-        ("ja", "ja", "Japanese", 2058),
-        ("ko", "ko", "Korean", 2064),
-        ("de", "de", "German", 2053),
-        ("fr", "fr", "French", 2061),
-        ("ru", "ru", "Russian", 2069),
-        ("es", "es", "Spanish", 2054),
-        ("it", "it", "Italian", 2070),
-        ("pt", "pt", "Portuguese", 2071),
-    ]
-}
-
-fn id_to_iso639_3(id: &str) -> String {
-    match id {
-        "zh" => "zho",
-        "ja" => "jpn",
-        "ko" => "kor",
-        "de" => "deu",
-        "fr" => "fra",
-        "ru" => "rus",
-        "es" => "spa",
-        "it" => "ita",
-        "pt" => "por",
-        _ => "eng",
-    }
-    .to_string()
-}
-
-fn language_id_for(voice_or_lang: &str) -> Option<i32> {
-    let needle = voice_or_lang.trim().to_lowercase();
-    let needle = needle.split(['-', '_']).next().unwrap_or(&needle);
-    supported_languages()
-        .iter()
-        .find(|(id, _, _, _)| *id == needle)
-        .map(|(_, _, _, lid)| *lid)
-}
-
-/// Process-wide lock around every C++ entry point: the upstream
-/// library is NOT safe with concurrent `Qwen3Tts` instances in one
-/// process (GGML backend state is shared — concurrent engines corrupt
-/// the heap; observed as `corrupted double-linked list` under parallel
-/// test creation). Callers can create/destroy/speak from any threads;
-/// this serializes the calls. Drop this if upstream ever isolates
-/// backend state per instance.
-static CPP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// The local engine. One `Qwen3Tts` per model directory; synthesis is
 /// CPU-bound and single-utterance (the C++ pipeline is not re-entrant).
 pub struct Qwen3LocalEngine {
@@ -164,7 +117,12 @@ pub struct Qwen3LocalEngine {
 impl std::fmt::Debug for Qwen3LocalEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Qwen3LocalEngine")
-            .field("loaded", &unsafe { qwen3_tts_is_loaded(self.tts) != 0 })
+            .field("loaded", {
+                let _guard = CPP_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                &(unsafe { qwen3_tts_is_loaded(self.tts) != 0 })
+            })
             .finish_non_exhaustive()
     }
 }
@@ -368,48 +326,6 @@ impl Drop for Qwen3LocalEngine {
     }
 }
 
-/// Decode an `emb:<base64>` voice string into raw embedding floats.
-pub(crate) fn decode_embedding(v: &str) -> Result<Vec<f32>, String> {
-    use base64::Engine as _;
-    let b64 = v.strip_prefix("emb:").unwrap_or(v);
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(b64)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() % 4 != 0 {
-        return Err("embedding byte length not a multiple of 4".into());
-    }
-    Ok(bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
-}
-
-/// Encode raw embedding floats into an `emb:<base64>` voice string.
-#[must_use]
-pub(crate) fn encode_embedding(embedding: &[f32]) -> String {
-    use base64::Engine as _;
-    let mut bytes = Vec::with_capacity(embedding.len() * 4);
-    for f in embedding {
-        bytes.extend_from_slice(&f.to_le_bytes());
-    }
-    format!(
-        "emb:{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    )
-}
-
-/// Linear PCM16 gain in the [-1,1]-normalised domain.
-fn apply_gain(pcm: &[u8], gain: f32) -> Vec<u8> {
-    let mut out = Vec::with_capacity(pcm.len());
-    for s in pcm.chunks_exact(2) {
-        let sample = i16::from_le_bytes([s[0], s[1]]);
-        #[allow(clippy::cast_possible_truncation)]
-        let scaled = (f32::from(sample) * gain).clamp(-32767.0, 32767.0) as i16;
-        out.extend_from_slice(&scaled.to_le_bytes());
-    }
-    out
-}
-
 impl TtsEngine for Qwen3LocalEngine {
     fn speak(
         &self,
@@ -422,13 +338,20 @@ impl TtsEngine for Qwen3LocalEngine {
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
         _on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
+        // SSML-in: strip once here — both the C++ input and the word
+        // boundary estimates use the plain text (tags are never words).
+        let plain = if text.trim_start().starts_with('<') {
+            strip_ssml_to_text(text)
+        } else {
+            text.to_string()
+        };
         let params = self.params.clone();
-        let (pcm, rate) = self.synthesize_to_pcm16(text, voice, params)?;
+        let (pcm, rate) = self.synthesize_to_pcm16(&plain, voice, params)?;
         // Volume is a real control here: linear PCM gain (clamped),
         // applied before delivery. Rate/pitch have no pipeline control
         // (see the engine docs).
         let pcm = if (volume - 1.0).abs() > f32::EPSILON {
-            apply_gain(&pcm, volume.clamp(0.0, 2.0))
+            apply_gain(&pcm, volume.clamp(0.0, 4.0))
         } else {
             pcm
         };
@@ -441,7 +364,7 @@ impl TtsEngine for Qwen3LocalEngine {
         if let Some(cb) = on_boundary.as_mut() {
             // No timestamps from the C++ pipeline: scaled estimates
             // anchored to the actual duration.
-            let boundaries: Vec<WordBoundary> = estimate_word_boundaries(text);
+            let boundaries: Vec<WordBoundary> = estimate_word_boundaries(&plain);
             #[allow(clippy::cast_precision_loss)]
             let total_secs = pcm.len() as f32 / (rate as f32 * 2.0);
             #[allow(clippy::cast_precision_loss)]
@@ -451,7 +374,9 @@ impl TtsEngine for Qwen3LocalEngine {
                 let start = total_secs * (i as f32) / words;
                 #[allow(clippy::cast_precision_loss)]
                 let end = total_secs * ((i + 1) as f32) / words;
-                cb(&b.text, start, end, 0, 0, true);
+                // No source-offset mapping exists (no timestamps):
+                // -1 per the callback contract for unknown offsets.
+                cb(&b.text, start, end, -1, -1, true);
             }
         }
         Ok(())
@@ -522,6 +447,9 @@ impl TtsEngine for Qwen3LocalEngine {
     /// Models actually loaded (mirrors the cloud engines' credential
     /// check — for a local engine this is "are the GGUFs valid").
     fn check_credentials(&self) -> TtsResult<bool> {
+        let _guard = CPP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         Ok(unsafe { qwen3_tts_is_loaded(self.tts) != 0 })
     }
 }

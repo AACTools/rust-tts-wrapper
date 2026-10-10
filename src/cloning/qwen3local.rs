@@ -10,7 +10,8 @@
 use super::{
     select_clips, wav_bytes, CloneHandle, CloneOutcome, CloningMode, VoiceCloning, VoiceIdentity,
 };
-use crate::qwen3_local_engine::{encode_embedding, Qwen3LocalEngine};
+use crate::qwen3_local_engine::Qwen3LocalEngine;
+use crate::qwen3_local_support::encode_embedding;
 use crate::types::{TtsError, TtsResult};
 use std::collections::HashMap;
 

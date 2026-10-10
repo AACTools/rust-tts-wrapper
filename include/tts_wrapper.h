@@ -6,6 +6,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/**
+ * Speaker-embedding size reported by the C++ pipeline (ECAPA x-vector).
+ */
+#define EMBEDDING_SIZE 1024
+
 typedef struct tts_ctx tts_ctx;
 
 /**

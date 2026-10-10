@@ -1,4 +1,7 @@
 #![cfg(feature = "qwen3-local")]
+// The clone-roundtrip test additionally needs the cloning feature; the
+// file as a whole only needs the engine (an --all-targets build without
+// `cloning` must still compile).
 
 //! Live local Qwen3-TTS tests — no network, but need the built C++
 //! library and converted GGUF models. `#[ignore]`-d by default so
@@ -11,6 +14,7 @@
 //!     cargo test --features qwen3-local,cloning --test qwen3_local_live -- --ignored --nocapture
 //! ```
 
+#[cfg(feature = "cloning")]
 use rust_tts_wrapper::cloning::{create_cloner, AudioClip, CloneOutcome, VoiceIdentityBuilder};
 use rust_tts_wrapper::factory::create_engine;
 use std::sync::{Arc, Mutex};
@@ -64,6 +68,7 @@ fn qwen3_local_synthesizes_and_estimates_boundaries() {
 }
 
 #[test]
+#[cfg(feature = "cloning")]
 #[ignore = "needs QWEN3_TTS_LIB + QWEN3_TTS_MODELS + QWEN3_TTS_REF (reference wav)"]
 fn qwen3_local_zero_shot_clone_roundtrip() {
     let Some(creds) = creds() else {

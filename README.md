@@ -10,6 +10,7 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | AVSpeech (macOS) | Local | None | — (system plays) | — | Estimated | — |
 | SAPI (Windows) | Local | None | — (system plays) | — | Estimated (SAPI events) | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
+| Qwen3-TTS local | Local (qwen3-tts.cpp, GGML) | Model dir (+ lib via QWEN3_TTS_LIB) | After generation | 10 languages + any reference audio | Estimated | Stripped |
 | floravox | Local (piper/MMS/Matcha/Kokoro ONNX — 1,100+ voices across ~1,100 languages) | Model dir | Streamed (per segment) | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
 | Pocket (Kyutai) | Local (phoneme ONNX bundle + any donor wav) | None | Frame-by-frame | Reference wav | **Measured** (attention tap) | Native SSML + IPA phonemes |
 | Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
@@ -36,6 +37,28 @@ Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper]
 | ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
 
 - **Streaming**: Audio is delivered through the `on_audio` callback in chunks, as it becomes available. REST engines stream the response body as bytes arrive over the network (MP3 decoded to PCM16 mono incrementally on a background reader thread; raw-PCM providers pass straight through); Azure and Edge deliver real-time over WebSockets; Sherpa-ONNX delivers each sentence batch as it is synthesised (via the generate progress callback — a single-sentence utterance still completes before delivery). Exceptions: Google and ElevenLabs `with-timestamps` return one JSON document with base64 audio, so they can only deliver after the response completes (an API limitation, not buffering). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
+
+## Qwen3-TTS local (`qwen3-local` feature)
+
+Third offline engine — [qwen3-tts.cpp](https://github.com/predict-woo/qwen3-tts.cpp) (MIT; models Apache-2.0), and the only local engine with **zero-shot voice cloning**. The C++ library is not vendored: build it once, then point the build at it.
+
+```bash
+scripts/build-qwen3-local.sh                 # clones + builds GGML into ~/spikes
+cd ~/spikes/qwen3-tts.cpp && python scripts/setup_pipeline_models.py   # one-time GGUF conversion
+QWEN3_TTS_LIB=~/spikes/qwen3-tts.cpp cargo build --features qwen3-local
+```
+
+```rust
+// Speak with any reference audio — voice = path to a WAV:
+engine.speak("Hello", Some("/path/to/reference.wav"), 1.0, 1.0, 1.0, Some(&mut cb), None, None)?;
+// Or a language voice ("en", "fr", … — the 10 Qwen locales), "default",
+// or an emb:<base64> speaker-embedding handle from the qwen3-local
+// cloner (--features qwen3-local,cloning): embedding extracted once,
+// reused per utterance. Fully offline — reference audio never leaves
+// the machine.
+```
+
+Behaviour: PCM16 mono 24 kHz output; SSML-in is stripped; volume is real PCM gain; rate/pitch have no upstream control; word boundaries are duration-scaled estimates; engine calls are serialized (upstream is not concurrent-safe); CPU synthesis is batch-grade (~0.1× realtime on 6 cores — use Metal/CUDA builds for speed). Cloning is timbre-grade: the upstream x-vector mode carries the speaker's timbre, while accent/prosody come from the model's language prior.
 
 ## Voice cloning (experimental, `cloning` feature)
 

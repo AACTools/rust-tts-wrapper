@@ -89,7 +89,7 @@ display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 # clones and builds predict-woo/qwen3-tts.cpp). Opt-in like
 # speech-dispatcher: enabling the feature without the lib fails the
 # build with instructions.
-qwen3-local = ["dep:serde_json", "dep:base64", "display_names"]
+qwen3-local = ["dep:serde_json", "dep:base64"]
 # Voice cloning: VoiceIdentity/VoiceCloning trait, LJSpeech corpus, Apple
 # Personal Voice export import, and enrollment clients for the instant
 # cloners (Qwen voice-enrollment, ElevenLabs IVC). Needs cloud (HTTP +
