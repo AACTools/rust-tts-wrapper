@@ -44,7 +44,7 @@ default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
 system = ["speech-dispatcher"]
 # cloud-core: the pure provider shapes shared by native + wasm (config,
 # sigv4, request builders, response parsers) — no HTTP stack
-cloud-core = ["dep:serde_json", "base64", "speechmarkdown", "sha2"]
+cloud-core = ["dep:serde_json", "dep:base64", "speechmarkdown", "dep:sha2"]
 cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 # pocket-tts with REAL word timings: our own streaming loop over the tapped
 # Kyutai ONNX graphs (attention = the model's own alignment)
@@ -83,6 +83,13 @@ sapi = ["windows", "speechmarkdown"]
 # "af-ZA") via ICU4X. Used by all voice mappers so consumers get consistent
 # names regardless of engine.
 display_names = ["dep:icu_displaynames", "dep:icu_locid"]
+# Local Qwen3-TTS via qwen3-tts.cpp (GGML). The C++ library is NOT
+# vendored: set QWEN3_TTS_LIB to the directory containing the built
+# libqwen3tts_shared + headers (see scripts/build-qwen3-local.sh, which
+# clones and builds predict-woo/qwen3-tts.cpp). Opt-in like
+# speech-dispatcher: enabling the feature without the lib fails the
+# build with instructions.
+qwen3-local = ["dep:serde_json", "dep:base64"]
 # Voice cloning: VoiceIdentity/VoiceCloning trait, LJSpeech corpus, Apple
 # Personal Voice export import, and enrollment clients for the instant
 # cloners (Qwen voice-enrollment, ElevenLabs IVC). Needs cloud (HTTP +

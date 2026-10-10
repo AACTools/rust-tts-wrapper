@@ -109,6 +109,12 @@ mod sherpaonnx_tests {
             "",
         ];
         for (id, info) in &models {
+            // floravox-* types are driven by the floravox engine (its
+            // student sidecars), not sherpa-onnx — registry 1.1.0 added
+            // them; they are deliberately absent from this engine.
+            if info.model_type.starts_with("floravox") {
+                continue;
+            }
             assert!(
                 supported.contains(&info.model_type.as_str()),
                 "model '{}' has unsupported model_type '{}'. \

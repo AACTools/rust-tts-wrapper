@@ -62,6 +62,17 @@ pub mod floravox_engine;
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpaonnx_engine;
+
+/// Pure helpers for the qwen3-local engine — always compiled (and
+/// unit-tested in CI) even when the engine feature is off.
+pub mod qwen3_local_support;
+
+/// Local Qwen3-TTS via qwen3-tts.cpp (GGML). Requires the user-built C++
+/// library — see `scripts/build-qwen3-local.sh` and the feature docs in
+/// Cargo.toml. Zero-shot voice cloning: pass a reference WAV path (or an
+/// `emb:` handle from the cloning cloner) as the voice string.
+#[cfg(feature = "qwen3-local")]
+pub mod qwen3_local_engine;
 #[cfg(all(feature = "system", target_os = "linux"))]
 mod system_engine;
 pub mod timeline;

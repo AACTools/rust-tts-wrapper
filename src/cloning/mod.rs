@@ -32,6 +32,8 @@ mod corpus;
 mod elevenlabs;
 mod google;
 mod qwen;
+#[cfg(feature = "qwen3-local")]
+mod qwen3local;
 mod registry;
 
 pub use corpus::VoiceCorpus;
@@ -411,6 +413,8 @@ pub trait VoiceCloning: Send + Sync {
 /// support.
 #[must_use]
 pub fn create_cloner(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn VoiceCloning>> {
+    // (qwen3-local loads models and may fail — handled via the inner
+    // Result, mapped to None with the error printed.)
     let creds: std::collections::HashMap<String, String> = if credentials_json.is_empty() {
         std::collections::HashMap::new()
     } else {
@@ -425,6 +429,14 @@ pub fn create_cloner(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
         "google" => Some(Arc::new(google::GoogleCloner::new(&creds))),
         #[cfg(feature = "cloning")]
         "azure" => Some(Arc::new(azure::AzureCloner::new(&creds))),
+        #[cfg(all(feature = "cloning", feature = "qwen3-local"))]
+        "qwen3-local" => match qwen3local::Qwen3LocalCloner::new(&creds) {
+            Ok(cloner) => Some(Arc::new(cloner)),
+            Err(e) => {
+                eprintln!("qwen3-local cloner failed to load: {e}");
+                None
+            }
+        },
         _ => None,
     }
 }
@@ -439,6 +451,8 @@ pub fn cloning_engines() -> Vec<&'static str> {
         ids.push("elevenlabs");
         ids.push("google");
         ids.push("azure");
+        #[cfg(feature = "qwen3-local")]
+        ids.push("qwen3-local");
     }
     ids
 }
