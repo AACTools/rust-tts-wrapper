@@ -104,7 +104,62 @@ impl PocketTokenizer {
 pub struct WordLevelTokenizer {
     token2id: HashMap<String, u32>,
     id2token: Vec<String>,
+    /// v6-family vocabularies use split conventions (d ʒ, ɛ ɹ) while the
+    /// upstream G2P emits merged symbols (dʒ, ɛɹ). Built at load time only
+    /// for symbols the vocab lacks, so v4 bundles are untouched.
+    split_map: HashMap<String, &'static [&'static str]>,
 }
+
+/// (merged symbol, split sequence) — applied when the merged form is absent
+/// from the vocab but every split piece is present.
+const CONVENTION_SPLITS: &[(&str, &[&str])] = &[
+    ("dʒ", &["d", "ʒ"]),
+    ("tʃ", &["t", "ʃ"]),
+    ("aɪə", &["aɪ", "ə"]),
+    ("aɪɚ", &["aɪ", "ɚ"]),
+    ("iə", &["i", "ə"]),
+    ("o", &["oʊ"]),
+    ("oɹ", &["oʊ", "ɹ"]),
+    ("r", &["ɹ"]),
+    ("ɐ", &["ʌ"]),
+    ("ɑɹ", &["ɑ", "ɹ"]),
+    ("ɔɹ", &["ɔ", "ɹ"]),
+    ("ɔ̃", &["ɔ"]),
+    ("əl", &["ə", "l"]),
+    ("ɛɹ", &["ɛ", "ɹ"]),
+    ("ɪɹ", &["ɪ", "ɹ"]),
+    ("ʊɹ", &["ʊ", "ɹ"]),
+    ("n̩", &["n"]),
+    ("ɾ", &["t"]),
+    ("ᵻ", &["ɪ"]),
+    ("x", &["k"]),
+    ("ç", &["ʃ"]),
+    ("ɬ", &["l"]),
+    ("ɡʲ", &["ɡ", "j"]),
+    ("ˈo", &["ˈoʊ"]),
+    ("ˈoɹ", &["ˈoʊ", "ɹ"]),
+    ("ˈɑɹ", &["ˈɑ", "ɹ"]),
+    ("ˈɑ̃", &["ˈæ"]),
+    ("ˈɔɹ", &["ˈɔ", "ɹ"]),
+    ("ˈɛɹ", &["ˈɛ", "ɹ"]),
+    ("ˈɪɹ", &["ˈɪ", "ɹ"]),
+    ("ˈʊɹ", &["ˈʊ", "ɹ"]),
+    ("ˈaɪə", &["ˈaɪ", "ə"]),
+    ("ˈaɪɚ", &["ˈaɪ", "ɚ"]),
+    ("ˈiə", &["ˈi", "ə"]),
+    ("ˌo", &["ˌoʊ"]),
+    ("ˌoɹ", &["ˌoʊ", "ɹ"]),
+    ("ˌɐ", &["ˌʌ"]),
+    ("ˌɑɹ", &["ˌɑ", "ɹ"]),
+    ("ˌɔɹ", &["ˌɔ", "ɹ"]),
+    ("ˌɛɹ", &["ˌɛ", "ɹ"]),
+    ("ˌɪɹ", &["ˌɪ", "ɹ"]),
+    ("ˌʊɹ", &["ˌʊ", "ɹ"]),
+    ("ˌaɪə", &["ˌaɪ", "ə"]),
+    ("ˌaɪɚ", &["ˌaɪ", "ɚ"]),
+    ("ˌiə", &["ˌi", "ə"]),
+    ("ˌn̩", &["ˌn"]),
+];
 
 #[derive(serde::Deserialize)]
 struct TokenizersJson {
@@ -133,9 +188,18 @@ impl WordLevelTokenizer {
                 slot.clone_from(tok);
             }
         }
+        let mut split_map = HashMap::new();
+        for (from, to) in CONVENTION_SPLITS {
+            if !j.model.vocab.contains_key(*from)
+                && to.iter().all(|p| j.model.vocab.contains_key(*p))
+            {
+                split_map.insert((*from).to_string(), *to);
+            }
+        }
         Ok(Self {
             token2id: j.model.vocab,
             id2token,
+            split_map,
         })
     }
 
@@ -143,8 +207,18 @@ impl WordLevelTokenizer {
     #[must_use]
     pub fn encode(&self, text: &str) -> Vec<u32> {
         text.split_whitespace()
+            .flat_map(|t| self.split_seq(t))
             .map(|t| self.token2id.get(t).copied().unwrap_or(0))
             .collect()
+    }
+
+    /// One input token -> 1..n vocab tokens (convention splits applied).
+    #[must_use]
+    fn split_seq<'a>(&'a self, t: &'a str) -> Vec<&'a str> {
+        match self.split_map.get(t) {
+            Some(seq) => seq.iter().copied().collect(),
+            None => vec![t],
+        }
     }
 
     /// Encode `|`-separated phoneme words -> (ids, tok2word, words).
@@ -160,8 +234,10 @@ impl WordLevelTokenizer {
             }
             words.push(w.to_string());
             for t in w.split_whitespace() {
-                ids.push(self.token2id.get(t).copied().unwrap_or(0));
-                tok2word.push(words.len() - 1);
+                for piece in self.split_seq(t) {
+                    ids.push(self.token2id.get(piece).copied().unwrap_or(0));
+                    tok2word.push(words.len() - 1);
+                }
             }
         }
         (ids, tok2word, words)

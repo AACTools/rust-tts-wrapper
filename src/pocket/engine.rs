@@ -79,8 +79,8 @@ impl PocketTtsEngine {
             reference_audio: Mutex::new(reference_audio),
             generation: AtomicU64::new(0),
             stop_flag: AtomicBool::new(false),
-            temperature: 0.7,
-            num_steps: 4,
+            temperature: 0.3,
+            num_steps: 1,
             max_frames: 500,
         }
     }
