@@ -269,13 +269,24 @@ impl PocketTtsModel {
                     && !n.starts_with("out_state")
             })
             .collect();
+        // phoneme graphs: attention-tap layer range differs per family —
+        // v4 (vocab 119) tracks at layers 8-15, v6 (vocab 84) at 10-17
+        // (recalibrated 2026-10-11 against whisper word timestamps on
+        // will26r; 8-15 collapses mid-sentence on v6)
+        let tap_range: std::ops::Range<usize> = match &tokenizer {
+            crate::pocket::tokenizer::AnyTokenizer::WordLevel(w)
+                if w.vocab_size() <= 100 =>
+            {
+                10..18
+            }
+            _ => 8..16,
+        };
         let lm_attn_names = if let Some(six) = tap_names
             .iter()
             .find(|n| n.contains("layers.3") && n.contains("Softmax"))
         {
             vec![six.clone()]
         } else {
-            // phoneme graphs: layers 8-15 mean (validated monotonic);
             // fall back to every tap if the suffix parse fails
             let picked: Vec<String> = tap_names
                 .iter()
@@ -283,7 +294,7 @@ impl PocketTtsModel {
                     n.rsplit('_')
                         .next()
                         .and_then(|s| s.parse::<usize>().ok())
-                        .is_some_and(|i| (8..16).contains(&i))
+                        .is_some_and(|i| tap_range.contains(&i))
                 })
                 .cloned()
                 .collect();

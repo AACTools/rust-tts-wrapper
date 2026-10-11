@@ -248,6 +248,12 @@ impl WordLevelTokenizer {
     pub fn id_to_piece(&self, id: u32) -> String {
         self.id2token.get(id as usize).cloned().unwrap_or_default()
     }
+
+    /// Vocab size (model-family probe: v4 phoneme = 119, v6 = 84).
+    #[must_use]
+    pub fn vocab_size(&self) -> usize {
+        self.token2id.len()
+    }
 }
 
 /// Either tokenizer flavor, chosen by the bundle layout.
