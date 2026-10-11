@@ -135,7 +135,11 @@ impl PocketTtsEngine {
                 .trim();
             let mut out = String::from("<speak>");
             for part in inner.split('|') {
-                let part = part.trim();
+                // strip punctuation that would glue to phones ("m." -> unk)
+                let part = part
+                    .trim()
+                    .trim_matches(|c: char| ".,!?;:".contains(c))
+                    .trim();
                 if part.is_empty() {
                     continue;
                 }
@@ -186,10 +190,16 @@ impl PocketTtsEngine {
                         };
                         // raw phoneme input may carry '|' word groups; the
                         // SSML tokenizer only splits whitespace, so pipes
-                        // arrive glued to phones — re-split into groups
+                        // arrive glued to phones — re-split into groups,
+                        // stripping punctuation that would glue to phones
+                        // ("m." -> unk token) — prosody is carried by breaks
+                        // in phoneme mode, not by marks
                         if spoken.contains('|') {
                             for part in spoken.split('|') {
-                                let part = part.trim();
+                                let part = part
+                                    .trim()
+                                    .trim_matches(|c: char| ".,!?;:".contains(c))
+                                    .trim();
                                 if !part.is_empty() {
                                     segs.last_mut()
                                         .expect("always one")
@@ -359,6 +369,13 @@ impl PocketTtsEngine {
                 name: name.clone(),
                 t_s: f64::from(samples.len() as u32) as f32 / f64::from(sr) as f32,
             });
+        }
+
+        // fade-in: the streaming mimi decoder starts hot on the first chunk
+        // and clicks (measured on will26r, 2026-10-11). 10 ms ramp.
+        let fade: usize = ((sr as usize) / 100).min(samples.len());
+        for (i, s) in samples.iter_mut().take(fade).enumerate() {
+            *s *= i as f32 / fade as f32;
         }
 
         Ok(SynthesisResult {
