@@ -1149,7 +1149,7 @@ pub(crate) fn test_cartesia_config_matrix() {
     assert_eq!(cfg.synth_url, "https://api.cartesia.ai/tts/bytes");
     assert_eq!(cfg.auth_header, "X-API-Key");
     assert_eq!(cfg.voice_param, "voice_id");
-    assert_eq!(cfg.model_default.as_deref(), Some("sonic-2"));
+    assert_eq!(cfg.model_default.as_deref(), Some("sonic-3.6"));
     assert_eq!(
         cfg.voices_url.as_deref(),
         Some("https://api.cartesia.ai/voices")
