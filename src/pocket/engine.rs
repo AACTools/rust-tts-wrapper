@@ -188,6 +188,27 @@ impl PocketTtsEngine {
                             _ if w.spoken.is_empty() => w.text.clone(),
                             _ => w.spoken.clone(),
                         };
+                        // `<say-as interpret-as="...">`: expand locally
+                        // (characters/cardinal/ordinal/date/time/currency/
+                        // telephone) — pocket has no engine-side SSML
+                        // semantics, so a bare `(5)[cardinal]` would speak
+                        // as written. Expanded words carry the source span
+                        // so boundary events highlight the typed text.
+                        if w.phonemes.as_deref().unwrap_or_default().is_empty()
+                            && !matches!(w.say_as, floravox_ssml::SayAs::None | floravox_ssml::SayAs::Other)
+                        {
+                            for ex in crate::ssml_expand::expand_word(
+                                &spoken,
+                                w.char_span.clone(),
+                                w.say_as,
+                            ) {
+                                segs.last_mut()
+                                    .expect("always one")
+                                    .words
+                                    .push(ex.spoken);
+                            }
+                            continue;
+                        }
                         // raw phoneme input may carry '|' word groups; the
                         // SSML tokenizer only splits whitespace, so pipes
                         // arrive glued to phones — re-split into groups,

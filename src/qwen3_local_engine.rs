@@ -22,6 +22,7 @@
 //! voice-cloning plan notes (kept out of the repository).
 
 use crate::engine::{estimate_word_boundaries, strip_ssml_to_text, TtsEngine};
+use crate::ssml_expand::expand_ssml_to_text;
 use crate::qwen3_local_support::{
     apply_gain, decode_embedding, id_to_iso639_3, language_id_for, supported_languages,
     EMBEDDING_SIZE,
@@ -203,9 +204,9 @@ impl Qwen3LocalEngine {
         voice: Option<&str>,
         mut params: Qwen3TtsParams,
     ) -> TtsResult<(Vec<u8>, i32)> {
-        // SSML-in: strip tags the pipeline would read aloud.
+        // SSML-in: interpret say-as/sub/phoneme locally, then strip.
         let plain = if text.trim_start().starts_with('<') {
-            strip_ssml_to_text(text)
+            plain_text_for_qwen(text)
         } else {
             text.to_string()
         };
@@ -326,6 +327,23 @@ impl Drop for Qwen3LocalEngine {
     }
 }
 
+
+/// SSML-in for the qwen pipeline: the C++ side reads tags aloud, so
+/// interpret the document locally first — `<say-as>` variants expand to
+/// spoken words, `<sub alias>` substitutes, `<phoneme>` keeps its display
+/// text. Falls back to plain tag-stripping for malformed documents.
+#[cfg(feature = "ssml-expand")]
+fn plain_text_for_qwen(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.to_ascii_lowercase().starts_with("<speak") {
+        if let Some(expanded) = expand_ssml_to_text(trimmed) {
+            return expanded;
+        }
+        return strip_ssml_to_text(trimmed);
+    }
+    text.to_string()
+}
+
 impl TtsEngine for Qwen3LocalEngine {
     fn speak(
         &self,
@@ -341,7 +359,7 @@ impl TtsEngine for Qwen3LocalEngine {
         // SSML-in: strip once here — both the C++ input and the word
         // boundary estimates use the plain text (tags are never words).
         let plain = if text.trim_start().starts_with('<') {
-            strip_ssml_to_text(text)
+            plain_text_for_qwen(text)
         } else {
             text.to_string()
         };

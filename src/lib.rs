@@ -34,6 +34,8 @@
 #[cfg(all(feature = "avsynth", target_os = "macos"))]
 mod avsynth_engine;
 pub mod boundaries;
+#[cfg(feature = "ssml-expand")]
+pub mod ssml_expand;
 
 /// Voice cloning: bank a voice once (Personal Voice export / LJSpeech
 /// corpus), enroll it with cloning-capable engines, speak it everywhere.
