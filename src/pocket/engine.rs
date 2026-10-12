@@ -195,17 +195,17 @@ impl PocketTtsEngine {
                         // as written. Expanded words carry the source span
                         // so boundary events highlight the typed text.
                         if w.phonemes.as_deref().unwrap_or_default().is_empty()
-                            && !matches!(w.say_as, floravox_ssml::SayAs::None | floravox_ssml::SayAs::Other)
+                            && !matches!(
+                                w.say_as,
+                                floravox_ssml::SayAs::None | floravox_ssml::SayAs::Other
+                            )
                         {
                             for ex in crate::ssml_expand::expand_word(
                                 &spoken,
                                 w.char_span.clone(),
                                 w.say_as,
                             ) {
-                                segs.last_mut()
-                                    .expect("always one")
-                                    .words
-                                    .push(ex.spoken);
+                                segs.last_mut().expect("always one").words.push(ex.spoken);
                             }
                             continue;
                         }

@@ -21,12 +21,12 @@
 //! Full analysis + the upstream-PR plan live in the project's
 //! voice-cloning plan notes (kept out of the repository).
 
-use crate::engine::{estimate_word_boundaries, strip_ssml_to_text, TtsEngine};
-use crate::ssml_expand::expand_ssml_to_text;
+use crate::engine::{strip_ssml_to_text, weighted_boundaries_scaled, TtsEngine};
 use crate::qwen3_local_support::{
     apply_gain, decode_embedding, id_to_iso639_3, language_id_for, supported_languages,
     EMBEDDING_SIZE,
 };
+use crate::ssml_expand::expand_ssml_to_text;
 use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -327,7 +327,6 @@ impl Drop for Qwen3LocalEngine {
     }
 }
 
-
 /// SSML-in for the qwen pipeline: the C++ side reads tags aloud, so
 /// interpret the document locally first — `<say-as>` variants expand to
 /// spoken words, `<sub alias>` substitutes, `<phoneme>` keeps its display
@@ -380,18 +379,20 @@ impl TtsEngine for Qwen3LocalEngine {
             }
         }
         if let Some(cb) = on_boundary.as_mut() {
-            // No timestamps from the C++ pipeline: scaled estimates
-            // anchored to the actual duration.
-            let boundaries: Vec<WordBoundary> = estimate_word_boundaries(&plain);
+            // No timestamps from the C++ pipeline (investigated: the
+            // talker exposes no word-alignment signal — see the
+            // attention-dump research in qwen3-tts.cpp). Word shape from
+            // syllable/pause weights, rescaled onto the exact duration:
+            // long words get proportionally more time, punctuation beats
+            // pause, and the last word ends at the audio end.
             #[allow(clippy::cast_precision_loss)]
             let total_secs = pcm.len() as f32 / (rate as f32 * 2.0);
-            #[allow(clippy::cast_precision_loss)]
-            let words = boundaries.len().max(1) as f32;
-            for (i, b) in boundaries.iter().enumerate() {
+            let boundaries = weighted_boundaries_scaled(&plain, total_secs);
+            for b in &boundaries {
                 #[allow(clippy::cast_precision_loss)]
-                let start = total_secs * (i as f32) / words;
+                let start = b.offset as f32 / 1000.0;
                 #[allow(clippy::cast_precision_loss)]
-                let end = total_secs * ((i + 1) as f32) / words;
+                let end = (b.offset + b.duration) as f32 / 1000.0;
                 // No source-offset mapping exists (no timestamps):
                 // -1 per the callback contract for unknown offsets.
                 cb(&b.text, start, end, -1, -1, true);

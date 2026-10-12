@@ -28,7 +28,10 @@ pub struct ExpandedWord {
 #[must_use]
 pub fn expand_word(text: &str, char_span: Range<usize>, say_as: SayAs) -> Vec<ExpandedWord> {
     fn one(spoken: String, char_span: &Range<usize>) -> Vec<ExpandedWord> {
-        vec![ExpandedWord { spoken, char_span: char_span.clone() }]
+        vec![ExpandedWord {
+            spoken,
+            char_span: char_span.clone(),
+        }]
     }
     fn non_empty(words: Vec<ExpandedWord>) -> Option<Vec<ExpandedWord>> {
         (!words.is_empty()).then_some(words)
@@ -48,16 +51,43 @@ pub fn expand_word(text: &str, char_span: Range<usize>, say_as: SayAs) -> Vec<Ex
 }
 
 const ONES: [&str; 20] = [
-    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+    "zero",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
+    "eleven",
+    "twelve",
+    "thirteen",
+    "fourteen",
+    "fifteen",
+    "sixteen",
+    "seventeen",
+    "eighteen",
     "nineteen",
 ];
 const TENS: [&str; 10] = [
     "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
 ];
 const MONTHS: [&str; 12] = [
-    "January", "February", "March", "April", "May", "June", "July", "August", "September",
-    "October", "November", "December",
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
 ];
 const DIGIT_WORDS: [&str; 10] = [
     "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
@@ -72,7 +102,7 @@ fn triple_to_words(n: u32, out: &mut Vec<String>) {
     }
     if rest >= 20 {
         out.push(TENS[(rest / 10) as usize].to_string());
-        if rest % 10 > 0 {
+        if !rest.is_multiple_of(10) {
             out.push(ONES[(rest % 10) as usize].to_string());
         }
     } else if rest > 0 {
@@ -83,15 +113,22 @@ fn triple_to_words(n: u32, out: &mut Vec<String>) {
 /// Cardinal number to English words (0 ..= 999,999,999,999). Returns
 /// `None` for unparseable input. Zero maps to `"zero"`.
 fn number_words(s: &str) -> Option<String> {
-    let cleaned: String = s.chars().filter(|c| c.is_ascii_digit() || *c == '-' || *c == ',').collect();
+    let cleaned: String = s
+        .chars()
+        .filter(|c| c.is_ascii_digit() || *c == '-' || *c == ',')
+        .collect();
     let negative = cleaned.starts_with('-');
-    let digits: String = cleaned.chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = cleaned.chars().filter(char::is_ascii_digit).collect();
     if digits.is_empty() || digits.len() > 12 {
         return None;
     }
     let n: u128 = digits.parse().ok()?;
     let mut out: Vec<String> = Vec::new();
-    let scales = [(1_000_000_000u128, "billion"), (1_000_000, "million"), (1_000, "thousand")];
+    let scales = [
+        (1_000_000_000u128, "billion"),
+        (1_000_000, "million"),
+        (1_000, "thousand"),
+    ];
     let mut rest = n;
     for (scale, name) in scales {
         if rest >= scale {
@@ -119,7 +156,7 @@ fn ordinal_words_from_number(n: u128) -> Option<String> {
     }
     let mod100 = n % 100;
     let special = match n % 100 {
-        11 | 12 | 13 => "th",
+        11..=13 => "th",
         _ => match mod100 % 10 {
             1 => "st",
             2 => "nd",
@@ -135,7 +172,7 @@ fn ordinal_words_from_number(n: u128) -> Option<String> {
     for (scale, name) in scales {
         if rest >= scale {
             triple_to_words((rest / scale) as u32, &mut words);
-            if rest % scale == 0 {
+            if rest.is_multiple_of(scale) {
                 // "three thousand" -> "three-thousandth" spoken as
                 // "three thousandth"
                 words.push(format!("{name}th"));
@@ -178,8 +215,7 @@ fn ordinal(text: &str) -> Option<String> {
         .or_else(|| cleaned.strip_suffix("nd"))
         .or_else(|| cleaned.strip_suffix("rd"))
         .or_else(|| cleaned.strip_suffix("th"))
-        .map(str::trim)
-        .unwrap_or(cleaned);
+        .map_or(cleaned, str::trim);
     ordinal_words_from_number(digits.parse().ok()?)
 }
 
@@ -194,9 +230,15 @@ fn characters(text: &str, char_span: Range<usize>) -> Vec<ExpandedWord> {
         char_offset += 1;
         let span = span_start..(char_span.start + char_offset);
         if let Some(d) = c.to_digit(10) {
-            out.push(ExpandedWord { spoken: DIGIT_WORDS[d as usize].to_string(), char_span: span });
+            out.push(ExpandedWord {
+                spoken: DIGIT_WORDS[d as usize].to_string(),
+                char_span: span,
+            });
         } else if c.is_alphabetic() {
-            out.push(ExpandedWord { spoken: c.to_uppercase().to_string(), char_span: span });
+            out.push(ExpandedWord {
+                spoken: c.to_uppercase().to_string(),
+                char_span: span,
+            });
         }
     }
     out
@@ -211,9 +253,15 @@ fn telephone(text: &str, char_span: Range<usize>) -> Vec<ExpandedWord> {
         char_offset += 1;
         let span = span_start..(char_span.start + char_offset);
         if let Some(d) = c.to_digit(10) {
-            out.push(ExpandedWord { spoken: DIGIT_WORDS[d as usize].to_string(), char_span: span });
+            out.push(ExpandedWord {
+                spoken: DIGIT_WORDS[d as usize].to_string(),
+                char_span: span,
+            });
         } else if c == '+' {
-            out.push(ExpandedWord { spoken: "plus".to_string(), char_span: span });
+            out.push(ExpandedWord {
+                spoken: "plus".to_string(),
+                char_span: span,
+            });
         }
     }
     out
@@ -221,12 +269,18 @@ fn telephone(text: &str, char_span: Range<usize>) -> Vec<ExpandedWord> {
 
 /// Dates: "10/12/2026", "2026-10-12", "12.10.2026" with mdy/dmy/ymd hints.
 fn date(text: &str, format: DateStyle, char_span: &Range<usize>) -> Option<Vec<ExpandedWord>> {
-    let cleaned: String = text.chars().filter(|c| c.is_ascii_digit() || matches!(c, '/' | '-' | '.')).collect();
-    let parts: Vec<&str> = cleaned.split(|c| c == '/' || c == '-' || c == '.').collect();
+    let cleaned: String = text
+        .chars()
+        .filter(|c| c.is_ascii_digit() || matches!(c, '/' | '-' | '.'))
+        .collect();
+    let parts: Vec<&str> = cleaned.split(['/', '-', '.']).collect();
     if parts.len() != 3 {
         return None;
     }
-    let nums: Vec<u32> = parts.iter().map(|p| p.parse().ok()).collect::<Option<Vec<_>>>()?;
+    let nums: Vec<u32> = parts
+        .iter()
+        .map(|p| p.parse().ok())
+        .collect::<Option<Vec<_>>>()?;
 
     let style = match format {
         DateStyle::Auto => {
@@ -270,12 +324,24 @@ fn date(text: &str, format: DateStyle, char_span: &Range<usize>) -> Option<Vec<E
     let mut out = Vec::new();
     let span = char_span.clone();
     if matches!(style, DateStyle::YearMonthDay) {
-        out.push(ExpandedWord { spoken: number_words(&y.to_string())?, char_span: span.clone() });
+        out.push(ExpandedWord {
+            spoken: number_words(&y.to_string())?,
+            char_span: span.clone(),
+        });
     }
-    out.push(ExpandedWord { spoken: MONTHS[(m - 1) as usize].to_string(), char_span: span.clone() });
-    out.push(ExpandedWord { spoken: ordinal_words_from_number(u128::from(d))?, char_span: span.clone() });
+    out.push(ExpandedWord {
+        spoken: MONTHS[(m - 1) as usize].to_string(),
+        char_span: span.clone(),
+    });
+    out.push(ExpandedWord {
+        spoken: ordinal_words_from_number(u128::from(d))?,
+        char_span: span.clone(),
+    });
     if !matches!(style, DateStyle::YearMonthDay) {
-        out.push(ExpandedWord { spoken: number_words(&y.to_string())?, char_span: span });
+        out.push(ExpandedWord {
+            spoken: number_words(&y.to_string())?,
+            char_span: span,
+        });
     }
     Some(out)
 }
@@ -295,40 +361,63 @@ fn time(text: &str, format: TimeStyle, char_span: &Range<usize>) -> Option<Vec<E
         return None;
     }
 
-    let twelve = matches!(format, TimeStyle::TwelveHour)
-        || meridiem.is_some()
-        || (matches!(format, TimeStyle::Auto) && hour >= 1 && hour <= 12 && hour != 0 && meridiem.is_none() && hour < 13 && false)
-        || matches!(format, TimeStyle::Auto) && (hour == 0 || hour <= 12) && meridiem.is_some();
-
     let span = char_span.clone();
     let mut out = Vec::new();
-    let h12 = if hour == 0 { 12 } else if hour > 12 { hour - 12 } else { hour };
+    let h12 = if hour == 0 {
+        12
+    } else if hour > 12 {
+        hour - 12
+    } else {
+        hour
+    };
 
     let use_12 = match format {
         TimeStyle::TwelveHour => true,
         TimeStyle::TwentyFourHour => false,
         TimeStyle::Auto => hour <= 12 || meridiem.is_some(),
     };
-    let _ = twelve;
-
     if use_12 {
-        out.push(ExpandedWord { spoken: ONES[h12 as usize].to_string(), char_span: span.clone() });
+        out.push(ExpandedWord {
+            spoken: ONES[h12 as usize].to_string(),
+            char_span: span.clone(),
+        });
         if minute == 0 {
-            out.push(ExpandedWord { spoken: "o'clock".to_string(), char_span: span.clone() });
+            out.push(ExpandedWord {
+                spoken: "o'clock".to_string(),
+                char_span: span.clone(),
+            });
         } else if minute < 10 {
-            out.push(ExpandedWord { spoken: format!("oh {}", ONES[minute as usize]), char_span: span.clone() });
+            out.push(ExpandedWord {
+                spoken: format!("oh {}", ONES[minute as usize]),
+                char_span: span.clone(),
+            });
         } else {
-            out.push(ExpandedWord { spoken: number_words(&minute.to_string())?, char_span: span.clone() });
+            out.push(ExpandedWord {
+                spoken: number_words(&minute.to_string())?,
+                char_span: span.clone(),
+            });
         }
         if let Some(m) = meridiem {
-            out.push(ExpandedWord { spoken: m.to_string(), char_span: span.clone() });
+            out.push(ExpandedWord {
+                spoken: m.to_string(),
+                char_span: span.clone(),
+            });
         }
     } else {
-        out.push(ExpandedWord { spoken: number_words(&hour.to_string())?, char_span: span.clone() });
+        out.push(ExpandedWord {
+            spoken: number_words(&hour.to_string())?,
+            char_span: span.clone(),
+        });
         if minute > 0 {
-            out.push(ExpandedWord { spoken: number_words(&minute.to_string())?, char_span: span.clone() });
+            out.push(ExpandedWord {
+                spoken: number_words(&minute.to_string())?,
+                char_span: span.clone(),
+            });
         } else {
-            out.push(ExpandedWord { spoken: "hundred".to_string(), char_span: span.clone() });
+            out.push(ExpandedWord {
+                spoken: "hundred".to_string(),
+                char_span: span.clone(),
+            });
         }
     }
     Some(out)
@@ -351,10 +440,9 @@ fn currency(text: &str, char_span: &Range<usize>) -> Option<Vec<ExpandedWord>> {
         ("dollar", r)
     } else if let Some(r) = t.strip_prefix("EUR ") {
         ("euro", r)
-    } else if let Some(r) = t.strip_prefix("GBP ") {
-        ("pound", r)
     } else {
-        return None;
+        let r = t.strip_prefix("GBP ")?;
+        ("pound", r)
     };
 
     let rest = rest.trim();
@@ -373,10 +461,17 @@ fn currency(text: &str, char_span: &Range<usize>) -> Option<Vec<ExpandedWord>> {
     let span = char_span.clone();
     let mut out = Vec::new();
     if int_val > 0 || frac_part.is_none() {
-        out.push(ExpandedWord { spoken: number_words(int_part)?, char_span: span.clone() });
+        out.push(ExpandedWord {
+            spoken: number_words(int_part)?,
+            char_span: span.clone(),
+        });
         let plural = int_val != 1 && major_word != "yen";
         out.push(ExpandedWord {
-            spoken: if plural { format!("{major_word}s") } else { major_word.to_string() },
+            spoken: if plural {
+                format!("{major_word}s")
+            } else {
+                major_word.to_string()
+            },
             char_span: span.clone(),
         });
     }
@@ -388,9 +483,16 @@ fn currency(text: &str, char_span: &Range<usize>) -> Option<Vec<ExpandedWord>> {
                 f.parse().ok()?
             };
             if cents > 0 {
-                out.push(ExpandedWord { spoken: number_words(&cents.to_string())?, char_span: span.clone() });
                 out.push(ExpandedWord {
-                    spoken: if cents == 1 { "cent".to_string() } else { "cents".to_string() },
+                    spoken: number_words(&cents.to_string())?,
+                    char_span: span.clone(),
+                });
+                out.push(ExpandedWord {
+                    spoken: if cents == 1 {
+                        "cent".to_string()
+                    } else {
+                        "cents".to_string()
+                    },
                     char_span: span.clone(),
                 });
             }
@@ -415,7 +517,10 @@ mod tests {
 
     #[test]
     fn cardinal_expansion() {
-        assert_eq!(words("1234", SayAs::Cardinal), vec!["one thousand two hundred thirty four"]);
+        assert_eq!(
+            words("1234", SayAs::Cardinal),
+            vec!["one thousand two hundred thirty four"]
+        );
         assert_eq!(words("42", SayAs::Cardinal), vec!["forty two"]);
         assert_eq!(words("1,000,000", SayAs::Cardinal), vec!["one million"]);
     }
@@ -437,7 +542,12 @@ mod tests {
     fn date_expansion() {
         use floravox_ssml::DateStyle::*;
         assert_eq!(
-            words("10/12/2026", SayAs::Date { format: MonthDayYear }),
+            words(
+                "10/12/2026",
+                SayAs::Date {
+                    format: MonthDayYear
+                }
+            ),
             vec!["October", "twelfth", "two thousand twenty six"]
         );
         assert_eq!(
@@ -454,10 +564,27 @@ mod tests {
     #[test]
     fn time_expansion() {
         use floravox_ssml::TimeStyle::*;
-        assert_eq!(words("2:30", SayAs::Time { format: Auto }), vec!["two", "thirty"]);
-        assert_eq!(words("14:30", SayAs::Time { format: TwentyFourHour }), vec!["fourteen", "thirty"]);
-        assert_eq!(words("2:00pm", SayAs::Time { format: Auto }), vec!["two", "o'clock", "PM"]);
-        assert_eq!(words("9:05", SayAs::Time { format: TwelveHour }), vec!["nine", "oh five"]);
+        assert_eq!(
+            words("2:30", SayAs::Time { format: Auto }),
+            vec!["two", "thirty"]
+        );
+        assert_eq!(
+            words(
+                "14:30",
+                SayAs::Time {
+                    format: TwentyFourHour
+                }
+            ),
+            vec!["fourteen", "thirty"]
+        );
+        assert_eq!(
+            words("2:00pm", SayAs::Time { format: Auto }),
+            vec!["two", "o'clock", "PM"]
+        );
+        assert_eq!(
+            words("9:05", SayAs::Time { format: TwelveHour }),
+            vec!["nine", "oh five"]
+        );
     }
 
     #[test]
@@ -482,7 +609,16 @@ mod tests {
     #[test]
     fn passthrough_on_garbage() {
         assert_eq!(words("hello", SayAs::Cardinal), vec!["hello"]);
-        assert_eq!(words("31/02/2026", SayAs::Date { format: floravox_ssml::DateStyle::Auto }).len(), 1);
+        assert_eq!(
+            words(
+                "31/02/2026",
+                SayAs::Date {
+                    format: floravox_ssml::DateStyle::Auto
+                }
+            )
+            .len(),
+            1
+        );
     }
 
     #[test]
@@ -505,9 +641,16 @@ pub fn expand_ssml_to_text(ssml: &str) -> Option<String> {
     let doc = floravox_ssml::parse(ssml).ok()?;
     let mut out: Vec<String> = Vec::new();
     for w in doc.words() {
-        let base = if w.spoken.is_empty() { w.text.clone() } else { w.spoken.clone() };
+        let base = if w.spoken.is_empty() {
+            w.text.clone()
+        } else {
+            w.spoken.clone()
+        };
         if w.phonemes.as_deref().unwrap_or_default().is_empty()
-            && !matches!(w.say_as, floravox_ssml::SayAs::None | floravox_ssml::SayAs::Other)
+            && !matches!(
+                w.say_as,
+                floravox_ssml::SayAs::None | floravox_ssml::SayAs::Other
+            )
         {
             for ex in expand_word(&base, w.char_span.clone(), w.say_as) {
                 out.push(ex.spoken);
@@ -529,10 +672,8 @@ mod roundtrip_tests {
     #[cfg(feature = "speechmarkdown")]
     fn speechmarkdown_sayas_roundtrip() {
         // characters
-        let (ssml, is_ssml) = crate::engine::preprocess_speech_markdown(
-            "(abc)[characters]",
-            "plain",
-        );
+        let (ssml, is_ssml) =
+            crate::engine::preprocess_speech_markdown("(abc)[characters]", "plain");
         assert!(is_ssml, "markdown should convert: {ssml}");
         let text = expand_ssml_to_text(&ssml).unwrap_or_default();
         assert_eq!(text, "A B C", "from {ssml}");
@@ -547,7 +688,6 @@ mod roundtrip_tests {
         let text = expand_ssml_to_text(&ssml).unwrap_or_default();
         assert_eq!(text, "five five five", "from {ssml}");
     }
-
 
     /// Engine-native SSML passes through expansion with say-as applied.
     #[test]

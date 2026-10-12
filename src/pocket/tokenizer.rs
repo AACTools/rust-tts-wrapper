@@ -216,7 +216,7 @@ impl WordLevelTokenizer {
     #[must_use]
     fn split_seq<'a>(&'a self, t: &'a str) -> Vec<&'a str> {
         match self.split_map.get(t) {
-            Some(seq) => seq.iter().copied().collect(),
+            Some(seq) => seq.to_vec(),
             None => vec![t],
         }
     }

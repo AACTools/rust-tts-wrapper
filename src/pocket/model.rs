@@ -274,11 +274,7 @@ impl PocketTtsModel {
         // (recalibrated 2026-10-11 against whisper word timestamps on
         // will26r; 8-15 collapses mid-sentence on v6)
         let tap_range: std::ops::Range<usize> = match &tokenizer {
-            crate::pocket::tokenizer::AnyTokenizer::WordLevel(w)
-                if w.vocab_size() <= 100 =>
-            {
-                10..18
-            }
+            crate::pocket::tokenizer::AnyTokenizer::WordLevel(w) if w.vocab_size() <= 100 => 10..18,
             _ => 8..16,
         };
         let lm_attn_names = if let Some(six) = tap_names
