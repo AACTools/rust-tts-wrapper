@@ -115,7 +115,13 @@ serde_json = { version = "1", optional = true }
 # sys 1.13.5 doesn't even compile, and a newer crate references C-API
 # symbols an older prebuilt lib lacks → LNK2019). Bump both together.
 sherpa-onnx = { version = "=1.13.8", optional = true }
-ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
+# PINNED to rc.13: rc.14 changed Session::builder() to require
+# &Environment, which the published floravox-g2p (0.8.x, ort ^2.0.0-rc.10)
+# does not pass yet — and cargo's prerelease-caret lets ^rc.10 float to
+# rc.14. The exact pin also constrains floravox-g2p's resolution (rc.13
+# satisfies ^2.0.0-rc.10). Unpin once floravox-g2p is published against
+# the rc.14 API.
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
 ndarray = { version = "0.17", optional = true, features = ["std"] }
 hound = { version = "3", optional = true }
 floravox-ssml = { version = "0.8", optional = true }
