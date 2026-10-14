@@ -158,7 +158,7 @@ pub fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudCo
             auth_header: "X-API-Key".into(),
             voice_param: "voice_id".into(),
             model_param: Some("model_id".into()),
-            model_default: Some("sonic-2".into()),
+            model_default: Some("sonic-3.6".into()),
             text_field: "text".into(),
             voices_url: Some("https://api.cartesia.ai/voices".into()),
             provider_id: "cartesia".into(),
