@@ -48,7 +48,12 @@ cloud-core = ["dep:serde_json", "dep:base64", "speechmarkdown", "dep:sha2"]
 cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 # pocket-tts with REAL word timings: our own streaming loop over the tapped
 # Kyutai ONNX graphs (attention = the model's own alignment)
-pocket-timing = ["dep:ort", "dep:ndarray", "dep:serde_json", "dep:hound", "dep:floravox-ssml", "speechmarkdown"]
+pocket-timing = ["dep:ort", "dep:ndarray", "dep:serde_json", "dep:hound", "dep:floravox-ssml", "speechmarkdown", "ssml-expand"]
+
+# wrapper-level <say-as> expansion (characters/cardinal/ordinal/date/
+# time/currency/telephone -> spoken words) for engines without native
+# SSML semantics: pocket, qwen3-local
+ssml-expand = ["dep:floravox-ssml"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
@@ -89,7 +94,7 @@ display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 # clones and builds predict-woo/qwen3-tts.cpp). Opt-in like
 # speech-dispatcher: enabling the feature without the lib fails the
 # build with instructions.
-qwen3-local = ["dep:serde_json", "dep:base64"]
+qwen3-local = ["dep:serde_json", "dep:base64", "ssml-expand"]
 # Voice cloning: VoiceIdentity/VoiceCloning trait, LJSpeech corpus, Apple
 # Personal Voice export import, and enrollment clients for the instant
 # cloners (Qwen voice-enrollment, ElevenLabs IVC). Needs cloud (HTTP +
@@ -121,7 +126,7 @@ sherpa-onnx = { version = "=1.13.8", optional = true }
 ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
 ndarray = { version = "0.17", optional = true, features = ["std"] }
 hound = { version = "3", optional = true }
-floravox-ssml = { version = "0.8", optional = true }
+floravox-ssml = { version = "0.8.8", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
 sherpa-onnx-models = { version = "1.1", optional = true }
 # floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha, Kokoro)

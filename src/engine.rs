@@ -324,30 +324,32 @@ pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary> {
 #[must_use]
 #[allow(clippy::cast_precision_loss)]
 pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> Vec<WordBoundary> {
-    // Extra pause after a sentence ends, before the next one starts —
-    // speakers breathe between sentences, and the flat per-word model
-    // runs words together across sentence boundaries.
+    // Weighted model: per-word duration tracks syllable count (a far
+    // better duration proxy than character length — "strength" is one
+    // syllable, "audio" is three), plus tiered pauses after punctuation.
+    // Calibration: average English ≈ 1.55 syllables/word, so
+    // ms_per_syllable = 60_000 / (wpm × 1.55) reproduces the old wpm.
+    // Sentence gap stays a flat 350 ms (existing estimator contract —
+    // inline punctuation gets no gap here; the tiered beat model lives
+    // in weighted_boundaries_scaled where a real duration is known).
     const SENTENCE_GAP_MS: u64 = 350;
+
+    #[allow(clippy::cast_precision_loss)]
+    let ms_per_syllable = 60_000.0 / (words_per_minute * 1.55);
 
     let words: Vec<&str> = text.split_whitespace().filter(|w| !w.is_empty()).collect();
     if words.is_empty() {
         return Vec::new();
     }
 
-    let ms_per_word = 60_000.0 / words_per_minute;
     let mut boundaries: Vec<WordBoundary> = Vec::with_capacity(words.len());
     let mut current_ms: u64 = 0;
-    let mut prev_word = "";
 
-    for word in &words {
-        if current_ms > 0 && ends_sentence(prev_word) {
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 && ends_sentence(words[i - 1]) {
             current_ms += SENTENCE_GAP_MS;
         }
-        prev_word = word;
-        let length_factor = (word.len() as f64 / 5.0).clamp(0.5, 2.0);
-        let duration = (ms_per_word * length_factor) as u64;
-        let duration = duration.max(1);
-
+        let duration = ((word_weight(word) * ms_per_syllable) as u64).max(1);
         boundaries.push(WordBoundary {
             text: (*word).to_string(),
             offset: current_ms,
@@ -358,6 +360,98 @@ pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> V
     }
 
     boundaries
+}
+
+/// Rough syllable count for duration weighting: contiguous vowel groups
+/// (English-centric), every digit spoken individually, minimum one.
+#[must_use]
+pub fn syllable_count(word: &str) -> usize {
+    let mut count = 0usize;
+    let mut in_vowel_run = false;
+    for ch in word.chars() {
+        if ch.is_ascii_digit() {
+            // digits read individually ("2026" -> four syllables)
+            count += 1;
+            in_vowel_run = false;
+        } else {
+            let vowel = matches!(ch.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u' | 'y');
+            if vowel && !in_vowel_run {
+                count += 1;
+            }
+            in_vowel_run = vowel;
+        }
+    }
+    count.max(1)
+}
+
+/// Duration weight of a word in syllable-equivalents: syllables plus a
+/// small constant for onsets/codas so "a" is not zero-length.
+#[must_use]
+pub fn word_weight(word: &str) -> f64 {
+    let bare = word.trim_matches(|c: char| !c.is_alphanumeric());
+    f64::from(syllable_count(bare) as u32) + 0.3
+}
+
+/// Pause weight AFTER a word, in syllable-equivalents, from its trailing
+/// punctuation. Sentence ends breathe longest; commas/semicolons beat.
+#[must_use]
+pub fn trailing_pause_weight(word: &str) -> f64 {
+    // look past closing quotes/brackets, like ends_sentence()
+    let trimmed = word
+        .trim_end()
+        .trim_end_matches(['"', '\'', '”', '’', ')', ']', '»']);
+    let Some(last) = trimmed.chars().last() else {
+        return 0.0;
+    };
+    match last {
+        '.' | '!' | '?' | '…' => 1.4, // sentence breathe (≥ the 350 ms gap)
+        ';' | ':' | '—' | '–' => 0.75,
+        ',' => 0.55,
+        _ => 0.0,
+    }
+}
+
+/// Word boundaries with RELATIVE durations mapped onto a known total
+/// duration (engines that know the audio length but not per-word times —
+/// e.g. qwen3-local). The word shape comes from the syllable/pause
+/// weights; the timeline is linearly rescaled so the last word ends
+/// exactly at `total_secs`. Offsets/durations are absolute seconds.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn weighted_boundaries_scaled(text: &str, total_secs: f32) -> Vec<WordBoundary> {
+    let words: Vec<&str> = text.split_whitespace().filter(|w| !w.is_empty()).collect();
+    if words.is_empty() || total_secs <= 0.0 {
+        return Vec::new();
+    }
+
+    // cumulative weight marks: word i occupies (after_i - before_i)
+    let mut before: Vec<f64> = Vec::with_capacity(words.len());
+    let mut after: Vec<f64> = Vec::with_capacity(words.len());
+    let mut cum = 0.0f64;
+    for (i, word) in words.iter().enumerate() {
+        if i > 0 {
+            cum += trailing_pause_weight(words[i - 1]);
+        }
+        before.push(cum);
+        cum += word_weight(word);
+        after.push(cum);
+    }
+    let total_w = cum.max(1e-9);
+
+    words
+        .iter()
+        .enumerate()
+        .map(|(i, word)| {
+            let start = f64::from(total_secs) * before[i] / total_w;
+            let end = f64::from(total_secs) * after[i] / total_w;
+            WordBoundary {
+                text: (*word).to_string(),
+                offset: (start * 1000.0) as u64,
+                duration: (((end - start) * 1000.0) as u64).max(1),
+                estimated: true,
+            }
+        })
+        .collect()
 }
 
 /// Whether `word` ends a sentence for estimation purposes: terminal
@@ -468,5 +562,60 @@ mod tests {
         let (voice, inner) = unwrap_voice_tag(ssml);
         assert!(voice.is_none());
         assert_eq!(inner, ssml);
+    }
+}
+
+#[cfg(test)]
+mod weighted_timing_tests {
+    use super::*;
+
+    #[test]
+    fn syllable_counts() {
+        assert_eq!(syllable_count("friend"), 1);
+        assert_eq!(syllable_count("friendship"), 2);
+        assert_eq!(syllable_count("banana"), 3);
+        assert_eq!(syllable_count("strength"), 1);
+        assert_eq!(syllable_count("2026"), 4); // digits read individually
+        assert_eq!(syllable_count("hmm"), 1); // no vowels -> minimum
+    }
+
+    #[test]
+    fn scaled_covers_exactly_and_orders_monotonically() {
+        let b = weighted_boundaries_scaled("Hello, this is a timing test.", 10.0);
+        assert_eq!(b.len(), 6);
+        assert_eq!(b[0].offset, 0);
+        let last = b.last().unwrap();
+        // last word ends at the audio end (10 s)
+        assert!(last.offset + last.duration >= 9_990);
+        for w in b.windows(2) {
+            assert!(w[1].offset >= w[0].offset + w[0].duration - 1);
+        }
+    }
+
+    #[test]
+    fn long_words_get_more_time_than_short() {
+        let b = weighted_boundaries_scaled("a antidisestablishmentarianism", 10.0);
+        let short = b[0].duration;
+        let long = b[1].duration;
+        assert!(long > short * 4, "long {long} vs short {short}");
+    }
+
+    #[test]
+    fn punctuation_beats_pause() {
+        // comma between the words: the gap counts toward neither word
+        let b = weighted_boundaries_scaled("Hello, world", 10.0);
+        let gap = b[1].offset - (b[0].offset + b[0].duration);
+        assert!(gap > 10, "expected comma pause, got {gap} ms");
+        // and a comma pause is shorter than a sentence pause
+        let s = weighted_boundaries_scaled("Hello. World", 10.0);
+        let sgap = s[1].offset - (s[0].offset + s[0].duration);
+        assert!(sgap > gap);
+    }
+
+    #[test]
+    fn estimator_long_word_longer_than_short() {
+        let b = estimate_word_boundaries("strength audio");
+        // 1 syllable vs 3: the weighted model must reflect that
+        assert!(b[1].duration > b[0].duration);
     }
 }

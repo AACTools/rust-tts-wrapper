@@ -269,13 +269,20 @@ impl PocketTtsModel {
                     && !n.starts_with("out_state")
             })
             .collect();
+        // phoneme graphs: attention-tap layer range differs per family —
+        // v4 (vocab 119) tracks at layers 8-15, v6 (vocab 84) at 10-17
+        // (recalibrated 2026-10-11 against whisper word timestamps on
+        // will26r; 8-15 collapses mid-sentence on v6)
+        let tap_range: std::ops::Range<usize> = match &tokenizer {
+            crate::pocket::tokenizer::AnyTokenizer::WordLevel(w) if w.vocab_size() <= 100 => 10..18,
+            _ => 8..16,
+        };
         let lm_attn_names = if let Some(six) = tap_names
             .iter()
             .find(|n| n.contains("layers.3") && n.contains("Softmax"))
         {
             vec![six.clone()]
         } else {
-            // phoneme graphs: layers 8-15 mean (validated monotonic);
             // fall back to every tap if the suffix parse fails
             let picked: Vec<String> = tap_names
                 .iter()
@@ -283,7 +290,7 @@ impl PocketTtsModel {
                     n.rsplit('_')
                         .next()
                         .and_then(|s| s.parse::<usize>().ok())
-                        .is_some_and(|i| (8..16).contains(&i))
+                        .is_some_and(|i| tap_range.contains(&i))
                 })
                 .cloned()
                 .collect();
@@ -482,15 +489,28 @@ impl PocketTtsModel {
         let mut eos_step: i64 = -1;
         let mut cur = vec![f32::NAN; 32];
         let noise_scale = temperature.sqrt();
-        let mut rng: u64 = 0x853c_49e6_748f_ea9b; // splitmix64
-        let mut next_f32 = || -> f32 {
+        let mut rng: u64 = std::env::var("POCKET_SEED")
+            .ok()
+            .and_then(|s| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0x853c_49e6_748f_ea9b); // splitmix64
+        let mut next_u01 = || -> f64 {
             rng = rng.wrapping_add(0x9E37_79B9_7F4A_7C15);
             let mut z = rng;
             z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
             z ^= z >> 31;
-            let u = (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64);
-            (u * 2.0 - 1.0) as f32
+            (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+        };
+        // gaussian N(0, noise_scale^2) via Box-Muller — the flow's prior.
+        // Uniform noise collapses the v6-family sampler to silence
+        // (verified against the pytorch reference 2026-10-11).
+        let mut next_gauss = || -> f32 {
+            let mut u1 = next_u01();
+            if u1 <= f64::EPSILON {
+                u1 = f64::EPSILON;
+            }
+            let u2 = next_u01();
+            ((-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()) as f32
         };
         let empty_emb: Vec<f32> = Vec::new();
         // Kyutai-calibrated budget: (tokens/3 + 2s) of frames, hard-capped
@@ -514,7 +534,7 @@ impl PocketTtsModel {
             }
             attn_steps.push(attn);
             // Euler flow integration
-            let mut x: Vec<f32> = (0..32).map(|_| next_f32() * noise_scale).collect();
+            let mut x: Vec<f32> = (0..32).map(|_| next_gauss() * noise_scale).collect();
             let dt = 1.0f32 / num_steps as f32;
             for i in 0..num_steps {
                 let s = i as f32 / num_steps as f32;
