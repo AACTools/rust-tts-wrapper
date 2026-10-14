@@ -115,7 +115,10 @@ serde_json = { version = "1", optional = true }
 # sys 1.13.5 doesn't even compile, and a newer crate references C-API
 # symbols an older prebuilt lib lacks → LNK2019). Bump both together.
 sherpa-onnx = { version = "=1.13.8", optional = true }
-ort = { version = "2.0.0-rc.13", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
+# rc.14: Session::builder(&Environment) — pocket passes a stored env.
+# Exact pin: prerelease-caret floats within 2.0.0-rc.*, and rc releases
+# have twice changed the builder signature; re-verify on bumps.
+ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
 ndarray = { version = "0.17", optional = true, features = ["std"] }
 hound = { version = "3", optional = true }
 floravox-ssml = { version = "0.8", optional = true }
@@ -125,10 +128,10 @@ sherpa-onnx-models = { version = "1.1", optional = true }
 # with measured word timings. Default features (onnx, misaki, uroman)
 # are intentional: misaki is the only TokenPhonemizer available at this
 # dependency set, uroman powers the CharFrontend for MMS voices.
-floravox-core = { version = "=0.8.6", optional = true }
+floravox-core = { version = "=0.8.8", optional = true }
 # Exact pin: MisakiG2p implements a floravox-core trait — a drifted
 # patch pair breaks the build (same reasoning as sherpa-onnx-sys above).
-floravox-g2p = { version = "=0.8.6", optional = true, default-features = false }
+floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
 voicegarden-lexicons = { version = "0.3", optional = true }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=1.13.8", optional = true }

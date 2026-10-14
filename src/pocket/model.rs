@@ -152,6 +152,9 @@ enum RawTensor {
 }
 
 pub struct PocketTtsModel {
+    /// ort 2.0.0-rc.14+: sessions take their environment at build time
+    /// and hold only weak references — the environment must outlive them.
+    _env: ort::environment::Environment,
     lm_main: RunCell,
     lm_flow: RunCell,
     encoder: RunCell,
@@ -212,8 +215,8 @@ impl PocketTtsModel {
         }
         // small sequential matmuls in the AR loop oversubscribe with default
         // threading; cap intra-op (measured ~2x on the pocket graphs)
-        fn mk_session(path: &Path) -> Result<Session, String> {
-            Session::builder()
+        fn mk_session(path: &Path, env: &ort::environment::Environment) -> Result<Session, String> {
+            Session::builder(env)
                 .map_err(|e| e.to_string())?
                 .with_intra_threads(6)
                 .map_err(|e| e.to_string())?
@@ -222,11 +225,12 @@ impl PocketTtsModel {
                 .commit_from_file(path)
                 .map_err(err)
         }
-        let lm_main = mk_session(&cfg.lm_main)?;
-        let lm_flow = mk_session(&cfg.lm_flow)?;
-        let encoder = mk_session(&cfg.encoder)?;
-        let decoder = mk_session(&cfg.decoder)?;
-        let conditioner = Session::builder()
+        let env = ort::init().build().map_err(|e| format!("ort env: {e}"))?;
+        let lm_main = mk_session(&cfg.lm_main, &env)?;
+        let lm_flow = mk_session(&cfg.lm_flow, &env)?;
+        let encoder = mk_session(&cfg.encoder, &env)?;
+        let decoder = mk_session(&cfg.decoder, &env)?;
+        let conditioner = Session::builder(&env)
             .map_err(err)?
             .commit_from_file(&cfg.text_conditioner)
             .map_err(err)?;
@@ -337,6 +341,7 @@ impl PocketTtsModel {
             .collect();
 
         Ok(Self {
+            _env: env,
             lm_main: RunCell(std::cell::UnsafeCell::new(lm_main)),
             lm_flow: RunCell(std::cell::UnsafeCell::new(lm_flow)),
             encoder: RunCell(std::cell::UnsafeCell::new(encoder)),
