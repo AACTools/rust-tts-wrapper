@@ -272,3 +272,77 @@ default `~/.rust-tts-wrapper/clones.json`, overridable by the integrator.
   single best clip for Cartesia/PlayHT/Murf (single-file) — heuristic?
 - Cost guardrails: Qwen charges per voice on the qwen3 flavor; fan-out
   driver should surface per-engine cost before running.
+
+## OmniVoice (k2-fsa) — offline engine spike notes (2026-10-15)
+
+**Runtime**: ServeurpersoCom/omnivoice.cpp (C++/GGML, MIT), NOT upstream Python.
+Build at `/home/willwade/spikes/omnivoice.cpp` (CPU + OpenBLAS).
+Models: `Serveurperso/OmniVoice-GGUF` → `omnivoice-base-Q8_0.gguf` (612M Qwen3 backbone)
++ `omnivoice-tokenizer-F32.gguf` (Higgs Audio v2 codec). 1.3 GB total.
+
+### Cloning quality (CPU, i5-8500T, Q8_0, 32 MaskGIT steps)
+
+- **Will clone with `--duration 3.5`: "really good — better than qwen"** (user verdict).
+  Exact Whisper transcript, no babble, no retry needed.
+- WITHOUT explicit `--duration`: the duration estimator over-allocates for cloning
+  mode (T=120 frames = 4.8s for a ~3.5s sentence), and the diffusion model fills
+  the excess with reference-like content — ref-text echo before the target.
+  Seed change does NOT fix it. **`--duration` is load-bearing for cloning quality.**
+
+### CRITICAL: the `--duration` flag
+
+The single most important finding. When integrating into rust-tts-wrapper:
+- Estimate duration from text length (chars / rate, or syllable count) — the same
+  prior we built for qwen (`weighted_boundaries_scaled`)
+- Pass it as `duration` in the C API (`ov_tts_params.duration`)
+- Without it, clone outputs contain reference bleed/echo
+- The upstream estimator seems tuned for voice-design mode, not cloning
+
+### Voice design
+
+Structured attribute vocabulary (23 English tokens: `female, child, british accent,
+very high pitch` etc.) — freeform phrasing is REJECTED with a printed valid-token
+list. British accent + child attributes exist but the child timbre did NOT convince
+("sounds like a woman" — same model-capacity ceiling as qwen VoiceDesign for age).
+
+### Performance (CPU only, no GPU on this machine)
+
+| Mode | Wall time | Audio | RTF |
+|---|---|---|---|
+| Basic TTS | 210s | 3.6s | 61x |
+| Clone (15s ref, no --duration) | 1150s | 7.5s | 154x |
+| Clone (6.5s ref, --duration 3.5) | 220s | 4.8s | 46x |
+| Voice design | 189s | 3.4s | 56x |
+
+GPU (RTX 5090): RTF 0.0232 (43x realtime) per community reports.
+CPU is batch-generation only, not interactive — an order of magnitude slower than
+qwen3-tts 0.6B on the same machine (qwen: RTF ~7 vs OV: RTF ~46-60).
+
+### Integration path (rust-tts-wrapper)
+
+C ABI is binding-ready: `ov_*` prefix, single header `omnivoice.h`,
+`OMNIVOICE_SHARED=ON` for .so/.dll/.dylib, plain C linkage for bindgen/ctypes.
+Pre-converted GGUFs on HuggingFace (no converter needed).
+Follow the qwen3-local engine template (`src/qwen3_local_engine.rs`):
+
+1. FFI declarations for `ov_init`, `ov_synthesize`, `ov_free`, `ov_audio_free`
+2. `OmniVoiceLocalEngine` with warm handle (same pattern as qwen3-local)
+3. Cloning: `--ref-wav` + `--ref-text` via `ov_tts_params`
+4. **Duration estimation**: use `weighted_boundaries_scaled`-style prior to
+   compute `duration` from text, NEVER omit it in clone mode
+5. Voice design: pass validated attribute tokens via `instruct` param
+6. Feature flag: `omnivoice-local = ["dep:bindgen or manual FFI"]`
+
+### Architecture notes (why no babble)
+
+OmniVoice uses diffusion-LM MaskGIT (iterative unmasking over a fixed-length
+token grid), NOT autoregressive codec generation. There is no EOS to miss and
+no runaway generation — the output length is determined upfront by the duration
+estimate (or `--duration` override). The failure mode is ref-bleed when the
+duration is over-estimated, which is deterministic and fixable with a tight
+prior — vs qwen's stochastic no-EOS babble which needed retries/detectors/caps.
+
+### 600+ languages
+
+The headline feature vs qwen (a handful). Language is a CLI/API parameter
+(`--lang English`), not a token in the prompt.
