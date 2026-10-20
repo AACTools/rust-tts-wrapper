@@ -34,6 +34,10 @@
 #[cfg(all(feature = "avsynth", target_os = "macos"))]
 mod avsynth_engine;
 pub mod boundaries;
+#[cfg(feature = "omnivoice-local")]
+pub mod omnivoice_local_engine;
+#[cfg(feature = "omnivoice-local")]
+pub mod omnivoice_local_support;
 #[cfg(feature = "ssml-expand")]
 pub mod ssml_expand;
 

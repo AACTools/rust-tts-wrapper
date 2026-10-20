@@ -55,6 +55,29 @@ fn main() {
         println!("cargo:rerun-if-env-changed=QWEN3_TTS_LIB");
     }
 
+    // omnivoice-local: link the user-built omnivoice.cpp shared library.
+    // Same opt-in pattern as qwen3-local. Build with
+    //   cmake -DOMNIVOICE_SHARED=ON .. && cmake --build ..
+    // and point OMNIVOICE_LIB at the repo root.
+    let omnivoice_local = env::var("CARGO_FEATURE_OMNIVOICE_LOCAL").is_ok();
+    if omnivoice_local {
+        let lib_dir = env::var("OMNIVOICE_LIB").unwrap_or_default();
+        assert!(
+            !lib_dir.is_empty(),
+            "The 'omnivoice-local' feature needs the omnivoice.cpp library. \
+             Build it once (git clone --recurse-submodules \
+             https://github.com/ServeurpersoCom/omnivoice.cpp, then \
+             cmake -DOMNIVOICE_SHARED=ON -DCMAKE_BUILD_TYPE=Release .. && cmake --build ..) \
+             and point OMNIVOICE_LIB at the repo root (containing build/), e.g.: \
+             OMNIVOICE_LIB=/home/me/spikes/omnivoice.cpp cargo build \
+             --features omnivoice-local"
+        );
+        println!("cargo:rustc-link-search=native={lib_dir}/build");
+        println!("cargo:rustc-link-lib=dylib=omnivoice");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}/build");
+        println!("cargo:rerun-if-env-changed=OMNIVOICE_LIB");
+    }
+
     // The avsynth shim is only compiled on macOS (it wraps AVSpeechSynthesizer).
     // The `cc` crate is a macOS-only build-dependency for this reason.
     #[cfg(target_os = "macos")]

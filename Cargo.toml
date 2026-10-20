@@ -54,6 +54,12 @@ pocket-timing = ["dep:ort", "dep:ndarray", "dep:serde_json", "dep:hound", "dep:f
 # time/currency/telephone -> spoken words) for engines without native
 # SSML semantics: pocket, qwen3-local
 ssml-expand = ["dep:floravox-ssml"]
+
+# OmniVoice offline engine (ServeurpersoCom/omnivoice.cpp C ABI):
+# 600+ languages, voice cloning, voice design, GGUF models.
+# Requires the omnivoice.cpp shared library; see VOICE_CLONING_PLAN.md
+# for build + model setup and the critical --duration finding.
+omnivoice-local = ["dep:hound", "ssml-expand"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
