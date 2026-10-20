@@ -20,7 +20,7 @@ use std::fmt;
 
 /// omnivoice.h ABI version this binding targets (read at ov_init /
 /// ov_synthesize; fields beyond the caller's version are ignored).
-pub const OV_ABI_VERSION: c_int = 4;
+pub(crate) const OV_ABI_VERSION: c_int = 4;
 
 // ── Opaque handle ────────────────────────────────────────────────────
 #[repr(C)]
@@ -32,13 +32,13 @@ pub struct ov_context {
 // repr(C) enum with only non-negative variants would be UB. Use c_int
 // constants matching the header exactly. ─────────────────────────────
 pub type ov_status = c_int;
-pub const OV_STATUS_OK: c_int = 0;
-pub const OV_STATUS_ERROR: c_int = -1;
-pub const OV_STATUS_INVALID_PARAMS: c_int = -1;
-pub const OV_STATUS_INSTRUCT_INVALID: c_int = -2;
-pub const OV_STATUS_GENERATE_FAILED: c_int = -3;
-pub const OV_STATUS_OUT_OF_MEMORY: c_int = -4;
-pub const OV_STATUS_CANCELLED: c_int = -5;
+pub(crate) const OV_STATUS_OK: c_int = 0;
+pub(crate) const OV_STATUS_ERROR: c_int = -1;
+pub(crate) const OV_STATUS_INVALID_PARAMS: c_int = -1;
+pub(crate) const OV_STATUS_INSTRUCT_INVALID: c_int = -2;
+pub(crate) const OV_STATUS_GENERATE_FAILED: c_int = -3;
+pub(crate) const OV_STATUS_OUT_OF_MEMORY: c_int = -4;
+pub(crate) const OV_STATUS_CANCELLED: c_int = -5;
 
 // ── Callbacks ────────────────────────────────────────────────────────
 pub type ov_cancel_cb = Option<unsafe extern "C" fn(user_data: *mut c_void) -> bool>;
