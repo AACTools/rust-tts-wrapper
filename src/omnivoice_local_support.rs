@@ -101,23 +101,32 @@ pub struct ov_tts_params {
     pub postproc: bool,
 }
 
-extern "C" {
-    pub fn ov_init_default_params(p: *mut ov_init_params);
-    pub fn ov_init(params: *const ov_init_params) -> *mut ov_context;
-    pub fn ov_free(ctx: *mut ov_context);
-    pub fn ov_last_error() -> *const c_char;
-    pub fn ov_tts_default_params(p: *mut ov_tts_params);
-    pub fn ov_synthesize(
-        ctx: *mut ov_context,
-        params: *const ov_tts_params,
-        out: *mut ov_audio,
-    ) -> ov_status;
-    pub fn ov_audio_free(audio: *mut ov_audio);
-    pub fn ov_n_languages() -> c_int;
-    pub fn ov_language_id(index: c_int) -> *const c_char;
-    pub fn ov_language_name(id: *const c_char) -> *const c_char;
-    pub fn ov_duration_sec_to_tokens(ctx: *const ov_context, seconds: f32) -> c_int;
+// Wrapped in a macro: cbindgen's synth parser cannot expand macro_rules!,
+// keeping these external-library bindings out of the generated C header
+// (same pattern as qwen3-local).
+macro_rules! omnivoice_ffi {
+    () => {
+        extern "C" {
+            pub fn ov_init_default_params(p: *mut ov_init_params);
+            pub fn ov_init(params: *const ov_init_params) -> *mut ov_context;
+            pub fn ov_free(ctx: *mut ov_context);
+            pub fn ov_last_error() -> *const c_char;
+            pub fn ov_tts_default_params(p: *mut ov_tts_params);
+            pub fn ov_synthesize(
+                ctx: *mut ov_context,
+                params: *const ov_tts_params,
+                out: *mut ov_audio,
+            ) -> ov_status;
+            pub fn ov_audio_free(audio: *mut ov_audio);
+            pub fn ov_n_languages() -> c_int;
+            pub fn ov_language_id(index: c_int) -> *const c_char;
+            pub fn ov_language_name(id: *const c_char) -> *const c_char;
+            pub fn ov_duration_sec_to_tokens(ctx: *const ov_context, seconds: f32) -> c_int;
+        }
+    };
 }
+
+omnivoice_ffi!();
 
 // ── Layout assertions (x86-64) ──────────────────────────────────────
 // These catch any drift between the Rust and C layouts — the exact
