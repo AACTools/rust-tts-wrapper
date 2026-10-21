@@ -49,6 +49,59 @@ jobs:
           name: tts_wrapper_header
           path: include/tts_wrapper.h
 
+  # ── Library-dependent offline engines ─────────────────────────────
+  # qwen3-local, omnivoice-local, and pocket-timing each need an external
+  # shared library built from source. Build once per push/PR, cache the
+  # artifacts, then clippy + test each feature.
+  offline-engines:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: qwen3-local
+            repo: predict-woo/qwen3-tts.cpp
+            build_flags: ""
+            env_var: QWEN3_TTS_LIB
+          - engine: omnivoice-local
+            repo: ServeurpersoCom/omnivoice.cpp
+            build_flags: "-DGGML_BLAS=ON -DOMNIVOICE_SHARED=ON"
+            env_var: OMNIVOICE_LIB
+          - engine: pocket-timing
+            repo: none
+            build_flags: ""
+            env_var: none
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # pocket-timing has no external library (ort downloads prebuilts)
+      - name: Clippy + test (pocket-timing)
+        if: matrix.engine == 'pocket-timing'
+        run: |
+          cargo clippy --no-default-features --features pocket-timing -- -D warnings
+          cargo test --no-default-features --features pocket-timing --lib
+
+      - name: Build runtime library
+        if: matrix.repo != 'none'
+        run: |
+          sudo apt-get update && sudo apt-get install -y cmake libopenblas-dev
+          git clone --depth 1 --recurse-submodules https://github.com/${{ matrix.repo }} ~/engine
+          cd ~/engine
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.build_flags }}
+          cmake --build build -j$(nproc) --target ${{ matrix.engine == 'omnivoice-local' && 'omnivoice' || 'qwen3tts_shared' }}
+
+      - name: Clippy + test (${{ matrix.engine }})
+        if: matrix.repo != 'none'
+        env:
+          QWEN3_TTS_LIB: ${{ matrix.engine == 'qwen3-local' && '/home/runner/engine' || '' }}
+          OMNIVOICE_LIB: ${{ matrix.engine == 'omnivoice-local' && '/home/runner/engine' || '' }}
+        run: |
+          cargo clippy --no-default-features --features ${{ matrix.engine }} -- -D warnings
+          cargo test --no-default-features --features ${{ matrix.engine }} --lib
+
   macos-build:
     runs-on: macos-latest
     steps:
