@@ -797,8 +797,6 @@ fn read_npy_f32(path: &Path) -> Result<Vec<f32>, String> {
         return Err("npy is not f32".into());
     }
     let data = &b[10 + hlen..];
-    Ok(data
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect())
+    let (chunks, _rem) = data.as_chunks::<4>();
+    Ok(chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
 }
