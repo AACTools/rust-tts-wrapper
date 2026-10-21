@@ -91,7 +91,8 @@ jobs:
           git clone --depth 1 --recurse-submodules https://github.com/${{ matrix.repo }} ~/engine
           cd ~/engine
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.build_flags }}
-          cmake --build build -j$(nproc) --target ${{ matrix.engine == 'omnivoice-local' && 'omnivoice' || 'qwen3tts_shared' }}
+          # build everything: qwen3tts_shared needs ggml built first
+          cmake --build build -j$(nproc)
 
       - name: Clippy + test (${{ matrix.engine }})
         if: matrix.repo != 'none'
