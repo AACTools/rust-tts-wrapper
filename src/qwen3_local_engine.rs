@@ -27,7 +27,7 @@ use crate::qwen3_local_support::{
     EMBEDDING_SIZE,
 };
 use crate::ssml_expand::expand_ssml_to_text;
-use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary};
+use crate::types::{Gender, LanguageCode, TtsError, TtsResult, Voice};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_float, c_int};

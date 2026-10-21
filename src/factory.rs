@@ -113,6 +113,45 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
                 return None;
             }
         }
+        "omnivoice-local" => {
+            #[cfg(feature = "omnivoice-local")]
+            {
+                use crate::omnivoice_local_engine::{OmniVoiceLocalEngine, OmniVoiceLocalParams};
+                let creds: std::collections::HashMap<String, String> =
+                    if credentials_json.is_empty() {
+                        std::collections::HashMap::new()
+                    } else {
+                        serde_json::from_str(credentials_json).unwrap_or_default()
+                    };
+                let params = OmniVoiceLocalParams {
+                    model_path: creds.get("modelPath").cloned().unwrap_or_default(),
+                    codec_path: creds.get("codecPath").cloned().unwrap_or_default(),
+                    num_steps: creds
+                        .get("numSteps")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(32),
+                    seed: creds.get("seed").and_then(|s| s.parse().ok()).unwrap_or(42),
+                    instruct: creds.get("instruct").cloned(),
+                    language: creds.get("language").cloned().unwrap_or_default(),
+                    ..Default::default()
+                };
+                return match OmniVoiceLocalEngine::new(params) {
+                    Ok(engine) => Some(Arc::new(engine)),
+                    Err(e) => {
+                        eprintln!("Engine 'omnivoice-local' failed to load: {e}");
+                        None
+                    }
+                };
+            }
+            #[cfg(not(feature = "omnivoice-local"))]
+            {
+                eprintln!(
+                    "Engine 'omnivoice-local' is not enabled in this build. \
+                     Rebuild with --features omnivoice-local."
+                );
+                return None;
+            }
+        }
         "floravox" => {
             #[cfg(feature = "floravox")]
             {
@@ -225,6 +264,23 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         name: "floravox".into(),
         needs_credentials: true,
         credential_keys_json: r#"["modelsDir","modelId","misaki","chars","speaker"]"#.into(),
+    });
+
+    #[cfg(feature = "omnivoice-local")]
+    engines.push(EngineDescriptor {
+        id: "omnivoice-local".into(),
+        name: "OmniVoice local (600+ languages, offline)".into(),
+        needs_credentials: true,
+        credential_keys_json:
+            r#"["modelPath","codecPath","numSteps","seed","instruct","language"]"#.into(),
+    });
+
+    #[cfg(feature = "pocket-timing")]
+    engines.push(EngineDescriptor {
+        id: "pocket".into(),
+        name: "Pocket TTS (attention-timed, phoneme-driven)".into(),
+        needs_credentials: true,
+        credential_keys_json: r#"["bundleDir","reference"]"#.into(),
     });
 
     #[cfg(feature = "cloud")]
