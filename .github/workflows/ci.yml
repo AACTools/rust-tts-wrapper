@@ -90,15 +90,16 @@ jobs:
           sudo apt-get update && sudo apt-get install -y cmake libopenblas-dev
           git clone --depth 1 --recurse-submodules https://github.com/${{ matrix.repo }} ~/engine
           cd ~/engine
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.build_flags }}
-          # build everything: qwen3tts_shared needs ggml built first.
-          # The linker needs the ggml build dirs for the shared library.
-          cmake --build build -j$(nproc) || true
-          # if the shared lib failed to link, add ggml paths and retry
-          if [ ! -f build/libqwen3tts.so ]; then
-            export LIBRARY_PATH="$HOME/engine/ggml/build/src:$HOME/engine/build:$LIBRARY_PATH"
+          # qwen3-tts.cpp expects ggml pre-built in ggml/build/ (it links
+          # against those .so files, not via add_subdirectory)
+          if [ -d ggml ]; then
+            cd ggml
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
             cmake --build build -j$(nproc)
+            cd ..
           fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.build_flags }}
+          cmake --build build -j$(nproc)
 
       - name: Clippy + test (${{ matrix.engine }})
         if: matrix.repo != 'none'
