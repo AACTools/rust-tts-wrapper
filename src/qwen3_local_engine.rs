@@ -343,18 +343,123 @@ fn plain_text_for_qwen(text: &str) -> String {
     text.to_string()
 }
 
+/// Parse SSML into break-separated segments; returns `None` for plain text.
+#[cfg(feature = "ssml-expand")]
+fn ssml_segments_for_qwen(text: &str) -> Option<Vec<crate::ssml_expand::SsmlSegment>> {
+    let trimmed = text.trim();
+    if trimmed.to_ascii_lowercase().starts_with("<speak") {
+        return crate::ssml_expand::expand_ssml_to_segments(trimmed);
+    }
+    None
+}
+
+/// Synthesise a list of segments with silence gaps between them,
+/// concatenating the PCM and firing marks at segment boundaries.
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+#[cfg(feature = "ssml-expand")]
+fn speak_segments(
+    engine: &Qwen3LocalEngine,
+    segments: &[crate::ssml_expand::SsmlSegment],
+    voice: Option<&str>,
+    rate: f32,
+    volume: f32,
+    mut on_audio: Option<crate::engine::OnAudioCallback<'_>>,
+    mut on_boundary: Option<crate::engine::OnBoundaryCallback<'_>>,
+    mut on_mark: Option<crate::engine::OnMarkCallback<'_>>,
+) -> TtsResult<()> {
+    let sr = 24_000u32;
+    let mut all_pcm: Vec<i16> = Vec::new();
+    let mut offset_secs: f32 = 0.0;
+
+    for seg in segments {
+        // fire marks at this segment's start
+        if let Some(cb) = on_mark.as_mut() {
+            for name in &seg.marks {
+                cb(name, offset_secs, offset_secs, -1);
+            }
+        }
+
+        if seg.text.is_empty() {
+            // pure break segment — just add silence
+            let silence_samples = (seg.pause_after_ms as f32 / 1000.0 * sr as f32) as usize;
+            all_pcm.extend(std::iter::repeat_n(0i16, silence_samples));
+            offset_secs += silence_samples as f32 / sr as f32;
+            continue;
+        }
+
+        // synthesise this segment
+        let seg_text = seg.text.as_str();
+        let (pcm_bytes, _pcm_rate) =
+            engine.synthesize_to_pcm16(seg_text, voice, engine.params.clone())?;
+        let seg_dur = pcm_bytes.len() as f32 / (sr as f32 * 2.0);
+
+        // deliver audio chunk (pcm_bytes are already LE i16 bytes)
+        if let Some(cb) = on_audio.as_mut() {
+            for chunk in pcm_bytes.chunks(7200) {
+                cb(chunk);
+            }
+        }
+
+        // fire boundaries for this segment, offset by accumulated time
+        if let Some(cb) = on_boundary.as_mut() {
+            let boundaries = crate::engine::weighted_boundaries_scaled(seg_text, seg_dur);
+            for b in &boundaries {
+                let start = offset_secs + b.offset as f32 / 1000.0;
+                let end = offset_secs + (b.offset + b.duration) as f32 / 1000.0;
+                cb(&b.text, start, end, -1, -1, true);
+            }
+        }
+
+        // append the i16 samples (from LE bytes)
+        for pair in pcm_bytes.chunks_exact(2) {
+            let lo = u16::from(pair[0]);
+            let hi = u16::from(pair[1]);
+            all_pcm.push((lo | (hi << 8)) as i16);
+        }
+        offset_secs += seg_dur;
+
+        // insert silence for the break
+        if seg.pause_after_ms > 0 {
+            let silence_samples = (seg.pause_after_ms as f32 / 1000.0 * sr as f32) as usize;
+            all_pcm.extend(std::iter::repeat_n(0i16, silence_samples));
+            offset_secs += silence_samples as f32 / sr as f32;
+        }
+    }
+
+    let _ = (rate, volume); // rate/volume handled per-segment by the engine
+    Ok(())
+}
+
 impl TtsEngine for Qwen3LocalEngine {
     fn speak(
         &self,
         text: &str,
         voice: Option<&str>,
-        _rate: f32,
+        rate: f32,
         _pitch: f32,
         volume: f32,
         mut on_audio: Option<crate::engine::OnAudioCallback>,
         mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
-        _on_mark: Option<crate::engine::OnMarkCallback>,
+        on_mark: Option<crate::engine::OnMarkCallback>,
     ) -> TtsResult<()> {
+        // SSML with <break> tags: synthesise each segment independently,
+        // insert silence gaps, fire marks at segment boundaries (#50)
+        #[cfg(feature = "ssml-expand")]
+        if let Some(segments) = ssml_segments_for_qwen(text) {
+            if segments.len() > 1 || segments.first().is_some_and(|s| s.pause_after_ms > 0) {
+                return speak_segments(
+                    self,
+                    &segments,
+                    voice,
+                    rate,
+                    volume,
+                    on_audio,
+                    on_boundary,
+                    on_mark,
+                );
+            }
+        }
+
         // SSML-in: strip once here — both the C++ input and the word
         // boundary estimates use the plain text (tags are never words).
         let plain = if text.trim_start().starts_with('<') {

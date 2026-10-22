@@ -720,3 +720,95 @@ mod roundtrip_tests {
         assert_eq!(text, "artificial intelligence speaks");
     }
 }
+
+/// One text segment between SSML `<break>` tags, with the pause that
+/// follows it (milliseconds). The final segment has no trailing pause.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SsmlSegment {
+    /// Plain spoken text for this segment (say-as expanded, sub aliased)
+    pub text: String,
+    /// Pause after this segment in milliseconds (from `<break time="X"/>`)
+    pub pause_after_ms: u32,
+    /// Mark names that fire at the START of this segment
+    pub marks: Vec<String>,
+}
+
+/// Parse SSML into segments split at `<break>` boundaries, preserving
+/// mark positions. Returns `None` when the input is not SSML.
+///
+/// This is the structured counterpart to [`expand_ssml_to_text`]: engines
+/// that can insert silence gaps (qwen3-local, omnivoice-local) use this
+/// to synthesise each segment independently and concatenate with pauses.
+#[must_use]
+pub fn expand_ssml_to_segments(ssml: &str) -> Option<Vec<SsmlSegment>> {
+    let doc = floravox_ssml::parse(ssml).ok()?;
+
+    let mut segments: Vec<SsmlSegment> = vec![SsmlSegment {
+        text: String::new(),
+        pause_after_ms: 0,
+        marks: Vec::new(),
+    }];
+    let mut pending_marks: Vec<String> = Vec::new();
+
+    for seg in &doc.segments {
+        match seg {
+            floravox_ssml::Segment::Words { words } => {
+                for w in words {
+                    let base = if w.spoken.is_empty() {
+                        w.text.clone()
+                    } else {
+                        w.spoken.clone()
+                    };
+                    // say-as expansion
+                    if w.phonemes.as_deref().unwrap_or_default().is_empty()
+                        && !matches!(
+                            w.say_as,
+                            floravox_ssml::SayAs::None | floravox_ssml::SayAs::Other
+                        )
+                    {
+                        for ex in expand_word(&base, w.char_span.clone(), w.say_as) {
+                            let last = segments.last_mut()?;
+                            if !last.text.is_empty() {
+                                last.text.push(' ');
+                            }
+                            last.text.push_str(&ex.spoken);
+                        }
+                    } else {
+                        let last = segments.last_mut()?;
+                        if !last.text.is_empty() {
+                            last.text.push(' ');
+                        }
+                        last.text.push_str(&base);
+                    }
+                }
+            }
+            floravox_ssml::Segment::Break { ms, .. } => {
+                // close the current segment, start a new one
+                if let Some(last) = segments.last_mut() {
+                    last.pause_after_ms = *ms;
+                }
+                segments.push(SsmlSegment {
+                    text: String::new(),
+                    pause_after_ms: 0,
+                    marks: Vec::new(),
+                });
+            }
+            floravox_ssml::Segment::Mark { name, .. } => {
+                pending_marks.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+
+    // attach pending marks to the current (last) segment
+    if !pending_marks.is_empty() {
+        if let Some(last) = segments.last_mut() {
+            last.marks = pending_marks;
+        }
+    }
+
+    // drop empty segments that have no marks and no pause
+    segments.retain(|s| !s.text.is_empty() || !s.marks.is_empty() || s.pause_after_ms > 0);
+
+    Some(segments)
+}
