@@ -647,18 +647,24 @@ jobs:
         run: |
           git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git ~/ov
           cd ~/ov
-          # GGML_SHARED=OFF: omnivoice embeds its (forked) ggml statically.
-          # Both engine projects build a 'ggml' shared lib; shipping one
-          # flat copy made omnivoice bind qwen's ggml exports and die with
-          # STATUS_ENTRYPOINT_NOT_FOUND. Static ggml = self-contained.
+          # Win/mac (GH #62): GGML_SHARED=OFF + BUILD_SHARED_LIBS=OFF so
+          # omnivoice embeds its (forked) ggml statically -- both engine
+          # projects build a 'ggml' shared lib, and shipping one flat copy
+          # made omnivoice bind qwen's ggml exports at load
+          # (STATUS_ENTRYPOINT_NOT_FOUND). Linux keeps its historical
+          # shared-ggml bundle (out of #62 scope; static archives there
+          # lack -fPIC and cannot link into the .so).
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON \
               -DGGML_SHARED=OFF -DBUILD_SHARED_LIBS=OFF -G Ninja
             cmake --build build -j
-          else
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON \
               -DGGML_SHARED=OFF -DBUILD_SHARED_LIBS=OFF
-            cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+            cmake --build build -j$(sysctl -n hw.ncpu)
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON
+            cmake --build build -j$(nproc)
           fi
           # GUARD: omnivoice must not depend on any external ggml shared
           # lib (it would bind qwen's ggml at load and die). Fail loudly
