@@ -663,8 +663,12 @@ jobs:
           # GUARD: omnivoice must not depend on any external ggml shared
           # lib (it would bind qwen's ggml at load and die). Fail loudly
           # if either cmake knob was ignored.
-          if find ~/ov -name "ggml*.dll" -o -name "libggml*.dylib*" -o -name "libggml*.so*" 2>/dev/null | grep -q .; then
-            echo "omnivoice ggml still shared -- cmake knobs ignored:"; find ~/ov -name "ggml*.dll" -o -name "libggml*"; exit 1
+          # (Windows/mac only: linux ships its pre-existing shared-ggml
+          # bundle and is out of GH #62's scope)
+          if [[ "${{ runner.os }}" != "Linux" ]]; then
+            if find ~/ov -name "ggml*.dll" -o -name "libggml*.dylib*" 2>/dev/null | grep -q .; then
+              echo "omnivoice ggml still shared -- cmake knobs ignored:"; find ~/ov -name "ggml*.dll" -o -name "libggml*.dylib*"; exit 1
+            fi
           fi
 
       - name: Build qwen3-tts.cpp
