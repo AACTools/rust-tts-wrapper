@@ -633,14 +633,20 @@ jobs:
               \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
               -exec cp {} engine-libs/ \; 2>/dev/null || true
           done
-          # qwen3 + its ggml deps
-          for dir in ~/qwen/build ~/qwen/build/Release ~/qwen/build/src ~/qwen/build/src/Release \
-                      ~/qwen/ggml/build ~/qwen/ggml/build/Release ~/qwen/ggml/build/src ~/qwen/ggml/build/src/Release; do
-            [ -d "$dir" ] && find "$dir" -maxdepth 1 \
-              \( -name "libqwen3tts*" -o -name "qwen3tts*" -o -name "libggml*" -o -name "ggml*" \) \
-              \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
-              -exec cp {} engine-libs/ \; 2>/dev/null || true
-          done
+          # qwen3 + its ggml deps. NOTE: qwen's cmake puts runtime
+          # artifacts in build/bin and build/ggml/bin on Windows, and
+          # the import lib can land apart from the dll -- so scan the
+          # whole build tree. qwen3 runs LAST so that on filename
+          # collisions (both projects build ggml) qwen's ggml wins:
+          # qwen3tts.dll is linked against qwen's own ggml build.
+          [ -d ~/qwen/build ] && find ~/qwen/build -maxdepth 3 \
+            \( -name "libqwen3tts*" -o -name "qwen3tts*" -o -name "libggml*" -o -name "ggml*" \) \
+            \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
+            -exec cp {} engine-libs/ \; 2>/dev/null || true
+          [ -d ~/qwen/ggml/build ] && find ~/qwen/ggml/build -maxdepth 3 \
+            \( -name "libggml*" -o -name "ggml*" \) \
+            \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
+            -exec cp {} engine-libs/ \; 2>/dev/null || true
           # deduplicate ggml (same names from both builds — last one wins)
           cd engine-libs && ls -la && cd ..
           # README
