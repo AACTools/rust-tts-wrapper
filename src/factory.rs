@@ -4,6 +4,43 @@ use crate::engine::TtsEngine;
 use crate::types::EngineDescriptor;
 use std::sync::Arc;
 
+/// Parse engine credentials JSON into a string map, coercing JSON scalars
+/// (numbers, bools) to their string form. Fixes #58: a single
+/// `{"numSteps": 16}` (JSON number) no longer silently empties ALL
+/// credentials — it coerces to `"16"` like the engine code expects.
+#[must_use]
+pub fn parse_credentials(credentials_json: &str) -> std::collections::HashMap<String, String> {
+    if credentials_json.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let parsed: std::collections::HashMap<String, serde_json::Value> =
+        match serde_json::from_str(credentials_json) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "factory: credentials JSON is malformed ({e}) — \
+                     engine will start with no credentials"
+                );
+                return std::collections::HashMap::new();
+            }
+        };
+    parsed
+        .into_iter()
+        .map(|(k, v)| {
+            let s = match v {
+                serde_json::Value::String(s) => s,
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Null => String::new(),
+                // objects/arrays become their JSON repr (rarely useful,
+                // but at least visible in error messages)
+                other => other.to_string(),
+            };
+            (k, s)
+        })
+        .collect()
+}
+
 // The unused-import warning is a false positive — TtsEngine is a trait used as a dyn bound.
 #[cfg(all(feature = "avsynth", target_os = "macos"))]
 use crate::avsynth_engine::AvSynthEngine;
@@ -90,12 +127,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
         "qwen3-local" => {
             #[cfg(feature = "qwen3-local")]
             {
-                let creds: std::collections::HashMap<String, String> =
-                    if credentials_json.is_empty() {
-                        std::collections::HashMap::new()
-                    } else {
-                        serde_json::from_str(credentials_json).unwrap_or_default()
-                    };
+                let creds = parse_credentials(credentials_json);
                 return match Qwen3LocalEngine::new(&creds) {
                     Ok(engine) => Some(Arc::new(engine)),
                     Err(e) => {
@@ -117,12 +149,7 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
             #[cfg(feature = "omnivoice-local")]
             {
                 use crate::omnivoice_local_engine::{OmniVoiceLocalEngine, OmniVoiceLocalParams};
-                let creds: std::collections::HashMap<String, String> =
-                    if credentials_json.is_empty() {
-                        std::collections::HashMap::new()
-                    } else {
-                        serde_json::from_str(credentials_json).unwrap_or_default()
-                    };
+                let creds = parse_credentials(credentials_json);
                 let params = OmniVoiceLocalParams {
                     model_path: creds.get("modelPath").cloned().unwrap_or_default(),
                     codec_path: creds.get("codecPath").cloned().unwrap_or_default(),
@@ -345,4 +372,44 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
     }
 
     engines
+}
+
+#[cfg(test)]
+mod credentials_tests {
+    use super::parse_credentials;
+
+    #[test]
+    fn json_numbers_coerce_to_strings() {
+        let creds = parse_credentials(r#"{"modelPath":"/m.gguf","numSteps":16,"seed":42}"#);
+        assert_eq!(creds.get("modelPath").map(String::as_str), Some("/m.gguf"));
+        assert_eq!(creds.get("numSteps").map(String::as_str), Some("16"));
+        assert_eq!(creds.get("seed").map(String::as_str), Some("42"));
+    }
+
+    #[test]
+    fn json_bools_coerce() {
+        let creds = parse_credentials(r#"{"verbose":true,"fast":false}"#);
+        assert_eq!(creds.get("verbose").map(String::as_str), Some("true"));
+        assert_eq!(creds.get("fast").map(String::as_str), Some("false"));
+    }
+
+    #[test]
+    fn malformed_json_warns_not_silences() {
+        let creds = parse_credentials(r#"{"broken": tru}"#);
+        assert!(creds.is_empty());
+    }
+
+    #[test]
+    fn empty_input_is_empty_map() {
+        assert!(parse_credentials("").is_empty());
+    }
+
+    #[test]
+    fn mixed_types_all_coerce() {
+        let creds =
+            parse_credentials(r#"{"path":"/a/b","count":3,"ratio":0.5,"flag":true,"name":"test"}"#);
+        assert_eq!(creds.len(), 5);
+        assert_eq!(creds.get("count").map(String::as_str), Some("3"));
+        assert_eq!(creds.get("ratio").map(String::as_str), Some("0.5"));
+    }
 }
