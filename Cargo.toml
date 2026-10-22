@@ -59,7 +59,7 @@ ssml-expand = ["dep:floravox-ssml"]
 # 600+ languages, voice cloning, voice design, GGUF models.
 # Requires the omnivoice.cpp shared library; see VOICE_CLONING_PLAN.md
 # for build + model setup and the critical --duration finding.
-omnivoice-local = ["dep:hound", "ssml-expand"]
+omnivoice-local = ["dep:hound", "dep:serde_json", "ssml-expand"]
 sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
