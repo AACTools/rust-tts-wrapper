@@ -531,9 +531,6 @@ jobs:
           - os: macos-latest
             platform: macos-arm64
             ext: .dylib
-          - os: windows-latest
-            platform: windows-x86_64
-            ext: .dll
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install build deps (Linux)
