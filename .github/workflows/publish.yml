@@ -580,30 +580,35 @@ jobs:
         shell: bash
         run: |
           mkdir -p engine-libs
-          # omnivoice: lib + ggml deps
-          find ~/ov/build -name "libomnivoice${{ matrix.ext }}*" -o -name "omnivoice${{ matrix.ext }}" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
-          find ~/ov/build -name "libggml*${{ matrix.ext }}*" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
-          find ~/ov/ggml/build -name "libggml*${{ matrix.ext }}*" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
-          # qwen3: lib + ggml deps
-          find ~/qwen/build -name "libqwen3tts${{ matrix.ext }}*" -o -name "qwen3tts${{ matrix.ext }}" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
-          find ~/qwen/ggml/build -name "libggml*${{ matrix.ext }}*" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
-          # deduplicate ggml libs (same names from both builds — keep omnivoice's)
-          cd engine-libs
-          ls -la
-          # create a README
-          cat > README.txt << 'EOF'
+          # omnivoice + its ggml deps (resilient: skip missing paths)
+          for dir in ~/ov/build ~/ov/build/src ~/ov/ggml/build ~/ov/ggml/build/src; do
+            [ -d "$dir" ] && find "$dir" -maxdepth 1 \
+              \( -name "libomnivoice*" -o -name "omnivoice*" -o -name "libggml*" \) \
+              -exec cp {} engine-libs/ \; 2>/dev/null || true
+          done
+          # qwen3 + its ggml deps
+          for dir in ~/qwen/build ~/qwen/build/src ~/qwen/ggml/build ~/qwen/ggml/build/src; do
+            [ -d "$dir" ] && find "$dir" -maxdepth 1 \
+              \( -name "libqwen3tts*" -o -name "qwen3tts*" -o -name "libggml*" \) \
+              -exec cp {} engine-libs/ \; 2>/dev/null || true
+          done
+          # deduplicate ggml (same names from both builds — last one wins)
+          cd engine-libs && ls -la && cd ..
+          # README
+          cat > engine-libs/README.txt << 'HEREDOC'
           Offline engine shared libraries for rust-tts-wrapper
 
-          omnivoice-local feature:  set OMNIVOICE_LIB to a directory containing
-            libomnivoice + libggml (or add to LD_LIBRARY_PATH/DYLD_LIBRARY_PATH/PATH)
+          omnivoice-local feature: set OMNIVOICE_LIB to a directory containing
+          libomnivoice + libggml (or add to LD_LIBRARY_PATH/DYLD_LIBRARY_PATH/PATH)
 
-          qwen3-local feature:  set QWEN3_TTS_LIB to the qwen3-tts.cpp repo root
-            containing build/libqwen3tts.so and ggml/build/src/libggml*.so
+          qwen3-local feature: set QWEN3_TTS_LIB to the qwen3-tts.cpp repo root
+          containing build/libqwen3tts.so and ggml/build/src/libggml*.so
 
           GGUF models (not included):
             omnivoice: huggingface-cli download Serveurperso/OmniVoice-GGUF
             qwen3:     see https://github.com/predict-woo/qwen3-tts.cpp
-          EOF
+          HEREDOC
+          echo "Collected $(ls engine-libs | wc -l) files
 
       - name: Upload engine libs
         uses: actions/upload-artifact@v4
