@@ -48,11 +48,11 @@ default = ["system", "cloud", "sherpaonnx", "display_names"]
 system = ["speech-dispatcher"]
 # cloud-core: the pure provider shapes shared by native + wasm (config,
 # sigv4, request builders, response parsers) — no HTTP stack
-cloud-core = ["dep:serde_json", "dep:base64", "speechmarkdown", "dep:sha2"]
+cloud-core = ["dep:base64", "speechmarkdown", "dep:sha2"]
 cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 # pocket-tts with REAL word timings: our own streaming loop over the tapped
 # Kyutai ONNX graphs (attention = the model's own alignment)
-pocket-timing = ["dep:ort", "dep:ndarray", "dep:serde_json", "dep:hound", "dep:floravox-ssml", "speechmarkdown", "ssml-expand"]
+pocket-timing = ["dep:ort", "dep:ndarray", "dep:hound", "dep:floravox-ssml", "speechmarkdown", "ssml-expand"]
 
 # wrapper-level <say-as> expansion (characters/cardinal/ordinal/date/
 # time/currency/telephone -> spoken words) for engines without native
@@ -63,8 +63,8 @@ ssml-expand = ["dep:floravox-ssml"]
 # 600+ languages, voice cloning, voice design, GGUF models.
 # Requires the omnivoice.cpp shared library; see VOICE_CLONING_PLAN.md
 # for build + model setup and the critical --duration finding.
-omnivoice-local = ["dep:hound", "dep:serde_json", "ssml-expand"]
-sherpaonnx = ["sherpa-onnx", "dep:serde_json", "dep:sherpa-onnx-models"]
+omnivoice-local = ["dep:hound", "ssml-expand"]
+sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
 # with measured word timings on duration-patched voices, a student-tier
@@ -104,7 +104,7 @@ display_names = ["dep:icu_displaynames", "dep:icu_locid"]
 # clones and builds predict-woo/qwen3-tts.cpp). Opt-in like
 # speech-dispatcher: enabling the feature without the lib fails the
 # build with instructions.
-qwen3-local = ["dep:serde_json", "dep:base64", "ssml-expand"]
+qwen3-local = ["dep:base64", "ssml-expand"]
 # Voice cloning: VoiceIdentity/VoiceCloning trait, LJSpeech corpus, Apple
 # Personal Voice export import, and enrollment clients for the instant
 # cloners (Qwen voice-enrollment, ElevenLabs IVC). Needs cloud (HTTP +
@@ -123,7 +123,7 @@ reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], def
 # Voice cloning: reading Personal Voice export archives (TrainingData/*.caf).
 zip = { version = "8", default-features = false, features = ["deflate"], optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", optional = true }
+serde_json = "1"  # non-optional: factory parse_credentials needs it (#58)
 # Exact pin: the i686-windows publish job links a prebuilt static lib
 # downloaded from the k2-fsa release of THIS version (see publish.yml
 # "Download sherpa-onnx x86 prebuilt"). A minor drift (crate 1.13.4 with
