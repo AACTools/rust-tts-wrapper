@@ -89,8 +89,16 @@ jobs:
           cp "${q[@]}" eng/qwen3/build/
           cp "${g[@]}" eng/qwen3/ggml/build/src/
           cp "${o[@]}" eng/omnivoice/build/
-          echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
-          echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+          # Windows/MSVC: link.exe cannot use MSYS paths (/d/a/...), and
+          # build.rs passes QWEN3_TTS_LIB/OMNIVOICE_LIB verbatim into
+          # /LIBPATH -- so hand it a real Windows path via cygpath.
+          if command -v cygpath >/dev/null 2>&1; then
+            echo "QWEN3_TTS_LIB=$(cygpath -w "$PWD/eng/qwen3")" >> $GITHUB_ENV
+            echo "OMNIVOICE_LIB=$(cygpath -w "$PWD/eng/omnivoice")" >> $GITHUB_ENV
+          else
+            echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
+            echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+          fi
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
       - name: Test (NuGet x64 feature set with offline engines)
         # The exact configuration the shipped x64 DLL carries (GH #62).
@@ -367,8 +375,16 @@ jobs:
           cp "${q[@]}" eng/qwen3/build/
           cp "${g[@]}" eng/qwen3/ggml/build/src/
           cp "${o[@]}" eng/omnivoice/build/
-          echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
-          echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+          # Windows/MSVC: link.exe cannot use MSYS paths (/d/a/...), and
+          # build.rs passes QWEN3_TTS_LIB/OMNIVOICE_LIB verbatim into
+          # /LIBPATH -- so hand it a real Windows path via cygpath.
+          if command -v cygpath >/dev/null 2>&1; then
+            echo "QWEN3_TTS_LIB=$(cygpath -w "$PWD/eng/qwen3")" >> $GITHUB_ENV
+            echo "OMNIVOICE_LIB=$(cygpath -w "$PWD/eng/omnivoice")" >> $GITHUB_ENV
+          else
+            echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
+            echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+          fi
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
       - name: Build release (cargo)
         if: matrix.cross != true && matrix.android != true
