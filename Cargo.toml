@@ -1,6 +1,6 @@
 [package]
 name = "rust-tts-wrapper"
-version = "1.6.0"
+version = "1.6.1"
 edition = "2021"
 license = "MIT"
 description = "Cross-platform TTS wrapper with C API — mirrors js-tts-wrapper / SwiftTTSWrapper"
@@ -77,7 +77,6 @@ floravox = [
   "dep:floravox-core",
   "dep:floravox-g2p",
   "floravox-g2p/onnx",
-  "dep:serde_json",
   "speechmarkdown",
 ]
 # Lexicon + Phonetisaurus G2P chains for non-English phoneme voices, plus
