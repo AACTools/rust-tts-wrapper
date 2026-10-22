@@ -610,7 +610,10 @@ jobs:
           fi
           cd ..
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+            # qwen3tts_shared exports no symbols on Windows (linux relies
+            # on default visibility) -- without this the DLL gets no
+            # import lib and the Rust link fails with unresolved externals.
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja -DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON
             cmake --build build -j
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
