@@ -95,6 +95,9 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then
             echo "QWEN3_TTS_LIB=$(cygpath -w "$PWD/eng/qwen3")" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$(cygpath -w "$PWD/eng/omnivoice")" >> $GITHUB_ENV
+            # test binaries load qwen3tts/omnivoice/ggml at startup:
+            # put their dirs on PATH (Windows loader search)
+            echo "PATH=$(cygpath -p "$PATH:$PWD/eng/qwen3/build:$PWD/eng/qwen3/ggml/build/src:$PWD/eng/omnivoice/build")" >> $GITHUB_ENV
           else
             echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
@@ -381,6 +384,9 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then
             echo "QWEN3_TTS_LIB=$(cygpath -w "$PWD/eng/qwen3")" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$(cygpath -w "$PWD/eng/omnivoice")" >> $GITHUB_ENV
+            # test binaries load qwen3tts/omnivoice/ggml at startup:
+            # put their dirs on PATH (Windows loader search)
+            echo "PATH=$(cygpath -p "$PATH:$PWD/eng/qwen3/build:$PWD/eng/qwen3/ggml/build/src:$PWD/eng/omnivoice/build")" >> $GITHUB_ENV
           else
             echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
