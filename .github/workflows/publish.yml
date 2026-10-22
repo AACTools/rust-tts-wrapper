@@ -543,7 +543,7 @@ jobs:
       - name: Build omnivoice.cpp
         shell: bash
         run: |
-          git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.git ~/ov
+          git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git ~/ov
           cd ~/ov
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -G "Visual Studio 17 2022"
