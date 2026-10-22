@@ -490,12 +490,23 @@ client.SpeakSync("Hello world");
 `sapi` + `cloud` + `sherpaonnx` (the sherpa builds carry lexicon/G2P
 bundles, measured boundaries, SSML marks). Since GH #62 the `win-x64`
 DLL also compiles in the **`qwen3-local`** and **`omnivoice-local`**
-offline engines, and the package ships their shared libraries
-(`engine-qwen3tts.dll`, `engine-omnivoice.dll`, `engine-ggml*.dll`)
-beside `rust_tts_wrapper.dll` under `runtimes/win-x64/native/`. GGUF
-models are NOT bundled — point the engines' credentials at a models
-directory. `win-x86` stays engine-less (32-bit payload degrades
-cleanly: `tts_create` returns a not-enabled error for those ids).
+offline engines, **`pocket`** (real word timings via the tapped Kyutai
+graphs) and the **`cloning`** tooling (enrollment clients, corpus,
+Apple Personal Voice import), and the package ships the engine shared
+libraries (`engine-qwen3tts.dll`, `engine-omnivoice.dll`,
+`engine-ggml*.dll`) beside `rust_tts_wrapper.dll` under
+`runtimes/win-x64/native/`. GGUF/ONNX models are NOT bundled — point
+the engines' credentials at a models directory. `win-x86` stays
+engine-less (32-bit payload degrades cleanly: `tts_create` returns a
+not-enabled error for those ids).
+
+The **macOS flagship release artifact**
+(`avsynth-cloud-floravox-aarch64-macos`) carries the same offline
+engine set plus `floravox` + `floravox-lexicons` (lexicon-tier G2P for
+non-English voices). Pocket's ONNX sessions pin
+`AutoDevicePolicy::PreferCPU` — without that, ort rc.14+'s silent
+`MaxEfficiency` policy delegates them into CoreML/BNNS on macOS and
+crashes (floravox#17).
 
 ### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
 

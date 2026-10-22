@@ -86,7 +86,7 @@ jobs:
         # The exact configuration the shipped x64 DLL carries (GH #62).
         env:
           RTW_SKIP_EDGE_LIVE: "1"
-        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local
+        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local,pocket-timing,cloning
 
   build:
     name: Build ${{ matrix.label }}
@@ -149,7 +149,7 @@ jobs:
             # GH #62: the flagship offline engines ride in the NuGet x64
             # DLL. The C++ engine libs come from the offline-engine-libs
             # artifact (layout reconstructed below to match build.rs).
-            features: "sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local"
+            features: "sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local,pocket-timing,cloning"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
             offline_engines: true
@@ -173,19 +173,24 @@ jobs:
             allow_failure: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            features: "avsynth,cloud,floravox"
+            # The flagship mac artifact: every offline engine (GH #62),
+            # pocket with real word timings, lexicon-tier G2P, and the
+            # cloning/corpus tooling (Apple Personal Voice import).
+            features: "avsynth,cloud,floravox,floravox-lexicons,qwen3-local,omnivoice-local,pocket-timing,cloning"
             label: "avsynth-cloud-floravox-aarch64-macos"
             lib_ext: dylib
             allow_failure: true
+            offline_engines: true
+            engine_artifact: engine-libs-macos-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,floravox"
+            features: "sapi,cloud,floravox,floravox-lexicons"
             label: "sapi-cloud-floravox-x86_64-windows"
             lib_ext: dll
             allow_failure: true
           - target: aarch64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,floravox"
+            features: "sapi,cloud,floravox,floravox-lexicons"
             label: "sapi-cloud-floravox-aarch64-windows"
             lib_ext: dll
             allow_failure: true
@@ -330,7 +335,7 @@ jobs:
       - uses: actions/download-artifact@v4
         if: matrix.offline_engines == true
         with:
-          name: engine-libs-windows-x64
+          name: ${{ matrix.engine_artifact || 'engine-libs-windows-x64' }}
           path: engine-libs
       - name: "Link offline engines (NuGet x64)"
         # Reconstruct the layout build.rs expects: QWEN3_TTS_LIB points
@@ -340,9 +345,11 @@ jobs:
         shell: bash
         run: |
           mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
-          cp engine-libs/qwen3tts.* eng/qwen3/build/ 2>/dev/null || true
-          cp engine-libs/ggml*.* eng/qwen3/ggml/build/src/ 2>/dev/null || true
-          cp engine-libs/omnivoice.* eng/omnivoice/build/ 2>/dev/null || true
+          # *qwen3tts*/*omnivoice*/*ggml* cover both Windows (qwen3tts.dll)
+          # and mac (libqwen3tts.dylib) artifact namings
+          cp engine-libs/*qwen3tts* eng/qwen3/build/ 2>/dev/null || true
+          cp engine-libs/*ggml*.* eng/qwen3/ggml/build/src/ 2>/dev/null || true
+          cp engine-libs/*omnivoice*.dylib engine-libs/*omnivoice*.so* engine-libs/omnivoice.dll eng/omnivoice/build/ 2>/dev/null || true
           echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
           echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build

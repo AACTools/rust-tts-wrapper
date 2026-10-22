@@ -222,6 +222,11 @@ impl PocketTtsModel {
                 .map_err(|e| e.to_string())?
                 .with_inter_threads(1)
                 .map_err(|e| e.to_string())?
+                // floravox#17: ort rc.14+ silently sets EpSelectionPolicy
+                // = MaxEfficiency (api-22+); on macOS that delegates the
+                // pocket graphs into CoreML/BNNS, which faults. Pin CPU.
+                .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
+                .map_err(|e| e.to_string())?
                 .commit_from_file(path)
                 .map_err(err)
         }
@@ -231,6 +236,8 @@ impl PocketTtsModel {
         let encoder = mk_session(&cfg.encoder, &env)?;
         let decoder = mk_session(&cfg.decoder, &env)?;
         let conditioner = Session::builder(&env)
+            .map_err(err)?
+            .with_auto_device(ort::session::builder::AutoDevicePolicy::PreferCPU)
             .map_err(err)?
             .commit_from_file(&cfg.text_conditioner)
             .map_err(err)?;
@@ -799,4 +806,31 @@ fn read_npy_f32(path: &Path) -> Result<Vec<f32>, String> {
     let data = &b[10 + hlen..];
     let (chunks, _rem) = data.as_chunks::<4>();
     Ok(chunks.iter().map(|c| f32::from_le_bytes(*c)).collect())
+}
+
+#[cfg(test)]
+mod nuget_build_tests {
+    use super::*;
+
+    /// GH #62: this test compiling at all proves pocket is IN the build
+    /// (the factory's "not enabled" path is cfg'd out). A config with
+    /// unreachable paths must fail gracefully with a load error.
+    #[test]
+    fn pocket_compiled_in_and_fails_gracefully() {
+        let cfg = PocketConfig {
+            lm_main: std::path::PathBuf::from("/nonexistent/lm_main.onnx"),
+            lm_flow: std::path::PathBuf::from("/nonexistent/lm_flow.onnx"),
+            encoder: std::path::PathBuf::from("/nonexistent/encoder.onnx"),
+            decoder: std::path::PathBuf::from("/nonexistent/decoder.onnx"),
+            text_conditioner: std::path::PathBuf::from("/nonexistent/text.onnx"),
+            vocab: None,
+            token_scores: None,
+            tokenizer_json: None,
+            bos: None,
+        };
+        let Err(err) = PocketTtsModel::load(&cfg) else {
+            panic!("unreachable paths must error")
+        };
+        assert!(!err.is_empty(), "expected a descriptive error, got empty");
+    }
 }

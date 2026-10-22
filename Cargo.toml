@@ -132,7 +132,14 @@ sherpa-onnx = { version = "=1.13.8", optional = true }
 # rc.14: Session::builder(&Environment) — pocket passes a stored env.
 # Exact pin: prerelease-caret floats within 2.0.0-rc.*, and rc releases
 # have twice changed the builder signature; re-verify on bumps.
-ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native"] }
+# api-22: opts INTO the EpSelectionPolicy API surface. ort rc.14+'s
+# SessionBuilder sets EpSelectionPolicy=MaxEfficiency under api-22+,
+# which on macOS delegates into CoreML/BNNS and crashes (floravox#17).
+# Pocket sessions therefore pin PreferCPU explicitly (pocket/model.rs).
+# Deterministic either way: without api-22 the policy is never set, but
+# any future feature unification (e.g. floravox-core's api-27) would
+# flip it on silently -- so we opt in and pin.
+ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native", "api-22"] }
 ndarray = { version = "0.17", optional = true, features = ["std"] }
 hound = { version = "3", optional = true }
 floravox-ssml = { version = "0.8.8", optional = true }
