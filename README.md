@@ -486,9 +486,16 @@ client.SetVoice("alloy");
 client.SpeakSync("Hello world");
 ```
 
-**NuGet contents per RID** (since 0.5.3): `win-x64` and `win-x86` bundle
-one DLL with `sapi` + `cloud` + `sherpaonnx` (the sherpa builds carry
-lexicon/G2P bundles, measured boundaries, SSML marks).
+**NuGet contents per RID**: `win-x64` and `win-x86` bundle one DLL with
+`sapi` + `cloud` + `sherpaonnx` (the sherpa builds carry lexicon/G2P
+bundles, measured boundaries, SSML marks). Since GH #62 the `win-x64`
+DLL also compiles in the **`qwen3-local`** and **`omnivoice-local`**
+offline engines, and the package ships their shared libraries
+(`engine-qwen3tts.dll`, `engine-omnivoice.dll`, `engine-ggml*.dll`)
+beside `rust_tts_wrapper.dll` under `runtimes/win-x64/native/`. GGUF
+models are NOT bundled — point the engines' credentials at a models
+directory. `win-x86` stays engine-less (32-bit payload degrades
+cleanly: `tts_create` returns a not-enabled error for those ids).
 
 ### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
 

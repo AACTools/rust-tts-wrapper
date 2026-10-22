@@ -577,3 +577,24 @@ impl TtsEngine for Qwen3LocalEngine {
         Ok(unsafe { qwen3_tts_is_loaded(self.tts) != 0 })
     }
 }
+
+#[cfg(test)]
+mod nuget_build_tests {
+    use super::*;
+
+    /// GH #62: this test compiling at all proves the qwen3-local engine
+    /// is IN the build (the factory's "not enabled" path is cfg'd out).
+    /// With empty credentials the engine must fail gracefully — a
+    /// credential error, never a panic or a "not enabled" message.
+    #[test]
+    fn qwen3_local_compiled_in_and_fails_gracefully() {
+        let creds: HashMap<String, String> = HashMap::new();
+        let err = Qwen3LocalEngine::new(&creds)
+            .expect_err("empty credentials must be a credential error");
+        assert!(
+            err.0.contains("modelsDir"),
+            "expected a modelsDir credential error, got: {}",
+            err.0
+        );
+    }
+}

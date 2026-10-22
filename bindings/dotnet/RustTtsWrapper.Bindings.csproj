@@ -76,6 +76,22 @@
   </ItemGroup>
 
   <!--
+    Offline engine shared libraries (GH #62): the x64 wrapper DLL links
+    qwen3tts + omnivoice (+ ggml) at build time, so their DLLs must ship
+    beside it. The publish workflow copies them into target/release/ as
+    engine-*.dll; everything matching is bundled into win-x64/native/.
+    Managed callers do not reference these directly -- the native loader
+    resolves them from the output directory.
+  -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/../../target/release/')">
+    <Content Include="$(MSBuildProjectDirectory)/../../target/release/engine-*.dll"
+             Pack="true"
+             PackagePath="runtimes/win-x64/native/"
+             CopyToOutputDirectory="PreserveNewest"
+             Link="runtimes/win-x64/native/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <!--
     Build target: before packing, verify the native lib exists.
     Skip with -p:SkipNativeLibCheck=true if you want a managed-only package.
   -->

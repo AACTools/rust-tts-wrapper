@@ -507,3 +507,21 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod nuget_build_tests {
+    use super::*;
+
+    /// GH #62: this test compiling at all proves the omnivoice-local
+    /// engine is IN the build. Empty params must fail gracefully.
+    #[test]
+    fn omnivoice_local_compiled_in_and_fails_gracefully() {
+        let err = OmniVoiceLocalEngine::new(OmniVoiceLocalParams::default())
+            .expect_err("empty params must be a credential error");
+        assert!(
+            err.0.contains("required") || err.0.contains("model_path"),
+            "expected a model/codec path error, got: {}",
+            err.0
+        );
+    }
+}

@@ -57,7 +57,7 @@ jobs:
     # (see the build matrix). Test that exact combination — it is the
     # configuration every .NET consumer actually loads.
     name: Test (Windows NuGet features)
-    needs: version
+    needs: [version, offline-engine-libs]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,10 +69,28 @@ jobs:
         env:
           RTW_SKIP_EDGE_LIVE: "1"
         run: cargo test --no-default-features --features sapi,cloud,sherpaonnx
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-libs-windows-x64
+          path: engine-libs
+      - name: Link offline engines
+        shell: bash
+        run: |
+          mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
+          cp engine-libs/qwen3tts.* eng/qwen3/build/ 2>/dev/null || true
+          cp engine-libs/ggml*.* eng/qwen3/ggml/build/src/ 2>/dev/null || true
+          cp engine-libs/omnivoice.* eng/omnivoice/build/ 2>/dev/null || true
+          echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
+          echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+      - name: Test (NuGet x64 feature set with offline engines)
+        # The exact configuration the shipped x64 DLL carries (GH #62).
+        env:
+          RTW_SKIP_EDGE_LIVE: "1"
+        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local
 
   build:
     name: Build ${{ matrix.label }}
-    needs: [test, test-windows]
+    needs: [test, test-windows, offline-engine-libs]
     # Per-matrix-entry: sherpa-onnx builds may fail due to upstream 504
     # download issues (see TODO.md). Core builds are strict.
     continue-on-error: ${{ matrix.allow_failure == true }}
@@ -128,9 +146,13 @@ jobs:
           # cannot load there — consumers must fall back to sherpaonnx.
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            features: "sapi,cloud,sherpaonnx"
+            # GH #62: the flagship offline engines ride in the NuGet x64
+            # DLL. The C++ engine libs come from the offline-engine-libs
+            # artifact (layout reconstructed below to match build.rs).
+            features: "sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
+            offline_engines: true
             # Strict: the NuGet package ships this DLL, so a sherpa-onnx build
             # failure must block the release rather than shipping without it.
           - target: i686-pc-windows-msvc
@@ -305,6 +327,25 @@ jobs:
               CC_${{ matrix.target }}="$TC/${CLANG_TRIPLE}24-clang" \
               AR_${{ matrix.target }}="$TC/llvm-ar" \
               cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+      - uses: actions/download-artifact@v4
+        if: matrix.offline_engines == true
+        with:
+          name: engine-libs-windows-x64
+          path: engine-libs
+      - name: "Link offline engines (NuGet x64)"
+        # Reconstruct the layout build.rs expects: QWEN3_TTS_LIB points
+        # at a dir with build/qwen3tts.{dll,lib} and ggml/build/src/;
+        # OMNIVOICE_LIB at a dir with build/omnivoice.{dll,lib}.
+        if: matrix.offline_engines == true
+        shell: bash
+        run: |
+          mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
+          cp engine-libs/qwen3tts.* eng/qwen3/build/ 2>/dev/null || true
+          cp engine-libs/ggml*.* eng/qwen3/ggml/build/src/ 2>/dev/null || true
+          cp engine-libs/omnivoice.* eng/omnivoice/build/ 2>/dev/null || true
+          echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
+          echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+          ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
       - name: Build release (cargo)
         if: matrix.cross != true && matrix.android != true
         run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
@@ -406,6 +447,12 @@ jobs:
         with:
           name: lib-sapi-cloud-sherpaonnx-i686-windows
           path: native-x86
+      - uses: actions/download-artifact@v4
+        with:
+          # GH #62: the x64 DLL now links the offline engines; their
+          # shared libs must ship beside it or the DLL won't load.
+          name: engine-libs-windows-x64
+          path: engine-libs
       - name: Place native DLLs for packaging
         shell: pwsh
         run: |
@@ -423,6 +470,17 @@ jobs:
             Write-Host "Placed $($dll32.Name) -> target/release/rust_tts_wrapper.x86.dll (x86)"
           } else {
             Write-Host "WARNING: No x86 DLL found - packing x64-only"
+          }
+          # Offline engine shared libs (qwen3tts/omnivoice/ggml) land
+          # beside the x64 wrapper DLL; the csproj packs everything from
+          # target/release/engine-*.dll into runtimes/win-x64/native/.
+          if (Test-Path engine-libs) {
+            Get-ChildItem engine-libs/*.dll | ForEach-Object {
+              Copy-Item $_.FullName ("target/release/engine-" + $_.Name)
+              Write-Host "Placed engine lib $($_.Name)"
+            }
+          } else {
+            Write-Host "WARNING: no engine-libs artifact - x64 DLL may fail to load"
           }
       - uses: actions/setup-dotnet@v4
         with:
@@ -509,6 +567,9 @@ jobs:
           - os: macos-latest
             platform: macos-arm64
             ext: .dylib
+          - os: windows-latest
+            platform: windows-x64
+            ext: .dll
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install build deps (Linux)
@@ -556,16 +617,24 @@ jobs:
         shell: bash
         run: |
           mkdir -p engine-libs
-          # omnivoice + its ggml deps (resilient: skip missing paths)
-          for dir in ~/ov/build ~/ov/build/src ~/ov/ggml/build ~/ov/ggml/build/src; do
+          # omnivoice + its ggml deps (resilient: skip missing paths).
+          # Windows note: the VS generator is multi-config, so artifacts
+          # land in build/Release/ (and ggml/build/src/Release/) -- both
+          # layouts are scanned. .lib import libraries are collected too:
+          # the Rust build links against them.
+          for dir in ~/ov/build ~/ov/build/Release ~/ov/build/src ~/ov/build/src/Release \
+                      ~/ov/ggml/build ~/ov/ggml/build/Release ~/ov/ggml/build/src ~/ov/ggml/build/src/Release; do
             [ -d "$dir" ] && find "$dir" -maxdepth 1 \
-              \( -name "libomnivoice*" -o -name "omnivoice*" -o -name "libggml*" \) \
+              \( -name "libomnivoice*" -o -name "omnivoice*" -o -name "libggml*" -o -name "ggml*" \) \
+              \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
               -exec cp {} engine-libs/ \; 2>/dev/null || true
           done
           # qwen3 + its ggml deps
-          for dir in ~/qwen/build ~/qwen/build/src ~/qwen/ggml/build ~/qwen/ggml/build/src; do
+          for dir in ~/qwen/build ~/qwen/build/Release ~/qwen/build/src ~/qwen/build/src/Release \
+                      ~/qwen/ggml/build ~/qwen/ggml/build/Release ~/qwen/ggml/build/src ~/qwen/ggml/build/src/Release; do
             [ -d "$dir" ] && find "$dir" -maxdepth 1 \
-              \( -name "libqwen3tts*" -o -name "qwen3tts*" -o -name "libggml*" \) \
+              \( -name "libqwen3tts*" -o -name "qwen3tts*" -o -name "libggml*" -o -name "ggml*" \) \
+              \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
               -exec cp {} engine-libs/ \; 2>/dev/null || true
           done
           # deduplicate ggml (same names from both builds — last one wins)
