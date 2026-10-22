@@ -92,11 +92,6 @@ jobs:
             label: "cloud-aarch64-linux"
             lib_ext: so
             cross: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            features: "avsynth,cloud"
-            label: "avsynth-cloud-x86_64-macos"
-            lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
             features: "avsynth,cloud"
@@ -119,12 +114,6 @@ jobs:
             features: "system,cloud,sherpaonnx"
             label: "system-cloud-sherpaonnx-x86_64-linux"
             lib_ext: so
-            allow_failure: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            features: "avsynth,cloud,sherpaonnx"
-            label: "avsynth-cloud-sherpaonnx-x86_64-macos"
-            lib_ext: dylib
             allow_failure: true
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -159,12 +148,6 @@ jobs:
             features: "system,cloud,floravox"
             label: "system-cloud-floravox-x86_64-linux"
             lib_ext: so
-            allow_failure: true
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            features: "avsynth,cloud,floravox"
-            label: "avsynth-cloud-floravox-x86_64-macos"
-            lib_ext: dylib
             allow_failure: true
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -238,11 +221,6 @@ jobs:
             label: "cloud-x86_64-linux"
             lib_ext: so
           # Intel Macs: no ort prebuilt — onnxruntime loads at runtime.
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            features: "cloud"
-            label: "cloud-x86_64-macos"
-            lib_ext: dylib
           - target: aarch64-apple-darwin
             os: macos-latest
             features: "cloud"
@@ -632,12 +610,12 @@ jobs:
           mkdir -p release-assets
           cp artifacts/* release-assets/ 2>/dev/null || true
           cp include/tts_wrapper.h release-assets/
-          # engine shared libraries (per-platform directories)
+          # engine shared libraries: tar each platform into a single
+          # asset (softprops files glob doesn't recurse into subdirs — #60)
           for dir in engine-libs-artifacts/engine-libs-*; do
             [ -d "$dir" ] || continue
             platform=$(basename "$dir" | sed 's/engine-libs-//')
-            mkdir -p "release-assets/engine-libs-$platform"
-            cp "$dir"/* "release-assets/engine-libs-$platform/"
+            tar -czf "release-assets/engine-libs-${platform}.tar.gz" -C "$dir" .
           done
           ls -la release-assets/
       - name: Create GitHub Release
