@@ -95,9 +95,6 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then
             echo "QWEN3_TTS_LIB=$(cygpath -w "$PWD/eng/qwen3")" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$(cygpath -w "$PWD/eng/omnivoice")" >> $GITHUB_ENV
-            # test binaries load qwen3tts/omnivoice/ggml at startup:
-            # put their dirs on PATH (Windows loader search)
-            echo "PATH=$(cygpath -p "$PATH:$PWD/eng/qwen3/build:$PWD/eng/qwen3/ggml/build/src:$PWD/eng/omnivoice/build")" >> $GITHUB_ENV
           else
             echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
@@ -105,9 +102,14 @@ jobs:
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
       - name: Test (NuGet x64 feature set with offline engines)
         # The exact configuration the shipped x64 DLL carries (GH #62).
+        # Test binaries load qwen3tts/omnivoice/ggml at startup, so their
+        # directories go on PATH (Windows loader search order).
+        shell: pwsh
         env:
           RTW_SKIP_EDGE_LIVE: "1"
-        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local,pocket-timing,cloning
+        run: |
+          $env:PATH = "$env:PATH;$env:QWEN3_TTS_LIB\build;$env:QWEN3_TTS_LIB\ggml\build\src;$env:OMNIVOICE_LIB\build"
+          cargo test --no-default-features --features sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local,pocket-timing,cloning
 
   build:
     name: Build ${{ matrix.label }}
@@ -384,9 +386,6 @@ jobs:
           if command -v cygpath >/dev/null 2>&1; then
             echo "QWEN3_TTS_LIB=$(cygpath -w "$PWD/eng/qwen3")" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$(cygpath -w "$PWD/eng/omnivoice")" >> $GITHUB_ENV
-            # test binaries load qwen3tts/omnivoice/ggml at startup:
-            # put their dirs on PATH (Windows loader search)
-            echo "PATH=$(cygpath -p "$PATH:$PWD/eng/qwen3/build:$PWD/eng/qwen3/ggml/build/src:$PWD/eng/omnivoice/build")" >> $GITHUB_ENV
           else
             echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
             echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
