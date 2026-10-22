@@ -411,7 +411,7 @@ fn speak_segments(
         }
 
         // append the i16 samples (from LE bytes)
-        for pair in pcm_bytes.chunks_exact(2) {
+        for pair in pcm_bytes.as_chunks::<2>().0 {
             let lo = u16::from(pair[0]);
             let hi = u16::from(pair[1]);
             all_pcm.push((lo | (hi << 8)) as i16);
