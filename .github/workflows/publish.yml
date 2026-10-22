@@ -77,11 +77,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
-          cp engine-libs/qwen3tts.* eng/qwen3/build/ 2>/dev/null || true
-          cp engine-libs/ggml*.* eng/qwen3/ggml/build/src/ 2>/dev/null || true
-          cp engine-libs/omnivoice.* eng/omnivoice/build/ 2>/dev/null || true
+          # loud copies: a missing file must fail THIS step with a clear
+          # message, not surface later as LNK1181. Patterns cover Windows
+          # (qwen3tts.dll) and mac (libqwen3tts.dylib) namings.
+          cp engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts* eng/qwen3/build/
+          cp engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml* eng/qwen3/ggml/build/src/
+          cp engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice* eng/omnivoice/build/
           echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
           echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
+          ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
       - name: Test (NuGet x64 feature set with offline engines)
         # The exact configuration the shipped x64 DLL carries (GH #62).
         env:
@@ -345,11 +349,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
-          # *qwen3tts*/*omnivoice*/*ggml* cover both Windows (qwen3tts.dll)
-          # and mac (libqwen3tts.dylib) artifact namings
-          cp engine-libs/*qwen3tts* eng/qwen3/build/ 2>/dev/null || true
-          cp engine-libs/*ggml*.* eng/qwen3/ggml/build/src/ 2>/dev/null || true
-          cp engine-libs/*omnivoice*.dylib engine-libs/*omnivoice*.so* engine-libs/omnivoice.dll eng/omnivoice/build/ 2>/dev/null || true
+          # loud copies: a missing file must fail THIS step with a clear
+          # message, not surface later as LNK1181. Patterns cover Windows
+          # (qwen3tts.dll) and mac (libqwen3tts.dylib) namings.
+          cp engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts* eng/qwen3/build/
+          cp engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml* eng/qwen3/ggml/build/src/
+          cp engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice* eng/omnivoice/build/
           echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
           echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
