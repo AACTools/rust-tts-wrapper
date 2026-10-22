@@ -40,7 +40,11 @@ path = "examples/voice-clone.rs"
 required-features = ["cloning"]
 
 [features]
-default = ["system", "cloud", "sherpaonnx", "sapi", "display_names"]
+# sapi removed from defaults (issue #57): the build.rs assert makes
+# default-feature builds panic on macOS/Linux. Windows consumers add
+# --features sapi explicitly; the module is already dual-gated
+# (feature + target_os).
+default = ["system", "cloud", "sherpaonnx", "display_names"]
 system = ["speech-dispatcher"]
 # cloud-core: the pure provider shapes shared by native + wasm (config,
 # sigv4, request builders, response parsers) — no HTTP stack
