@@ -575,6 +575,10 @@ jobs:
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake libopenblas-dev
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
 
       - name: Build omnivoice.cpp
         shell: bash
@@ -583,8 +587,8 @@ jobs:
           git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git ~/ov
           cd ~/ov
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -G "Visual Studio 17 2022"
-            cmake --build build --config Release
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -G Ninja
+            cmake --build build -j
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON
             cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
@@ -598,16 +602,16 @@ jobs:
           # pre-build ggml (the project links pre-built ggml, not add_subdirectory)
           cd ggml
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G "Visual Studio 17 2022"
-            cmake --build build --config Release
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+            cmake --build build -j
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
             cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
           fi
           cd ..
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G "Visual Studio 17 2022"
-            cmake --build build --config Release
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G Ninja
+            cmake --build build -j
           else
             cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
             cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
