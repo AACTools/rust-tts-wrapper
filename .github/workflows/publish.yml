@@ -100,6 +100,22 @@ jobs:
             echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
           fi
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
+      - name: "Diagnose: LoadLibrary engine dlls"
+        # Surfaces WHICH dll fails and the win32 error (127 = missing
+        # entrypoint, 126 = missing dll) instead of a bare 0xc0000139.
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Type -Name K -Namespace W -MemberDefinition '[DllImport("kernel32", SetLastError=true, CharSet=CharSet.Unicode)] public static extern IntPtr LoadLibrary(string f);'
+          $env:PATH = "$env:PATH;$env:QWEN3_TTS_LIB\build;$env:QWEN3_TTS_LIB\ggml\build\src;$env:OMNIVOICE_LIB\build"
+          foreach ($f in @("ggml.dll", "ggml-base.dll", "ggml-cpu.dll",
+                           "$env:QWEN3_TTS_LIB\build\qwen3tts.dll",
+                           "$env:OMNIVOICE_LIB\build\omnivoice.dll")) {
+            $h = [W.K]::LoadLibrary($f)
+            $e = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            if ($h -eq [IntPtr]::Zero) { Write-Host "FAIL $f -> win32 error $e" }
+            else { Write-Host "ok   $f" }
+          }
       - name: Test (NuGet x64 feature set with offline engines)
         # The exact configuration the shipped x64 DLL carries (GH #62).
         # Test binaries load qwen3tts/omnivoice/ggml at startup, so their
@@ -636,11 +652,19 @@ jobs:
           # flat copy made omnivoice bind qwen's ggml exports and die with
           # STATUS_ENTRYPOINT_NOT_FOUND. Static ggml = self-contained.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -DGGML_SHARED=OFF -G Ninja
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON \
+              -DGGML_SHARED=OFF -DBUILD_SHARED_LIBS=OFF -G Ninja
             cmake --build build -j
           else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -DGGML_SHARED=OFF
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON \
+              -DGGML_SHARED=OFF -DBUILD_SHARED_LIBS=OFF
             cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          fi
+          # GUARD: omnivoice must not depend on any external ggml shared
+          # lib (it would bind qwen's ggml at load and die). Fail loudly
+          # if either cmake knob was ignored.
+          if find ~/ov -name "ggml*.dll" -o -name "libggml*.dylib*" -o -name "libggml*.so*" 2>/dev/null | grep -q .; then
+            echo "omnivoice ggml still shared -- cmake knobs ignored:"; find ~/ov -name "ggml*.dll" -o -name "libggml*"; exit 1
           fi
 
       - name: Build qwen3-tts.cpp
