@@ -515,9 +515,106 @@ jobs:
           npm test
           npm publish --access public
 
+  # ── Offline engine shared libraries ────────────────────────────────
+  # Build libomnivoice + libqwen3tts (+ their GGML deps) for each
+  # native platform. These are what the omnivoice-local and qwen3-local
+  # features link against. Upstream repos don't ship pre-built libs,
+  # so we build them here and attach to the release.
+  offline-engine-libs:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            ext: .so
+          - os: macos-latest
+            platform: macos-arm64
+            ext: .dylib
+          - os: windows-latest
+            platform: windows-x86_64
+            ext: .dll
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install build deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake libopenblas-dev
+
+      - name: Build omnivoice.cpp
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.git ~/ov
+          cd ~/ov
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -G "Visual Studio 17 2022"
+            cmake --build build --config Release
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON
+            cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          fi
+
+      - name: Build qwen3-tts.cpp
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules https://github.com/predict-woo/qwen3-tts.cpp.git ~/qwen
+          cd ~/qwen
+          # pre-build ggml (the project links pre-built ggml, not add_subdirectory)
+          cd ggml
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G "Visual Studio 17 2022"
+            cmake --build build --config Release
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          fi
+          cd ..
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -G "Visual Studio 17 2022"
+            cmake --build build --config Release
+          else
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+            cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
+          fi
+
+      - name: Collect shared libraries
+        shell: bash
+        run: |
+          mkdir -p engine-libs
+          # omnivoice: lib + ggml deps
+          find ~/ov/build -name "libomnivoice${{ matrix.ext }}*" -o -name "omnivoice${{ matrix.ext }}" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
+          find ~/ov/build -name "libggml*${{ matrix.ext }}*" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
+          find ~/ov/ggml/build -name "libggml*${{ matrix.ext }}*" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
+          # qwen3: lib + ggml deps
+          find ~/qwen/build -name "libqwen3tts${{ matrix.ext }}*" -o -name "qwen3tts${{ matrix.ext }}" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
+          find ~/qwen/ggml/build -name "libggml*${{ matrix.ext }}*" 2>/dev/null | while read f; do cp "$f" engine-libs/; done
+          # deduplicate ggml libs (same names from both builds — keep omnivoice's)
+          cd engine-libs
+          ls -la
+          # create a README
+          cat > README.txt << 'EOF'
+          Offline engine shared libraries for rust-tts-wrapper
+
+          omnivoice-local feature:  set OMNIVOICE_LIB to a directory containing
+            libomnivoice + libggml (or add to LD_LIBRARY_PATH/DYLD_LIBRARY_PATH/PATH)
+
+          qwen3-local feature:  set QWEN3_TTS_LIB to the qwen3-tts.cpp repo root
+            containing build/libqwen3tts.so and ggml/build/src/libggml*.so
+
+          GGUF models (not included):
+            omnivoice: huggingface-cli download Serveurperso/OmniVoice-GGUF
+            qwen3:     see https://github.com/predict-woo/qwen3-tts.cpp
+          EOF
+
+      - name: Upload engine libs
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-libs-${{ matrix.platform }}
+          path: engine-libs/
+          if-no-files-found: warn  # don't block the release if a platform fails
+
   release:
     name: GitHub Release
-    needs: [build, xcframework, npm]
+    needs: [build, xcframework, npm, offline-engine-libs]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -532,11 +629,22 @@ jobs:
         with:
           path: artifacts
           pattern: "xcframework-*"
+      - uses: actions/download-artifact@v4
+        with:
+          path: engine-libs-artifacts
+          pattern: "engine-libs-*"
       - name: Organize release assets
         run: |
           mkdir -p release-assets
           cp artifacts/* release-assets/ 2>/dev/null || true
           cp include/tts_wrapper.h release-assets/
+          # engine shared libraries (per-platform directories)
+          for dir in engine-libs-artifacts/engine-libs-*; do
+            [ -d "$dir" ] || continue
+            platform=$(basename "$dir" | sed 's/engine-libs-//')
+            mkdir -p "release-assets/engine-libs-$platform"
+            cp "$dir"/* "release-assets/engine-libs-$platform/"
+          done
           ls -la release-assets/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
