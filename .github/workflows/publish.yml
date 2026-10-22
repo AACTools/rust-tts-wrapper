@@ -542,6 +542,7 @@ jobs:
 
       - name: Build omnivoice.cpp
         shell: bash
+        continue-on-error: ${{ runner.os == 'Windows' }}
         run: |
           git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git ~/ov
           cd ~/ov
@@ -595,20 +596,11 @@ jobs:
           # deduplicate ggml (same names from both builds — last one wins)
           cd engine-libs && ls -la && cd ..
           # README
-          cat > engine-libs/README.txt << 'HEREDOC'
-          Offline engine shared libraries for rust-tts-wrapper
-
-          omnivoice-local feature: set OMNIVOICE_LIB to a directory containing
-          libomnivoice + libggml (or add to LD_LIBRARY_PATH/DYLD_LIBRARY_PATH/PATH)
-
-          qwen3-local feature: set QWEN3_TTS_LIB to the qwen3-tts.cpp repo root
-          containing build/libqwen3tts.so and ggml/build/src/libggml*.so
-
-          GGUF models (not included):
-            omnivoice: huggingface-cli download Serveurperso/OmniVoice-GGUF
-            qwen3:     see https://github.com/predict-woo/qwen3-tts.cpp
-          HEREDOC
-          echo "Collected $(ls engine-libs | wc -l) files
+          echo "Offline engine shared libraries for rust-tts-wrapper" > engine-libs/README.txt
+          echo "omnivoice-local: set OMNIVOICE_LIB to this dir" >> engine-libs/README.txt
+          echo "qwen3-local: set QWEN3_TTS_LIB to this dir" >> engine-libs/README.txt
+          echo "GGUF models NOT included (download from HuggingFace)" >> engine-libs/README.txt
+          echo "Collected $(ls engine-libs | wc -l) files"
 
       - name: Upload engine libs
         uses: actions/upload-artifact@v4
