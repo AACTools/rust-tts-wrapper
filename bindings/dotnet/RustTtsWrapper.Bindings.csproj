@@ -80,7 +80,7 @@
     qwen3tts + omnivoice (+ ggml) at build time, so their DLLs must ship
     beside it. The publish workflow copies them into target/release/ as
     engine-*.dll; everything matching is bundled into win-x64/native/.
-    Managed callers do not reference these directly -- the native loader
+    Managed callers do not reference these directly; the native loader
     resolves them from the output directory.
   -->
   <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/../../target/release/')">

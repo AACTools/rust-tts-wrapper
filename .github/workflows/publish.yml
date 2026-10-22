@@ -82,7 +82,9 @@ jobs:
           shopt -s nullglob
           q=(engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts*)
           g=(engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml*)
-          o=(engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice*)
+          # all patterns must contain a wildcard: nullglob only prunes
+          # globs, literals would hard-fail on the other platform
+          o=(engine-libs/*omnivoice.dll engine-libs/*omnivoice.lib engine-libs/libomnivoice*)
           (( ${#q[@]} > 0 )) || { echo "no qwen3tts libs found"; ls -la engine-libs; exit 1; }
           (( ${#o[@]} > 0 )) || { echo "no omnivoice libs found"; ls -la engine-libs; exit 1; }
           (( ${#g[@]} > 0 )) || { echo "no ggml libs found"; ls -la engine-libs; exit 1; }
@@ -389,7 +391,9 @@ jobs:
           shopt -s nullglob
           q=(engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts*)
           g=(engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml*)
-          o=(engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice*)
+          # all patterns must contain a wildcard: nullglob only prunes
+          # globs, literals would hard-fail on the other platform
+          o=(engine-libs/*omnivoice.dll engine-libs/*omnivoice.lib engine-libs/libomnivoice*)
           (( ${#q[@]} > 0 )) || { echo "no qwen3tts libs found"; ls -la engine-libs; exit 1; }
           (( ${#o[@]} > 0 )) || { echo "no omnivoice libs found"; ls -la engine-libs; exit 1; }
           (( ${#g[@]} > 0 )) || { echo "no ggml libs found"; ls -la engine-libs; exit 1; }
