@@ -77,12 +77,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
-          # loud copies: a missing file must fail THIS step with a clear
-          # message, not surface later as LNK1181. Patterns cover Windows
-          # (qwen3tts.dll) and mac (libqwen3tts.dylib) namings.
-          cp engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts* eng/qwen3/build/
-          cp engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml* eng/qwen3/ggml/build/src/
-          cp engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice* eng/omnivoice/build/
+          # tolerate naming variants (Windows: qwen3tts.dll; mac:
+          # libqwen3tts.dylib) but fail loudly if a group ends up empty
+          shopt -s nullglob
+          q=(engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts*)
+          g=(engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml*)
+          o=(engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice*)
+          (( ${#q[@]} > 0 )) || { echo "no qwen3tts libs found"; ls -la engine-libs; exit 1; }
+          (( ${#o[@]} > 0 )) || { echo "no omnivoice libs found"; ls -la engine-libs; exit 1; }
+          (( ${#g[@]} > 0 )) || { echo "no ggml libs found"; ls -la engine-libs; exit 1; }
+          cp "${q[@]}" eng/qwen3/build/
+          cp "${g[@]}" eng/qwen3/ggml/build/src/
+          cp "${o[@]}" eng/omnivoice/build/
           echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
           echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
@@ -349,12 +355,18 @@ jobs:
         shell: bash
         run: |
           mkdir -p eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
-          # loud copies: a missing file must fail THIS step with a clear
-          # message, not surface later as LNK1181. Patterns cover Windows
-          # (qwen3tts.dll) and mac (libqwen3tts.dylib) namings.
-          cp engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts* eng/qwen3/build/
-          cp engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml* eng/qwen3/ggml/build/src/
-          cp engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice* eng/omnivoice/build/
+          # tolerate naming variants (Windows: qwen3tts.dll; mac:
+          # libqwen3tts.dylib) but fail loudly if a group ends up empty
+          shopt -s nullglob
+          q=(engine-libs/*qwen3tts*.dll engine-libs/*qwen3tts*.lib engine-libs/libqwen3tts*)
+          g=(engine-libs/ggml*.dll engine-libs/ggml*.lib engine-libs/libggml*)
+          o=(engine-libs/omnivoice.dll engine-libs/omnivoice.lib engine-libs/libomnivoice*)
+          (( ${#q[@]} > 0 )) || { echo "no qwen3tts libs found"; ls -la engine-libs; exit 1; }
+          (( ${#o[@]} > 0 )) || { echo "no omnivoice libs found"; ls -la engine-libs; exit 1; }
+          (( ${#g[@]} > 0 )) || { echo "no ggml libs found"; ls -la engine-libs; exit 1; }
+          cp "${q[@]}" eng/qwen3/build/
+          cp "${g[@]}" eng/qwen3/ggml/build/src/
+          cp "${o[@]}" eng/omnivoice/build/
           echo "QWEN3_TTS_LIB=$PWD/eng/qwen3" >> $GITHUB_ENV
           echo "OMNIVOICE_LIB=$PWD/eng/omnivoice" >> $GITHUB_ENV
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
