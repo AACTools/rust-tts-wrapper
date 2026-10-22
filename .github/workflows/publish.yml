@@ -631,11 +631,15 @@ jobs:
         run: |
           git clone --depth 1 --recurse-submodules https://github.com/ServeurpersoCom/omnivoice.cpp.git ~/ov
           cd ~/ov
+          # GGML_SHARED=OFF: omnivoice embeds its (forked) ggml statically.
+          # Both engine projects build a 'ggml' shared lib; shipping one
+          # flat copy made omnivoice bind qwen's ggml exports and die with
+          # STATUS_ENTRYPOINT_NOT_FOUND. Static ggml = self-contained.
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -G Ninja
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -DGGML_SHARED=OFF -G Ninja
             cmake --build build -j
           else
-            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DOMNIVOICE_SHARED=ON -DGGML_SHARED=OFF
             cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
           fi
 
@@ -674,11 +678,11 @@ jobs:
           # land in build/Release/ (and ggml/build/src/Release/) -- both
           # layouts are scanned. .lib import libraries are collected too:
           # the Rust build links against them.
-          for dir in ~/ov/build ~/ov/build/Release ~/ov/build/src ~/ov/build/src/Release \
-                      ~/ov/ggml/build ~/ov/ggml/build/Release ~/ov/ggml/build/src ~/ov/ggml/build/src/Release; do
+          # omnivoice only: its ggml is static (embedded), so no ggml
+          # artifacts from this project -- qwen's shared ggml ships instead
+          for dir in ~/ov/build ~/ov/build/Release ~/ov/build/src ~/ov/build/src/Release; do
             [ -d "$dir" ] && find "$dir" -maxdepth 1 \
-              \( -name "libomnivoice*" -o -name "omnivoice*" -o -name "libggml*" -o -name "ggml*" \) \
-              \( -name "*.so*" -o -name "*.dylib*" -o -name "*.dll" -o -name "*.lib" \) \
+              \( -name "libomnivoice*.dylib*" -o -name "libomnivoice*.so*" -o -name "omnivoice.dll" -o -name "omnivoice.lib" \) \
               -exec cp {} engine-libs/ \; 2>/dev/null || true
           done
           # qwen3 + its ggml deps. NOTE: qwen's cmake puts runtime
