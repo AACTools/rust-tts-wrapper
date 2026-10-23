@@ -304,19 +304,21 @@ pub fn bcp47_to_omnivoice_lang(bcp47: &str) -> String {
     let segments: Vec<&str> = bcp47.split('-').collect();
     let base = segments.first().copied().unwrap_or("").to_ascii_lowercase();
     let region = segments.get(1).copied().unwrap_or("").to_ascii_lowercase();
-    match base.as_str() {
-        "en" => match region.as_str() {
-            "gb" | "uk" => "English (British)",
-            "us" => "English (American)",
-            "au" => "English (Australian)",
-            _ => "English",
-        }
-        .to_string(),
-        // Pass the ISO subtag directly — the runtime's 600+ table
-        // resolves it. This makes voice="fr-FR" actually select French
-        // instead of falling through to auto-detect.
-        _ => base,
+    let _ = region;
+    // The runtime's language table has no English regional variants:
+    // "en-GB"/"en_GB"/"en-US" and every "English (…)" display name fail
+    // ov_synthesize with "unknown language" (verified against the
+    // Serveurperso OmniVoice-GGUF build; only base "english" resolves).
+    // Map every English variant to the base language rather than
+    // inventing names the engine rejects. Regional selection can return
+    // if the runtime grows variant support.
+    if base == "en" {
+        return "english".to_string();
     }
+    // Pass the ISO subtag directly - the runtime's 600+ table
+    // resolves it. This makes voice="fr-FR" actually select French
+    // instead of falling through to auto-detect.
+    base
 }
 
 #[cfg(test)]
@@ -340,12 +342,12 @@ mod tests {
 
     #[test]
     fn bcp47_mapping_exact_regions() {
-        assert_eq!(bcp47_to_omnivoice_lang("en-GB"), "English (British)");
-        assert_eq!(bcp47_to_omnivoice_lang("en-US"), "English (American)");
-        assert_eq!(bcp47_to_omnivoice_lang("en"), "English");
+        assert_eq!(bcp47_to_omnivoice_lang("en-GB"), "english"); // runtime table has no English regions
+        assert_eq!(bcp47_to_omnivoice_lang("en-US"), "english");
+        assert_eq!(bcp47_to_omnivoice_lang("en"), "english");
         assert_eq!(bcp47_to_omnivoice_lang("fr-FR"), "fr"); // ISO subtag passed through
                                                             // "en-custom" must NOT match "us" (the old substring bug)
-        assert_eq!(bcp47_to_omnivoice_lang("en-custom"), "English");
+        assert_eq!(bcp47_to_omnivoice_lang("en-custom"), "english");
     }
 
     #[test]
