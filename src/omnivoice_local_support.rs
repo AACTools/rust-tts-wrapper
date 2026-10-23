@@ -326,7 +326,7 @@ pub fn bcp47_region_to_instruct(bcp47: &str) -> Option<String> {
     let region = segments.get(1).copied().unwrap_or("").to_ascii_lowercase();
     match (base.as_str(), region.as_str()) {
         // English regions → accent tokens the runtime supports
-        ("en", "gb") | ("en", "uk") => Some("british accent".into()),
+        ("en", "gb" | "uk") => Some("british accent".into()),
         ("en", "us") => Some("american accent".into()),
         ("en", "au") => Some("australian accent".into()),
         ("en", "in") => Some("indian accent".into()),
@@ -357,12 +357,12 @@ mod tests {
 
     #[test]
     fn bcp47_mapping_exact_regions() {
-        assert_eq!(bcp47_to_omnivoice_lang("en-GB"), "english"); // runtime table has no English regions
-        assert_eq!(bcp47_to_omnivoice_lang("en-US"), "english");
-        assert_eq!(bcp47_to_omnivoice_lang("en"), "english");
+        assert_eq!(bcp47_to_omnivoice_lang("en-GB"), "en"); // bare ISO code (runtime table has no regions)
+        assert_eq!(bcp47_to_omnivoice_lang("en-US"), "en");
+        assert_eq!(bcp47_to_omnivoice_lang("en"), "en");
         assert_eq!(bcp47_to_omnivoice_lang("fr-FR"), "fr"); // ISO subtag passed through
                                                             // "en-custom" must NOT match "us" (the old substring bug)
-        assert_eq!(bcp47_to_omnivoice_lang("en-custom"), "english");
+        assert_eq!(bcp47_to_omnivoice_lang("en-custom"), "en");
     }
 
     #[test]

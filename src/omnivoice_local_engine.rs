@@ -234,10 +234,12 @@ impl OmniVoiceLocalEngine {
         );
         let lang_c =
             CString::new(lang_str).map_err(|_| OmniVoiceError("lang contains null byte".into()))?;
-        let instruct_c = self
-            .params
-            .instruct
-            .as_deref()
+        // Per-call instruct (from accent) overrides params.instruct;
+        // an explicit params.instruct always wins over a derived accent.
+        let effective_instruct = instruct_override
+            .filter(|_| self.params.instruct.is_none())
+            .or(self.params.instruct.as_deref());
+        let instruct_c = effective_instruct
             .map(|s| {
                 CString::new(s).map_err(|_| OmniVoiceError("instruct contains null byte".into()))
             })
