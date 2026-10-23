@@ -86,8 +86,9 @@ mod factory_reachability {
     }
 
     /// Feature-gated engines that are NOT compiled must not appear
-    /// in engine_list (no phantom entries).
+    /// in `engine_list()` (no phantom entries).
     #[test]
+    #[allow(unused_variables)]
     fn uncompiled_engines_not_listed() {
         let listed: Vec<String> = rust_tts_wrapper::factory::engine_list()
             .iter()
@@ -108,7 +109,7 @@ mod factory_reachability {
     }
 
     /// Every engine descriptor must have non-empty credential keys
-    /// documentation (even if it's just "[]").
+    /// documentation (even if it's just `"[]"`).
     #[test]
     fn engine_descriptors_are_well_formed() {
         for desc in rust_tts_wrapper::factory::engine_list() {
