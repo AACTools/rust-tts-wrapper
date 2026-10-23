@@ -78,13 +78,16 @@
   <!--
     Offline engine shared libraries (GH #62): the x64 wrapper DLL links
     qwen3tts + omnivoice (+ ggml) at build time, so their DLLs must ship
-    beside it. The publish workflow copies them into target/release/ as
-    engine-*.dll; everything matching is bundled into win-x64/native/.
-    Managed callers do not reference these directly; the native loader
-    resolves them from the output directory.
+    beside it UNDER THEIR REAL NAMES: the import table of
+    rust_tts_wrapper.dll resolves e.g. qwen3tts.dll by name, so any
+    prefix breaks the load. The publish workflow copies them (unrenamed)
+    into target/release/engine-libs/. Managed callers do not reference
+    these directly; the native loader resolves them from the output
+    directory (for out-of-process hosts: that directory must be on PATH
+    or loaded with LOAD_WITH_ALTERED_SEARCH_PATH).
   -->
-  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/../../target/release/')">
-    <Content Include="$(MSBuildProjectDirectory)/../../target/release/engine-*.dll"
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/../../target/release/engine-libs/')">
+    <Content Include="$(MSBuildProjectDirectory)/../../target/release/engine-libs/*.dll"
              Pack="true"
              PackagePath="runtimes/win-x64/native/"
              CopyToOutputDirectory="PreserveNewest"

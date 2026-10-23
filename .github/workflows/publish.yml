@@ -536,12 +536,16 @@ jobs:
           } else {
             Write-Host "WARNING: No x86 DLL found - packing x64-only"
           }
-          # Offline engine shared libs (qwen3tts/omnivoice/ggml) land
-          # beside the x64 wrapper DLL; the csproj packs everything from
-          # target/release/engine-*.dll into runtimes/win-x64/native/.
+          # Offline engine shared libs (qwen3tts/omnivoice/ggml) ship
+          # under their REAL names: rust_tts_wrapper.dll's import table
+          # resolves qwen3tts.dll etc. BY NAME, so any prefix (engine-*)
+          # breaks the load (GH #62 follow-up: dumpbin evidence). They go
+          # to a dedicated subdir so the csproj glob is precise and the
+          # wrapper DLLs are not double-packed.
           if (Test-Path engine-libs) {
+            New-Item -ItemType Directory -Force -Path target/release/engine-libs | Out-Null
             Get-ChildItem engine-libs/*.dll | ForEach-Object {
-              Copy-Item $_.FullName ("target/release/engine-" + $_.Name)
+              Copy-Item $_.FullName ("target/release/engine-libs/" + $_.Name)
               Write-Host "Placed engine lib $($_.Name)"
             }
           } else {

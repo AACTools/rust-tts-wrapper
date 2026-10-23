@@ -500,6 +500,13 @@ the engines' credentials at a models directory. `win-x86` stays
 engine-less (32-bit payload degrades cleanly: `tts_create` returns a
 not-enabled error for those ids).
 
+**Out-of-process hosts** (e.g. a SAPI host loading the DLL from its own
+directory): the engine DLLs resolve by name from the wrapper's import
+table, so the directory containing them must be on \`PATH\` or the library
+loaded with \`LoadLibraryExW(..., LOAD_WITH_ALTERED_SEARCH_PATH)\`; a
+plain \`LoadLibrary\` from a foreign working directory will fail with
+error 126.
+
 The **macOS flagship release artifact**
 (`avsynth-cloud-floravox-aarch64-macos`) carries the same offline
 engine set plus `floravox` + `floravox-lexicons` (lexicon-tier G2P for
