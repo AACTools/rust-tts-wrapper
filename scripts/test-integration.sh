@@ -42,12 +42,20 @@ run_feature_test "default (system+cloud+sherpaonnx)" "system,cloud,sherpaonnx,di
 run_feature_test "cloud only" "cloud"
 run_feature_test "system only" "system"
 run_feature_test "floravox" "floravox"
-run_feature_test "floravox-lexicons" "floravox-lexicons"
+run_feature_test "floravox + lexicons (feature combo, same engine)" "floravox-lexicons"
 run_feature_test "pocket-timing" "pocket-timing"
 run_feature_test "qwen3-local" "qwen3-local" "QWEN3_TTS_LIB"
 run_feature_test "omnivoice-local" "omnivoice-local" "OMNIVOICE_LIB"
 run_feature_test "qwen3 + omnivoice (both offline)" "qwen3-local,omnivoice-local,ssml-expand" "QWEN3_TTS_LIB"
 run_feature_test "all offline together" "qwen3-local,omnivoice-local,pocket-timing,floravox" "QWEN3_TTS_LIB"
+run_feature_test "sherpaonnx" "sherpaonnx"
+if [[ "$(uname -s)" == "MINGW"* || "$(uname -s)" == "CYGWIN"* || "$(uname -s)" == "Windows"* ]]; then
+    run_feature_test "sapi+cloud+sherpaonnx (NuGet combo)" "sapi,cloud,sherpaonnx"
+else
+    echo "  sapi+cloud+sherpaonnx (NuGet combo): SKIP (Windows-only, running on $(uname -s))"
+    SKIP=$((SKIP + 1))
+fi
+run_feature_test "system+cloud+sherpaonnx+floravox+ssml-expand" "system,cloud,sherpaonnx,floravox,ssml-expand"
 
 # Full default build (should always work)
 echo -n "  cargo build (default): "
