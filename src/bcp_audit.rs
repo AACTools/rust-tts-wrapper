@@ -3,7 +3,7 @@
 //! rejects. Run with the offline engine libraries available.
 
 #[cfg(test)]
-mod bcp_audit {
+mod audit {
     // ── qwen3-local ────────────────────────────────────────────────
     #[cfg(feature = "qwen3-local")]
     mod qwen3 {
