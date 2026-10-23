@@ -21,3 +21,6 @@ node_modules/
 .voicegarden-lexicons/
 js/target/
 node_modules/
+pkg2.nupkg
+session-ses_*.md
+*.nupkg
