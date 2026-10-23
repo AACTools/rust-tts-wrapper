@@ -8,12 +8,12 @@
 //! directly, while `tts_create("omnivoice-local")` returns None.
 //!
 //! Run under every feature combination in CI to verify the matrix:
-//!   cargo test --test factory_reachability
+//!   `cargo test --test factory_reachability`
 
 #[cfg(test)]
 mod factory_reachability {
-    /// Every engine ID that appears in engine_list() must be
-    /// recognized by create_engine (not silently return None).
+    /// Every engine ID that appears in `engine_list()` must be
+    /// recognized by `create_engine` (not silently return None).
     #[test]
     fn every_listed_engine_is_recognized() {
         let engines = rust_tts_wrapper::factory::engine_list();
@@ -39,7 +39,7 @@ mod factory_reachability {
     }
 
     /// Engines that are compiled in (feature-gated) must appear in
-    /// engine_list(). Catches the inverse: engine exists but isn't
+    /// `engine_list()`. Catches the inverse: engine exists but isn't
     /// listed.
     #[test]
     #[allow(unused_variables)]
