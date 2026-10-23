@@ -42,6 +42,7 @@ mod factory_reachability {
     /// engine_list(). Catches the inverse: engine exists but isn't
     /// listed.
     #[test]
+    #[allow(unused_variables)]
     fn compiled_engines_are_listed() {
         let listed: Vec<String> = rust_tts_wrapper::factory::engine_list()
             .iter()
