@@ -87,8 +87,8 @@ mod bcp_audit {
             ] {
                 assert_eq!(
                     bcp47_to_omnivoice_lang(variant),
-                    "english",
-                    "omnivoice: '{variant}' should map to 'english' (base only)"
+                    "en",
+                    "omnivoice: '{variant}' should map to 'en' (bare ISO code)"
                 );
             }
         }
@@ -133,5 +133,48 @@ mod bcp_audit {
                 );
             }
         }
+    }
+}
+
+#[cfg(feature = "omnivoice-local")]
+mod accent_instruct {
+    use crate::omnivoice_local_support::bcp47_region_to_instruct;
+
+    #[test]
+    fn english_regions_map_to_accent_tokens() {
+        assert_eq!(
+            bcp47_region_to_instruct("en-GB"),
+            Some("british accent".into())
+        );
+        assert_eq!(
+            bcp47_region_to_instruct("en-UK"),
+            Some("british accent".into())
+        );
+        assert_eq!(
+            bcp47_region_to_instruct("en-US"),
+            Some("american accent".into())
+        );
+        assert_eq!(
+            bcp47_region_to_instruct("en-AU"),
+            Some("australian accent".into())
+        );
+        assert_eq!(
+            bcp47_region_to_instruct("en-IN"),
+            Some("indian accent".into())
+        );
+    }
+
+    #[test]
+    fn non_english_regions_return_none() {
+        assert_eq!(bcp47_region_to_instruct("fr-CA"), None);
+        assert_eq!(bcp47_region_to_instruct("de-AT"), None);
+        assert_eq!(bcp47_region_to_instruct("zh-TW"), None);
+        assert_eq!(bcp47_region_to_instruct("pt-BR"), None);
+    }
+
+    #[test]
+    fn bare_codes_return_none() {
+        assert_eq!(bcp47_region_to_instruct("en"), None);
+        assert_eq!(bcp47_region_to_instruct("fr"), None);
     }
 }

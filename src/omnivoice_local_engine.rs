@@ -38,10 +38,10 @@
 
 use crate::engine::TtsEngine;
 use crate::omnivoice_local_support::{
-    bcp47_to_omnivoice_lang, estimate_duration_secs, load_wav_24k_mono, omnivoice_language_codes,
-    ov_audio, ov_audio_free, ov_context, ov_duration_sec_to_tokens, ov_free, ov_init,
-    ov_init_default_params, ov_init_params, ov_last_error, ov_synthesize, ov_tts_default_params,
-    ov_tts_params, OmniVoiceError, OV_ABI_VERSION, OV_STATUS_OK,
+    bcp47_region_to_instruct, bcp47_to_omnivoice_lang, estimate_duration_secs, load_wav_24k_mono,
+    omnivoice_language_codes, ov_audio, ov_audio_free, ov_context, ov_duration_sec_to_tokens,
+    ov_free, ov_init, ov_init_default_params, ov_init_params, ov_last_error, ov_synthesize,
+    ov_tts_default_params, ov_tts_params, OmniVoiceError, OV_ABI_VERSION, OV_STATUS_OK,
 };
 use crate::types::{Gender, TtsError, TtsResult, Voice};
 use std::ffi::CString;
@@ -219,6 +219,7 @@ impl OmniVoiceLocalEngine {
         text: &str,
         lang_override: Option<&str>,
         rate: f32,
+        instruct_override: Option<&str>,
     ) -> Result<Vec<f32>, OmniVoiceError> {
         let _guard = ov_lock().lock().unwrap_or_else(PoisonError::into_inner);
         // Note: reset-after-stop race — a stop() arriving just before this
@@ -333,12 +334,18 @@ impl TtsEngine for OmniVoiceLocalEngine {
         // SSML interpretation (say-as expansion, sub alias, phoneme display)
         let plain = plain_text_for_omnivoice(text);
 
-        // Per-call language override: voice param carries a BCP-47 code
+        // Per-call voice→language + accent: the voice param carries a
+        // BCP-47 code. The base subtag selects the language; the region
+        // subtag maps to a voice-design instruct token (e.g. en-GB →
+        // 'british accent') when the runtime's vocabulary supports it.
+        // An explicitly-set params.instruct always wins over the derived
+        // accent (the user chose it deliberately).
         let lang_override = voice.map(bcp47_to_omnivoice_lang);
         let lang_opt = lang_override.as_deref().filter(|s| !s.is_empty());
+        let accent_instruct = voice.and_then(bcp47_region_to_instruct);
 
         let pcm_f32 = self
-            .synthesize_ov(&plain, lang_opt, rate)
+            .synthesize_ov(&plain, lang_opt, rate, accent_instruct.as_deref())
             .map_err(|e| TtsError(format!("omnivoice-local: {e}")))?;
 
         // Volume: linear PCM gain (clamped)

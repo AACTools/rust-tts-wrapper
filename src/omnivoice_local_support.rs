@@ -300,25 +300,40 @@ pub fn omnivoice_language_codes() -> Vec<crate::types::LanguageCode> {
 /// (auto-detect) when no mapping is found — the runtime's 600+ table
 /// handles most names/ISO codes natively.
 #[must_use]
+/// Map a BCP-47 code to the OmniVoice language parameter (base ISO code).
+/// The runtime's 646-language table has no regional variants — only
+/// bare ISO 639-3 codes like "en", "fr", "de".
 pub fn bcp47_to_omnivoice_lang(bcp47: &str) -> String {
-    let segments: Vec<&str> = bcp47.split('-').collect();
+    bcp47
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Map a BCP-47 region code to an OmniVoice voice-design instruct
+/// token, if the runtime's vocabulary has a matching accent. Returns
+/// None when there's no accent equivalent (the region is dropped).
+///
+/// The runtime's valid English instruct tokens (verified):
+/// british accent, american accent, australian accent, indian accent,
+/// japanese accent, korean accent, chinese accent, russian accent,
+/// portuguese accent.
+#[must_use]
+pub fn bcp47_region_to_instruct(bcp47: &str) -> Option<String> {
+    let segments: Vec<&str> = bcp47.split(['-', '_']).collect();
     let base = segments.first().copied().unwrap_or("").to_ascii_lowercase();
     let region = segments.get(1).copied().unwrap_or("").to_ascii_lowercase();
-    let _ = region;
-    // The runtime's language table has no English regional variants:
-    // "en-GB"/"en_GB"/"en-US" and every "English (…)" display name fail
-    // ov_synthesize with "unknown language" (verified against the
-    // Serveurperso OmniVoice-GGUF build; only base "english" resolves).
-    // Map every English variant to the base language rather than
-    // inventing names the engine rejects. Regional selection can return
-    // if the runtime grows variant support.
-    if base == "en" {
-        return "english".to_string();
+    match (base.as_str(), region.as_str()) {
+        // English regions → accent tokens the runtime supports
+        ("en", "gb") | ("en", "uk") => Some("british accent".into()),
+        ("en", "us") => Some("american accent".into()),
+        ("en", "au") => Some("australian accent".into()),
+        ("en", "in") => Some("indian accent".into()),
+        // Non-English regions: the runtime doesn't have accent tokens
+        // for fr-CA vs fr-FR etc. — drop the region, keep the base.
+        _ => None,
     }
-    // Pass the ISO subtag directly - the runtime's 600+ table
-    // resolves it. This makes voice="fr-FR" actually select French
-    // instead of falling through to auto-detect.
-    base
 }
 
 #[cfg(test)]
