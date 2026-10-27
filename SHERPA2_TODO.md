@@ -126,6 +126,8 @@ Progress:
 
 Branch: feat/sherpa-lexicons (off main, after #65 merged).
 
+**STATUS: Phase 2 investigation complete. WIP commit pushed. Next: kokoro-en quick win (bundle the proven lexicon), then piper convention mapping.**
+
 Scope locked by Phase 1 results: the ONLY viable front-end for
 espeak-orphaned families (piper 536 voices, matcha-en, kokoro-en,
 kitten) on 2.x is a per-model lexicon.txt.
