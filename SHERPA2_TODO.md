@@ -122,21 +122,55 @@ Progress:
       not this PR's scope.
 - [x] CI green on the loop-2 commit (28/28) → READY TO MERGE
 
-## Phase 2 — lexicon generation PR (tracking issue #66)
+## Phase 2 — lexicon generation PR (tracking issue #66) — IN PROGRESS
+
+Branch: feat/sherpa-lexicons (off main, after #65 merged).
 
 Scope locked by Phase 1 results: the ONLY viable front-end for
 espeak-orphaned families (piper 536 voices, matcha-en, kokoro-en,
 kitten) on 2.x is a per-model lexicon.txt.
 
-- [ ] voicegarden-lexicons (already an optional dep!) → per-model
-      lexicon.txt generator:
-      - read the model's tokens.txt vocabulary
-      - map gruut/CMUDict source phonemes onto in-vocab symbols
-        (kokoro's misaki conventions ≠ piper's espeak conventions —
-        the mapping is per-family)
-      - OOV via the Phonetisaurus FST
-      - cache beside the model dir, named lexicon.txt (auto-picked-up
-        by the collectors wired in Phase 1)
+### Phase 2 findings (gruut vs model conventions — the hard part)
+
+The gruut→vocab symbol mapping is SOLVED (all 40 gruut IPA symbols map
+or decompose into piper's 130-token vocab; 100% coverage, zero skips,
+124k entries generated). But **symbol mapping ≠ phonological equivalence**:
+each model family was trained on a different phonemizer's output and
+expects that phonemizer's transcription CONVENTIONS:
+
+| family | trained on | gruut matches? | evidence |
+|---|---|---|---|
+| kokoro-en | misaki | ❌ different | kokoro multi-lang lexicon uses uppercase `O` `A` `I` as internal phoneme symbols; gruut says `oʊ` `eɪ` — same sound, different encoding |
+| piper | espeak-ng | ⚠️ close but wrong | gruut lexicon → audio but garbled ("No, this is Aster"); gruut marks stress on monosyllables, uses `ɛ` where espeak uses `ə` in unstressed syllables, etc. |
+| matcha-en | espeak-ng (same as piper) | ⚠️ same issues | |
+| kitten | misaki (like kokoro) | ❌ | |
+
+**Key discovery: the kokoro multi-lang release ships `lexicon-us-en.txt`
+and `lexicon-gb-en.txt` that WORK for kokoro-en** (proven in Phase 1).
+That file uses the misaki convention and matches kokoro-en's tokens.
+
+### Revised Phase 2 approach: per-family lexicon source
+- [ ] kokoro-en / kitten: use the kokoro multi-lang's bundled
+      lexicon-us-en.txt (already proven to work — just document the
+      download path; or ship a copy in voicegarden-lexicons)
+- [ ] piper / matcha-en: gruut→espeak phonological convention mapping
+      (not just symbol mapping — stress placement, unstressed vowel
+      reduction, rhotic unwinding). This is real linguistic work:
+      - espeak reduces unstressed vowels to schwa more aggressively
+      - espeak doesn't stress monosyllabic function words
+      - espeak represents some diphthongs differently
+      - Alternative: find/generate an espeak-compatible English lexicon
+        (CMUdict with espeak-style phoneme labels, or phonemize the
+        gruut lexicon through espeak once and cache)
+- [ ] A/B: espeak-1.13 output vs lexicon-2.x output, whisper round-trip
+- [ ] Un-guard the 12 orphaned live tests; close #66
+- [ ] PR + loop-review + CI green
+
+### Code written so far (src/sherpa_lexicon.rs, 6 tests green)
+- PhonemeMap::for_english() — builds gruut→target symbol mapping
+- generate_lexicon_txt() — gruut lexicon → sherpa lexicon.txt format
+- All symbol-level tests pass; the gap is phonological conventions, not
+  symbol coverage
 - [ ] Phoneme-convention mapping audit (gruut → kokoro tokens /
       piper tokens / kitten tokens)
 - [ ] A/B: espeak-1.13 output vs lexicon-2.x output, whisper

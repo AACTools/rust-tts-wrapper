@@ -71,6 +71,8 @@ pub mod floravox_engine;
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpaonnx_engine;
+#[cfg(feature = "sherpaonnx")]
+pub mod sherpa_lexicon;
 
 /// Pure helpers for the qwen3-local engine — always compiled (and
 /// unit-tested in CI) even when the engine feature is off.
