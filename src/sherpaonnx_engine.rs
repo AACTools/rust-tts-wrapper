@@ -1054,11 +1054,12 @@ fn is_piper_or_github_model(model_id: &str) -> bool {
     PREFIXES.iter().any(|p| model_id.starts_with(p))
 }
 
-/// Collect lexicon paths for a Kokoro model. Multilingual releases (e.g.
-/// `kokoro-zh_en-int8`) ship several `lexicon-*.txt` files which
-/// sherpa-onnx accepts as a comma-separated list; English-only Kokoro has
-/// none and relies on `espeak-ng-data/` instead. Returns `None` when no
-/// lexicon files are present so the field is left unset.
+/// Collect all lexicon file paths in a model dir (lexicon.txt,
+/// lexicon-*.txt — multilingual Kokoro ships several). Comma-joined,
+/// deterministically sorted. Used by the Kokoro, VITS, and kitten
+/// configs: under sherpa-onnx 2.x the lexicon is the only phonetic
+/// front-end (espeak left the runtime). Returns `None` when no lexicon
+/// files are present so the field is left unset.
 fn collect_lexicons(dir: &std::path::Path) -> Option<String> {
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .ok()?
@@ -2265,7 +2266,7 @@ mod tests {
             .ends_with("en_US-amy-low.onnx"));
         assert!(
             cfg.data_dir.is_some(),
-            "Piper phonetic front-end (lexicon under sherpa-onnx 2.x, espeak under 1.x)"
+            "Piper ships espeak-ng-data (data_dir is set but ignored at runtime under 2.x)"
         );
         assert!(
             cfg.dict_dir.is_none(),

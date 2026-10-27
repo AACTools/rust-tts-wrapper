@@ -72,7 +72,7 @@ fn main() {
             std::fs::write("/tmp/smoke.wav", wav).ok();
             println!(
                 "OK model={model_id} chunks={chunks} samples={samples} peak={peak} ({:.2}s)",
-                samples as f64 / 24_000.0
+                samples as f64 / f64::from(sr)
             );
         }
         Err(e) => println!("FAIL model={model_id}: {}", e.0),

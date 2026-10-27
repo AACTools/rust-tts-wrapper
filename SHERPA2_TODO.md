@@ -134,7 +134,10 @@ kitten) on 2.x is a per-model lexicon.txt.
       piper tokens / kitten tokens)
 - [ ] A/B: espeak-1.13 output vs lexicon-2.x output, whisper
       round-trip comparison per family
-- [ ] Un-#[ignore] the 8 live tests; close #66
+- [ ] Un-guard the 12 orphaned live tests (8 with reason strings
+      + 4 bare-ignore: sherpa_streams, speechmarkdown_passthrough,
+      stop_safety, pitch_shift) — search `is_sherpa2_orphan` to find
+      them all; close #66
 - [ ] PR + loop-review + CI green
 
 ## Phase 3 — Hume cloud engine (separate quiet PR)
