@@ -212,3 +212,8 @@ cargo = "warn"
 name = "lexicon-convert"
 path = "examples/lexicon_convert.rs"
 required-features = ["sherpaonnx"]
+
+[[example]]
+name = "kokoro-ab"
+path = "examples/kokoro_ab.rs"
+required-features = ["sherpaonnx"]

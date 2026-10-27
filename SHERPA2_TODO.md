@@ -126,7 +126,9 @@ Progress:
 
 Branch: feat/sherpa-lexicons (off main, after #65 merged).
 
-**STATUS: Phase 2 investigation complete. WIP commit pushed. Next: kokoro-en quick win (bundle the proven lexicon), then piper convention mapping.**
+**STATUS: P2P lookup + rules hybrid VALIDATED for misaki (kokoro-en,
+kitten). Engine auto-generation wired. Remaining: ship pairs as an
+asset, espeak pairs for piper, un-guard live tests, PR.**
 
 Scope locked by Phase 1 results: the ONLY viable front-end for
 espeak-orphaned families (piper 536 voices, matcha-en, kokoro-en,
@@ -168,14 +170,17 @@ That file uses the misaki convention and matches kokoro-en's tokens.
 - [ ] Un-guard the 12 orphaned live tests; close #66
 - [ ] PR + loop-review + CI green
 
-### Code written so far (src/sherpa_lexicon.rs + src/sherpa_convention.rs, 13 tests green)
+### Code written so far (sherpa_lexicon.rs + sherpa_convention.rs + sherpa_p2p.rs, 23 tests green)
 - PhonemeMap::for_english() — builds gruut→target symbol mapping
 - generate_lexicon_txt() — gruut lexicon → sherpa lexicon.txt format
 - Convention::Misaki / Convention::Espeak — rule-based convention
   conversion: symbol substitution + function-word destressing + rhotic
   splitting + unstressed vowel reduction
-- convert_lexicon_file() — full gruut→convention lexicon generation
-- 124k entries, 100% symbol coverage, zero vocabulary violations
+- convert_lexicon_file() — layered generation: P2P table → rules →
+  vocab filter, returns (written, skipped, via_table)
+- P2pTable (sherpa_p2p.rs) — aligned-pairs TSV → exact lookup
+- ensure_generated_lexicon() + discover_model_assets() — engine-side
+  auto-generation with convention detection from tokens.txt
 
 ### Phase 2 hard finding: word-specific phonological differences
 
@@ -203,67 +208,81 @@ transduce → model-ready phonemes. Single G2P source, per-convention
 transducer, no per-model bundles. This is the RIGHT architecture.
 
 **What we built**:
-- `--p2p` mode in floravox-train-phonetisaurus (atomic pipe-separated units)
+- `--p2p` mode in floravox-train-phonetisaurus (atomic pipe-separated units,
+  identity-pair boost ×50 after co-occurrence counting)
 - `PhonetisaurusG2p::transduce()` method (token-level search, same Dijkstra)
 - 49k aligned pairs from gruut↔kokoro overlap, model trains in seconds
+- `PhonemeTransducer` (floravox-g2p `p2p` module): direct-lookup HashMap +
+  WFST fallback hybrid — lookup is exact for all in-vocabulary words
 
 **What works**:
 - Tiny model (10 examples): PERFECT transduction
-  (`ə→A`, `ˈeɪ|z→ˈ A z`, `ˈɑ|k|ə|n→ˈ ɑ k ə|n`)
 - Symbol coverage: 100%, zero vocabulary violations
 - The training + decode pipeline is sound
+- The **lookup layer** of the hybrid: 100% exact on in-vocabulary words
 
-**What doesn't work yet (the alignment problem)**:
-- Full model (49k examples): Dijkstra finds epsilon-heavy paths because
-  the M2M alignment learns to DECOMPOSE diphthongs across the corpus
-  (e.g. `ˈoʊ→ˈ` + `ε→O` instead of `ˈoʊ→ˈO` as one step)
-- The statistical alignment optimises for corpus-wide likelihood, not
-  per-word accuracy — real phonological insight, not a bug
-- Partial fix (suppressing epsilon when compounds match) improved output
-  but diphthongs still decompose
+**The WFST fallback limitation (accepted)**:
+- Large models (49k pairs, 100k states): the Dijkstra decode takes
+  epsilon-heavy paths through n-gram backoff arcs and drops vowels
+  systematically; epsilon penalties (up to 100.0) and epsilon-closure
+  both fail to fix it. The model structure — not the search — lacks
+  reachable output arcs for those vowels.
+- Root cause: M2M alignment optimises corpus likelihood, decomposing
+  compound phonemes across the corpus; the n-gram WFST then generalises
+  that decomposition.
+- Pragmatic resolution: **hybrid** — direct HashMap lookup for
+  in-vocabulary words (100% correct), WFST fallback only for OOV
+  sequences (approximate). For lexicon GENERATION the rules layer is
+  the OOV fallback instead (see below); the WFST matters only for
+  runtime phonemization of unseen words, where approximation is
+  acceptable.
 
-**Root cause**: M2M alignment is optimised for grapheme→phoneme (where
-input is characters and output is phonemes). For phoneme→phoneme, both
-sides are meaningful units and the alignment should preserve them
-atomically. The standard M2M doesn't know this.
+### Phase 2 SOLUTION: P2P lookup table + rules fallback (VALIDATED)
 
-**What would fix it** (in order of effort):
-1. **Constrained alignment**: lock known-good pairs (diphthong↔diphthong,
-   rhotic↔rhotic-pair) so the M2M can't split them. ~50 lines in the
-   trainer's align function.
-2. **Bi-directional training**: train TWO models (gruut→kokoro and
-   kokoro→gruut) and use the round-trip consistency as a filter.
-3. **Weighted alignment**: add a bonus for alignments that preserve
-   phonological units (diphthongs, affricates, rhotics stay atomic).
+`src/sherpa_p2p.rs` — std-only `P2pTable`: aligned-pairs TSV
+(`gruut|ph1|ph2\ttgt1 tgt2`) → HashMap. Layered into
+`convert_lexicon_file` as: table (exact, word-specific) → rules
+(systematic) → vocab filter.
 
-**Recommendation**: option 1 (constrained alignment) is the fastest
-path. The constraint list is exactly the diphthong/affricate pairs we
-identified in the rule-based work — same data, applied at training time
-instead of runtime. This keeps the clean architecture (one G2P source,
-per-convention transducers) AND produces correct output.
+**Validation against the kokoro-en ground truth** (the model's own
+bundled `lexicon-us-en.txt`, aligned via
+`prepare_p2p_data.py`):
+- 133,637 entries generated from the gruut lexicon, **0 skipped**
+  (100% vocab coverage), 53,213 via table / 80,424 via rules
+- All six garbling-causing words from the rules-only experiment now
+  match ground truth EXACTLY: `go ɡ ˌ O` (stress level), `the ð i`
+  (weak form), `a A` (strong form), `converted ... ɾ ᵻ d` (allophones),
+  `hello`, `world`
+- 88.8% of the 53,146 overlap words are byte-identical to ground truth;
+  the residual 11.2% differs only in sub-phonemic allophone choices
+  (`ə` vs `ᵊ`, plain vs flapped `t`/`d` — both schwa/flap class, no
+  garbling) and homophone collisions inherent to phoneme-sequence
+  keying (first-wins, stable)
 
-### Revised Phase 2 approach (post-rules finding)
-- [x] Rule-based convention conversion — WORKS for symbols + systematic
-      phonology; 13 unit tests, 124k entries generated
-- [ ] kokoro-en / kitten: **use the bundled kokoro multi-lang lexicon**
-      (proven to work, Apache 2.0). Ship as voicegarden-lexicons
-      `en-misaki` bundle — no conversion needed, no gruut involvement
-- [ ] piper / matcha-en: **CMUdict is a better source than gruut** —
-      BSD-licensed, ARPABET phonemes map more directly to espeak IPA,
-      and it's the phonemizer Piper's training data was built from.
-      Either find an existing CMUdict→IPA-espeak lexicon or generate
-      one from CMUdict + IPA mapping table (both MIT/BSD).
-- [ ] Remove the gruut-convention-conversion path for English (it works
-      for ~90% but garbles the rest) — keep the code for non-English
-      languages where no alternative source exists
-- [ ] Phoneme-convention mapping audit (gruut → kokoro tokens /
-      piper tokens / kitten tokens)
-- [ ] A/B: espeak-1.13 output vs lexicon-2.x output, whisper
-      round-trip comparison per family
-- [ ] Un-guard the 12 orphaned live tests (8 with reason strings
-      + 4 bare-ignore: sherpa_streams, speechmarkdown_passthrough,
-      stop_safety, pitch_shift) — search `is_sherpa2_orphan` to find
-      them all; close #66
+**Engine wiring done**: `sherpaonnx_engine` calls
+`ensure_generated_lexicon` at model load — when an espeak-orphaned
+model ships no lexicon and (gruut lexicon + aligned pairs) are locally
+available, one is generated into the model dir. Convention is detected
+from the model's own tokens.txt (uppercase `A I O W Y` ⇒ misaki).
+Asset discovery: `SHERPA_GRUUT_LEXICON`/`SHERPA_P2P_PAIRS` env vars →
+pairs beside the model or gruut lexicon → voicegarden cache. Pairs are
+REQUIRED (rules alone garble ~10% of words); no pairs → no generation.
+A/B wavs generated (`examples/kokoro-ab`).
+
+### Phase 2 remaining
+- [ ] Ship the aligned pairs as a voicegarden-lexicons release asset
+      (`p2p-misaki.tsv` alongside `lexicon.txt` in eng-US) so
+      auto-generation works out of the box
+- [ ] piper / matcha-en (espeak convention): need an espeak-convention
+      reference lexicon to align against (CMUdict is BSD; TODO revised
+      approach noted CMUdict as a better source — generate
+      `p2p-espeak.tsv` from gruut↔CMUdict-IPA alignment)
+- [ ] floravox-g2p release with the `p2p` module (PhonemeTransducer) —
+      publish 0.8.10+ so the WFST fallback is available downstream
+- [ ] A/B: whisper round-trip comparison per family (wavs generated,
+      whisper not installed locally — CI or manual listen)
+- [ ] Un-guard the 12 orphaned live tests (search `is_sherpa2_orphan`);
+      close #66
 - [ ] PR + loop-review + CI green
 
 ## Phase 3 — Hume cloud engine (separate quiet PR)

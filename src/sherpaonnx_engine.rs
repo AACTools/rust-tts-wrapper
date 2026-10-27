@@ -412,6 +412,24 @@ impl TtsEngine for SherpaOnnxEngine {
         // directory (mirrors VoiceGarden's ResolveModelScanDir).
         let model_dir = resolve_model_scan_dir(&model_dir);
 
+        // sherpa-onnx 2.x: espeak-orphaned models (piper, matcha-en,
+        // kokoro-en, kitten) need a lexicon. If the model ships none and
+        // a gruut source + aligned pairs are locally available, generate
+        // one into the model dir (see sherpa_lexicon::ensure_generated_lexicon).
+        let assets = crate::sherpa_lexicon::discover_model_assets(&model_dir);
+        match crate::sherpa_lexicon::ensure_generated_lexicon(&model_dir, &assets) {
+            Ok(Some((written, skipped, via_table))) => {
+                let rules = written - via_table;
+                eprintln!(
+                    "sherpa: generated lexicon.txt for '{}' — {written} entries \
+                     ({via_table} via P2P table, {rules} via rules, {skipped} skipped)",
+                    self.loaded_model_id
+                );
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("sherpa: lexicon generation failed: {e}"),
+        }
+
         let model_config = match model_info.model_type.as_str() {
             "kokoro" => sherpa_onnx::OfflineTtsModelConfig {
                 kokoro: build_kokoro_config(&model_dir),
