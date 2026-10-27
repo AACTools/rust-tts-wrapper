@@ -166,6 +166,10 @@ impl PhonemeMap {
 ///
 /// # Errors
 /// Returns an error if the file is unreadable.
+pub fn read_tokens_txt_public(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
+    read_tokens_txt(path)
+}
+
 fn read_tokens_txt(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
     let file = std::fs::File::open(path)
         .map_err(|e| LexiconGenError(format!("reading {}: {e}", path.display())))?;

@@ -168,11 +168,47 @@ That file uses the misaki convention and matches kokoro-en's tokens.
 - [ ] Un-guard the 12 orphaned live tests; close #66
 - [ ] PR + loop-review + CI green
 
-### Code written so far (src/sherpa_lexicon.rs, 6 tests green)
+### Code written so far (src/sherpa_lexicon.rs + src/sherpa_convention.rs, 13 tests green)
 - PhonemeMap::for_english() — builds gruut→target symbol mapping
 - generate_lexicon_txt() — gruut lexicon → sherpa lexicon.txt format
-- All symbol-level tests pass; the gap is phonological conventions, not
-  symbol coverage
+- Convention::Misaki / Convention::Espeak — rule-based convention
+  conversion: symbol substitution + function-word destressing + rhotic
+  splitting + unstressed vowel reduction
+- convert_lexicon_file() — full gruut→convention lexicon generation
+- 124k entries, 100% symbol coverage, zero vocabulary violations
+
+### Phase 2 hard finding: word-specific phonological differences
+
+The rules-based conversion handles the SYMBOL layer and the systematic
+PHONOLOGICAL layer, but a long tail of word-specific differences makes
+the output garbled in practice:
+
+| word | gruut (after rules) | misaki (correct) | issue |
+|---|---|---|---|
+| hello | `h ə l ˈ O` | `h ə l ˈ O` | ✓ identical |
+| world | `w ˈ ɜ ɹ l d` | `w ˈ ɜ ɹ l d` | ✓ identical |
+| go | `ɡ ˈ O` | `ɡ ˌ O` | stress level: primary vs secondary |
+| the | `ð ə` | `ð i` | vowel quality: schwa vs /i/ |
+| a | `ə` | `A` | strong form (letter name) vs weak form |
+| converted | `k ə n v ˈ ɜ ɹ t ɪ d` | `k ə n v ˈ ɜ ɹ ɾ ᵻ d` | flap + barred-i allophones |
+
+Most words (~90% of the tested 100) produce IDENTICAL output after the
+rules. The ~10% that differ are enough to garble Whisper transcription.
+
+### Revised Phase 2 approach (post-rules finding)
+- [x] Rule-based convention conversion — WORKS for symbols + systematic
+      phonology; 13 unit tests, 124k entries generated
+- [ ] kokoro-en / kitten: **use the bundled kokoro multi-lang lexicon**
+      (proven to work, Apache 2.0). Ship as voicegarden-lexicons
+      `en-misaki` bundle — no conversion needed, no gruut involvement
+- [ ] piper / matcha-en: **CMUdict is a better source than gruut** —
+      BSD-licensed, ARPABET phonemes map more directly to espeak IPA,
+      and it's the phonemizer Piper's training data was built from.
+      Either find an existing CMUdict→IPA-espeak lexicon or generate
+      one from CMUdict + IPA mapping table (both MIT/BSD).
+- [ ] Remove the gruut-convention-conversion path for English (it works
+      for ~90% but garbles the rest) — keep the code for non-English
+      languages where no alternative source exists
 - [ ] Phoneme-convention mapping audit (gruut → kokoro tokens /
       piper tokens / kitten tokens)
 - [ ] A/B: espeak-1.13 output vs lexicon-2.x output, whisper

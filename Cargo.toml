@@ -207,3 +207,8 @@ strip = true
 all = "warn"
 pedantic = "warn"
 cargo = "warn"
+
+[[example]]
+name = "lexicon-convert"
+path = "examples/lexicon_convert.rs"
+required-features = ["sherpaonnx"]

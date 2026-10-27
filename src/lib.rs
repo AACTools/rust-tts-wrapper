@@ -72,6 +72,8 @@ mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpaonnx_engine;
 #[cfg(feature = "sherpaonnx")]
+pub mod sherpa_convention;
+#[cfg(feature = "sherpaonnx")]
 pub mod sherpa_lexicon;
 
 /// Pure helpers for the qwen3-local engine — always compiled (and
