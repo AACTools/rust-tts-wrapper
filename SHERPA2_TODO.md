@@ -113,7 +113,14 @@ Progress:
       local live run: 20 passed / 0 failed (with piper models present).
       Const flips automatically nothing — it's manual, documented to
       remove when #66 lands.
-- [ ] Loop-review 2 (after CI green)
+- [x] Loop-review 2 → **7/10**: all loop-1 blockers verified closed;
+      6 residual items (duration-print hardcode, stale collect_lexicons
+      doc, over-guarded stop test, un-guard count 8→12, pin↔const
+      cross-ref, confusing assert msg) — all fixed in the loop-2 commit.
+      macOS/Windows sherpa-live legs now vacuously green (only download
+      piper/matcha models, all guarded) — noted as pre-existing CI gap,
+      not this PR's scope.
+- [ ] Await CI green on the loop-2 commit → merge
 
 ## Phase 2 — lexicon generation PR (tracking issue #66)
 
