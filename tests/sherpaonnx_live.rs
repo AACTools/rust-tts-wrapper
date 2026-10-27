@@ -121,11 +121,16 @@ impl BoundarySink {
 // ===== VITS family — Piper =====
 //
 // Piper models are the smallest in the registry and exercise the
-// `build_vits_config(... is_piper=true ...)` branch. They speak cleanly
-// with no lexicon.txt, relying on espeak-ng-data.
+// `build_vits_config(... is_piper=true ...)` branch.
+//
+// SHERPA-ONNX 2.x: espeak-ng left the runtime (upstream #4055) and
+// piper archives ship no lexicon — these voices synthesize silence
+// until lexicon generation lands (#66). Tests stay ignored-but-wired
+// so `cargo test --test sherpaonnx_live -- --ignored` re-runs them the
+// day #66 closes.
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn vits_piper_synthesises_nonempty_audio() {
     let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
@@ -155,7 +160,7 @@ fn vits_piper_synthesises_nonempty_audio() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn vits_piper_rate_changes_audio_size() {
     // Faster speech → fewer samples; slower speech → more samples.
     // SherpaOnnx applies rate via GenerationConfig.speed.
@@ -191,7 +196,7 @@ fn vits_piper_rate_changes_audio_size() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn vits_piper_volume_changes_amplitude() {
     // Volume is applied by apply_volume_and_pitch — verify by checking that
     // the peak sample amplitude scales. We compute peak on the f32 samples
@@ -312,7 +317,7 @@ fn sherpa_streams_audio_per_sentence_batch() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn vits_piper_word_boundaries_fire_per_word() {
     let id = model_id("SHERPA_VITS_MODEL", "piper-nl_BE-rdh-low");
     let engine = engine_for(&id);
@@ -348,7 +353,7 @@ fn vits_piper_word_boundaries_fire_per_word() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn vits_piper_streaming_vs_buffered_match() {
     // synth_to_bytes() and speak() with on_audio must deliver the same
     // audio within VITS's stochastic variation: two inferences of the
@@ -386,7 +391,7 @@ fn vits_piper_streaming_vs_buffered_match() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn vits_piper_multi_speaker_voice_id_selectable() {
     // Multi-speaker VITS models accept a numeric speaker id via the `voice`
     // parameter. Synthesise twice with two different ids and confirm both
@@ -425,7 +430,7 @@ fn vits_piper_multi_speaker_voice_id_selectable() {
 // ===== Matcha family =====
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn matcha_synthesises_nonempty_audio() {
     let id = model_id("SHERPA_MATCHA_MODEL", "icefall-en-ljspeech");
     let engine = engine_for(&id);
@@ -450,7 +455,7 @@ fn matcha_synthesises_nonempty_audio() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "sherpa-onnx 2.x: espeak front-end removed; piper/matcha-en need lexicon generation — #66"]
 fn matcha_word_boundaries_fire() {
     let id = model_id("SHERPA_MATCHA_MODEL", "icefall-en-ljspeech");
     let engine = engine_for(&id);

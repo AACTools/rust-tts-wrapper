@@ -39,6 +39,11 @@ name = "voice-clone"
 path = "examples/voice-clone.rs"
 required-features = ["cloning"]
 
+[[example]]
+name = "sherpa2-smoke"
+path = "examples/sherpa2_smoke.rs"
+required-features = ["sherpaonnx"]
+
 [features]
 # sapi removed from defaults (issue #57): the build.rs assert makes
 # default-feature builds panic on macOS/Linux. Windows consumers add

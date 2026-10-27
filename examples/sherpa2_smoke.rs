@@ -34,7 +34,7 @@ fn main() {
             s.0 += 1;
             s.1 += chunk.len() / 2;
             s.3.extend_from_slice(chunk);
-            for b in chunk.chunks_exact(2) {
+            for b in chunk.as_chunks::<2>().0 {
                 let v = i16::from_le_bytes([b[0], b[1]]).abs();
                 if v > s.2 {
                     s.2 = v;
@@ -52,7 +52,7 @@ fn main() {
         Ok(()) => {
             // 16-bit mono PCM per the sherpa engine contract
             let data = state.borrow().3.clone();
-            let sr: u32 = 24_000;
+            let sr: u32 = u32::try_from(engine.loaded_sample_rate().max(1)).unwrap_or(24_000);
             let n = u32::try_from(data.len() / 2).unwrap_or(0);
             let mut wav: Vec<u8> = Vec::with_capacity(data.len() + 44);
             let size = u32::try_from(36 + data.len()).unwrap_or(u32::MAX);
