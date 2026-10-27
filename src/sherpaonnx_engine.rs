@@ -1435,6 +1435,13 @@ fn build_vits_config(
         .unwrap_or_else(|| model_dir.join("model.onnx"));
 
     // Pick the right phonetic back-end.
+    //
+    // sherpa-onnx 2.x removed the bundled espeak-ng phonemizer: `data_dir`
+    // is deprecated and ignored at runtime, and the text front-ends are
+    // the built-in lexicon (lexicon.txt) or caller-side phonemization.
+    // Piper models ship espeak-ng-data only, so under 2.x they speak only
+    // when a lexicon.txt is supplied alongside — the engine drops one in
+    // from the voicegarden lexicon cache when available (Phase 2).
     let (data_dir, dict_dir) = if is_piper_or_github {
         // Piper & friends ship espeak-ng-data; jieba would just complain.
         (existing_path(model_dir, "espeak-ng-data"), None)
@@ -1469,7 +1476,11 @@ fn build_vits_config(
     sherpa_onnx::OfflineTtsVitsModelConfig {
         model: Some(model.to_string_lossy().to_string()),
         tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-        lexicon: existing_path(model_dir, "lexicon.txt"),
+        // 2.x: the lexicon IS the phonetic back-end. Pass lexicon.txt
+        // whenever present — including Piper models, whose 1.x behavior
+        // ("prefer espeak, ignore lexicon") inverted when espeak left.
+        lexicon: existing_path(model_dir, "lexicon.txt")
+            .or_else(|| existing_path(model_dir, "lexicon-us-en.txt")),
         data_dir,
         dict_dir,
         ..Default::default()
