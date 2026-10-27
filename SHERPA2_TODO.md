@@ -195,6 +195,53 @@ the output garbled in practice:
 Most words (~90% of the tested 100) produce IDENTICAL output after the
 rules. The ~10% that differ are enough to garble Whisper transcription.
 
+### P2P transducer experiment (Phonetisaurus phoneme→phoneme)
+
+**Architecture**: train a Phonetisaurus WFST on aligned phoneme pairs
+(gruut → kokoro bundled), then at runtime: gruut phonemize →
+transduce → model-ready phonemes. Single G2P source, per-convention
+transducer, no per-model bundles. This is the RIGHT architecture.
+
+**What we built**:
+- `--p2p` mode in floravox-train-phonetisaurus (atomic pipe-separated units)
+- `PhonetisaurusG2p::transduce()` method (token-level search, same Dijkstra)
+- 49k aligned pairs from gruut↔kokoro overlap, model trains in seconds
+
+**What works**:
+- Tiny model (10 examples): PERFECT transduction
+  (`ə→A`, `ˈeɪ|z→ˈ A z`, `ˈɑ|k|ə|n→ˈ ɑ k ə|n`)
+- Symbol coverage: 100%, zero vocabulary violations
+- The training + decode pipeline is sound
+
+**What doesn't work yet (the alignment problem)**:
+- Full model (49k examples): Dijkstra finds epsilon-heavy paths because
+  the M2M alignment learns to DECOMPOSE diphthongs across the corpus
+  (e.g. `ˈoʊ→ˈ` + `ε→O` instead of `ˈoʊ→ˈO` as one step)
+- The statistical alignment optimises for corpus-wide likelihood, not
+  per-word accuracy — real phonological insight, not a bug
+- Partial fix (suppressing epsilon when compounds match) improved output
+  but diphthongs still decompose
+
+**Root cause**: M2M alignment is optimised for grapheme→phoneme (where
+input is characters and output is phonemes). For phoneme→phoneme, both
+sides are meaningful units and the alignment should preserve them
+atomically. The standard M2M doesn't know this.
+
+**What would fix it** (in order of effort):
+1. **Constrained alignment**: lock known-good pairs (diphthong↔diphthong,
+   rhotic↔rhotic-pair) so the M2M can't split them. ~50 lines in the
+   trainer's align function.
+2. **Bi-directional training**: train TWO models (gruut→kokoro and
+   kokoro→gruut) and use the round-trip consistency as a filter.
+3. **Weighted alignment**: add a bonus for alignments that preserve
+   phonological units (diphthongs, affricates, rhotics stay atomic).
+
+**Recommendation**: option 1 (constrained alignment) is the fastest
+path. The constraint list is exactly the diphthong/affricate pairs we
+identified in the rule-based work — same data, applied at training time
+instead of runtime. This keeps the clean architecture (one G2P source,
+per-convention transducers) AND produces correct output.
+
 ### Revised Phase 2 approach (post-rules finding)
 - [x] Rule-based convention conversion — WORKS for symbols + systematic
       phonology; 13 unit tests, 124k entries generated
