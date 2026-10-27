@@ -305,11 +305,12 @@ pub fn has_lexicon_file(dir: &Path) -> bool {
 /// (word-specific stress/weak-form/allophone choices; see
 /// [`crate::sherpa_p2p`]).
 ///
-/// **Atomicity**: writes a `lexicon.txt.<pid>.tmp` sibling first and
-/// renames — a crash mid-generation can't leave a truncated
-/// `lexicon.txt` that poisons every later load, and concurrent loads
-/// don't share a temp path. An output with zero entries is deleted and
-/// reported as an error for the same reason.
+/// **Atomicity**: writes a unique `lexicon.txt.<pid>.<n>.tmp` sibling
+/// first and renames — a crash mid-generation can't leave a truncated
+/// `lexicon.txt` that poisons every later load, and concurrent
+/// generation attempts (threads share a pid) don't share a temp path.
+/// An output with zero entries is deleted and reported as an error for
+/// the same reason.
 ///
 /// Generation only runs for English models; non-English gruut languages
 /// can be wired the same way once their pairs exist.
@@ -322,6 +323,10 @@ pub fn ensure_generated_lexicon(
     model_dir: &Path,
     assets: &LexiconAssets,
 ) -> Result<Option<crate::sherpa_convention::LexiconGenStats>, LexiconGenError> {
+    // per-call counter for unique temp names — two threads in one
+    // process share a pid, so the pid alone isn't enough
+    static GEN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     // already has a lexicon (lexicon.txt or lexicon-*.txt)? done.
     if has_lexicon_file(model_dir) {
         return Ok(None);
@@ -356,11 +361,12 @@ pub fn ensure_generated_lexicon(
         )));
     }
 
-    // atomic: write to a temp sibling, rename on success. The pid in
-    // the name keeps concurrent engine loads (speak() is &self) from
-    // interleaving writes to the same temp path; the rename stays
+    // atomic: write to a temp sibling, rename on success. The
+    // pid+counter suffix keeps concurrent generation attempts from
+    // interleaving writes to a shared temp path; the rename stays
     // same-directory, i.e. atomic.
-    let tmp = model_dir.join(format!("lexicon.txt.{}.tmp", std::process::id()));
+    let n = GEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = model_dir.join(format!("lexicon.txt.{}.{}.tmp", std::process::id(), n));
     let stats = crate::sherpa_convention::convert_lexicon_file(
         gruut,
         &tokens_path,
@@ -690,9 +696,16 @@ mod tests {
         let model = orphan_model_dir(&["ð", "ə", "i", "A", "I", "O", "W", "Y"]);
         let err = ensure_generated_lexicon(&model, &assets).unwrap_err();
         assert!(err.0.contains("0 entries"), "got: {err}");
-        // neither the final file nor the temp remains
+        // neither the final file nor any temp remains (the temp name
+        // carries pid + counter, so sweep for the suffix)
         assert!(!model.join("lexicon.txt").exists());
-        assert!(!model.join("lexicon.txt.tmp").exists());
+        assert!(
+            !std::fs::read_dir(&model)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|e| e.file_name().to_string_lossy().ends_with(".tmp")),
+            "a .tmp file survived the refused generation"
+        );
     }
 
     #[test]
