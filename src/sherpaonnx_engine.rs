@@ -1133,8 +1133,14 @@ fn should_auto_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool 
         "kokoro" | "kitten" | "matcha" => true,
         // piper-style VITS layouts (registry: piper-en_US-*,
         // coqui-en-*, icefall-en-ljspeech-*, melo-en-*, vctk-en-*,
-        // ljs-en-*)
-        "vits" => is_piper_or_github_model(model_id_lower),
+        // ljs-en-*). Plus inflect-en-* (tarball-verified: espeak-ng-data
+        // and no lexicon) and willwade-patched-en_* (piper voice
+        // re-exports, same orphan layout).
+        "vits" => {
+            is_piper_or_github_model(model_id_lower)
+                || model_id_lower.starts_with("inflect-en")
+                || model_id_lower.starts_with("willwade-patched-en")
+        }
         _ => false,
     }
 }
@@ -1649,11 +1655,15 @@ mod tests {
 
     #[test]
     fn test_lexicon_gate_against_full_registry() {
-        // Run the gate over the real registry: catches id-pattern drift
-        // the synthetic unit tests can't (loop-2 review found piper ids
-        // carry no vits- prefix — exactly this class of bug).
-        let mut included = 0usize;
-        let mut english_piper_included = 0usize;
+        // Run the gate over the real registry and compare per-family
+        // counts against pinned expectations. Loop-2 found piper ids
+        // carry no vits- prefix (the whole fleet excluded) and loop-3
+        // found inflect-en-* / willwade-patched-en_* excluded — both
+        // false negatives invisible to invariant-only assertions.
+        // When a registry update adds models, update these counts
+        // deliberately: a count DROP is a gate regression.
+        let mut families: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for (id, m) in sherpa_onnx_models::models() {
             let lower = id.to_lowercase();
             let gated = should_auto_generate_lexicon(&m.model_type, &lower);
@@ -1669,21 +1679,39 @@ mod tests {
                 "{id} passed the gate without an English id marker"
             );
             if gated {
-                included += 1;
-                if m.model_type == "vits" && lower.starts_with("piper-en") {
-                    english_piper_included += 1;
-                }
+                let family = lower.split(['-', '_']).next().unwrap_or("?").to_string();
+                *families.entry(family).or_default() += 1;
             }
         }
-        // the English piper fleet is the point of the exercise — a
-        // prefix regression that excludes them all must fail loudly
-        assert!(
-            english_piper_included >= 100,
-            "only {english_piper_included} English piper models gated in (expected the fleet)"
-        );
-        assert!(
-            included > english_piper_included,
-            "kokoro/kitten/matcha orphans missing"
+        let expected: &[(&str, usize)] = &[
+            // piper fleet + piper-style layouts
+            ("piper", 132),
+            ("willwade", 6), // willwade-patched-en_* piper re-exports
+            ("coqui", 3),
+            ("icefall", 3), // matcha icefall-en-ljspeech + vits -low/-high
+            ("inflect", 2),
+            ("melo", 1),
+            ("vctk", 1),
+            ("ljs", 1),
+            // misaki-convention orphans
+            ("kokoro", 2), // kokoro-en-v0_19, kokoro-en-int8-v0_19
+            // kitten ids split across nano/micro/mini name prefixes
+            ("nano", 4),
+            ("micro", 1),
+            ("mini", 2),
+        ];
+        for (family, count) in expected {
+            assert_eq!(
+                families.get(*family).copied().unwrap_or(0),
+                *count,
+                "family '{family}' gated count changed — gate regression or registry update: {families:?}"
+            );
+        }
+        // nothing outside the expected families sneaks in
+        assert_eq!(
+            families.len(),
+            expected.len(),
+            "unexpected families gated in: {families:?}"
         );
     }
 

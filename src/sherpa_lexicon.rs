@@ -305,9 +305,10 @@ pub fn has_lexicon_file(dir: &Path) -> bool {
 /// (word-specific stress/weak-form/allophone choices; see
 /// [`crate::sherpa_p2p`]).
 ///
-/// **Atomicity**: writes `lexicon.txt.tmp` first and renames — a crash
-/// mid-generation can't leave a truncated `lexicon.txt` that poisons
-/// every later load. An output with zero entries is deleted and
+/// **Atomicity**: writes a `lexicon.txt.<pid>.tmp` sibling first and
+/// renames — a crash mid-generation can't leave a truncated
+/// `lexicon.txt` that poisons every later load, and concurrent loads
+/// don't share a temp path. An output with zero entries is deleted and
 /// reported as an error for the same reason.
 ///
 /// Generation only runs for English models; non-English gruut languages
@@ -354,8 +355,12 @@ pub fn ensure_generated_lexicon(
             pairs.display()
         )));
     }
-    // atomic: write to a temp sibling, rename on success
-    let tmp = model_dir.join("lexicon.txt.tmp");
+
+    // atomic: write to a temp sibling, rename on success. The pid in
+    // the name keeps concurrent engine loads (speak() is &self) from
+    // interleaving writes to the same temp path; the rename stays
+    // same-directory, i.e. atomic.
+    let tmp = model_dir.join(format!("lexicon.txt.{}.tmp", std::process::id()));
     let stats = crate::sherpa_convention::convert_lexicon_file(
         gruut,
         &tokens_path,
@@ -434,7 +439,7 @@ pub fn generate_lexicon_txt(
 ) -> Result<(usize, usize), LexiconGenError> {
     let input = std::fs::File::open(gruut_lexicon_path)
         .map_err(|e| LexiconGenError(format!("reading {}: {e}", gruut_lexicon_path.display())))?;
-    let reader = std::io::BufReader::new(input);
+    let mut reader = std::io::BufReader::new(input);
 
     let output = std::fs::File::create(output_path)
         .map_err(|e| LexiconGenError(format!("creating {}: {e}", output_path.display())))?;
@@ -443,7 +448,18 @@ pub fn generate_lexicon_txt(
     let mut written = 0usize;
     let mut skipped = 0usize;
 
-    for line in reader.lines().map_while(Result::ok) {
+    // read_line loop (not `lines().map_while(Result::ok)`): a mid-file
+    // I/O or UTF-8 error must abort — same rule as convert_lexicon_file
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        if reader.read_line(&mut buf).map_err(|e| {
+            LexiconGenError(format!("reading {}: {e}", gruut_lexicon_path.display()))
+        })? == 0
+        {
+            break;
+        }
+        let line = buf.trim_end();
         let mut parts = line.split_whitespace();
         let Some(word) = parts.next() else { continue };
         let gruut_phones: Vec<&str> = parts.collect();
@@ -613,8 +629,15 @@ mod tests {
         let content = std::fs::read_to_string(model.join("lexicon.txt")).unwrap();
         assert!(content.contains("the ð i"));
         assert!(content.contains("day d ˈ A"));
-        // no temp file left behind
         assert!(!model.join("lexicon.txt.tmp").exists());
+        // pid-suffixed temp variant also cleaned up
+        assert!(
+            !std::fs::read_dir(&model)
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|e| e.file_name().to_string_lossy().ends_with(".tmp")),
+            "a .tmp file survived generation"
+        );
     }
 
     #[test]
