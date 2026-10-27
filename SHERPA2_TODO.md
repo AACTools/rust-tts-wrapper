@@ -120,7 +120,7 @@ Progress:
       macOS/Windows sherpa-live legs now vacuously green (only download
       piper/matcha models, all guarded) — noted as pre-existing CI gap,
       not this PR's scope.
-- [ ] Await CI green on the loop-2 commit → merge
+- [x] CI green on the loop-2 commit (28/28) → READY TO MERGE
 
 ## Phase 2 — lexicon generation PR (tracking issue #66)
 
