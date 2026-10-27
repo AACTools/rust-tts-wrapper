@@ -105,7 +105,15 @@ Progress:
       in tests/floravox_live.rs; needs a toolchain bump or lint-version
       guard, NOT this PR's problem)
 - [x] Non-sherpa builds: default, no-default, examples all compile
-- [ ] Push rework + rewrite PR body honestly + loop-review 2
+- [x] Push rework + rewrite PR body honestly
+- [x] Loop-1.5: CI's sherpa-live runs `--ignored` (runs ALL live tests) —
+      #[ignore = reason] annotations alone don't skip them. Added
+      runtime guards (SHERPA_MAJOR const + is_sherpa2_orphan +
+      skip_if_sherpa2_orphan) to all 12 espeak-orphaned live tests;
+      local live run: 20 passed / 0 failed (with piper models present).
+      Const flips automatically nothing — it's manual, documented to
+      remove when #66 lands.
+- [ ] Loop-review 2 (after CI green)
 
 ## Phase 2 — lexicon generation PR (tracking issue #66)
 
