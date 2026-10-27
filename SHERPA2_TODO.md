@@ -122,13 +122,14 @@ Progress:
       not this PR's scope.
 - [x] CI green on the loop-2 commit (28/28) → READY TO MERGE
 
-## Phase 2 — lexicon generation PR (tracking issue #66) — IN PROGRESS
+## Phase 2 — lexicon generation PR (tracking issue #66) — PR #67 OPEN
 
 Branch: feat/sherpa-lexicons (off main, after #65 merged).
 
-**STATUS: P2P lookup + rules hybrid VALIDATED for misaki (kokoro-en,
-kitten). Engine auto-generation wired. Remaining: ship pairs as an
-asset, espeak pairs for piper, un-guard live tests, PR.**
+**STATUS: misaki half done. PR #67 open after 4 review loops (6→6→7→8/10,
+merge). Engine auto-generation validated end-to-end on kokoro-en.
+floravox side pushed as feat/p2p-transducer (PhonemeTransducer hybrid +
+trainer --p2p + prepare_p2p_data.py).**
 
 Scope locked by Phase 1 results: the ONLY viable front-end for
 espeak-orphaned families (piper 536 voices, matcha-en, kokoro-en,
@@ -270,20 +271,19 @@ REQUIRED (rules alone garble ~10% of words); no pairs → no generation.
 A/B wavs generated (`examples/kokoro-ab`).
 
 ### Phase 2 remaining
+- [ ] PR #67 review + merge; then un-guard the 12 orphaned live tests
+      (search `is_sherpa2_orphan`); close #66
 - [ ] Ship the aligned pairs as a voicegarden-lexicons release asset
       (`p2p-misaki.tsv` alongside `lexicon.txt` in eng-US) so
       auto-generation works out of the box
 - [ ] piper / matcha-en (espeak convention): need an espeak-convention
-      reference lexicon to align against (CMUdict is BSD; TODO revised
-      approach noted CMUdict as a better source — generate
+      reference lexicon to align against (CMUdict is BSD; generate
       `p2p-espeak.tsv` from gruut↔CMUdict-IPA alignment)
-- [ ] floravox-g2p release with the `p2p` module (PhonemeTransducer) —
-      publish 0.8.10+ so the WFST fallback is available downstream
+- [ ] floravox PR: review feat/p2p-transducer, publish 0.8.10+ with
+      the `p2p` module (PhonemeTransducer) so the WFST fallback is
+      available downstream
 - [ ] A/B: whisper round-trip comparison per family (wavs generated,
       whisper not installed locally — CI or manual listen)
-- [ ] Un-guard the 12 orphaned live tests (search `is_sherpa2_orphan`);
-      close #66
-- [ ] PR + loop-review + CI green
 
 ## Phase 3 — Hume cloud engine (separate quiet PR)
 - [ ] cloud_engine: hume provider following cartesia/deepgram patterns
