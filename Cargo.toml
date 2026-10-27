@@ -217,3 +217,8 @@ required-features = ["sherpaonnx"]
 name = "kokoro-ab"
 path = "examples/kokoro_ab.rs"
 required-features = ["sherpaonnx"]
+
+[[example]]
+name = "sherpa-debug"
+path = "examples/sherpa_debug.rs"
+required-features = ["sherpaonnx"]

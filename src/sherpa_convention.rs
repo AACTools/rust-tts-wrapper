@@ -420,7 +420,11 @@ pub fn convert_lexicon_file(
             };
             match converted {
                 Some(converted) => {
-                    writeln!(writer, "{word} {}", converted.join(" "))
+                    // new sherpa-onnx 2.x lexicon format: `word||ph ph` —
+                    // the `||` separator routes through ParseLexiconFile,
+                    // which wraps with bos/pad/eos (the space-separated
+                    // old format feeds raw ids to piper and garbles)
+                    writeln!(writer, "{word}||{}", converted.join(" "))
                         .map_err(|e| LexiconGenError(format!("writing: {e}")))?;
                     written += 1;
                 }
@@ -577,9 +581,9 @@ mod tests {
 
         let content = std::fs::read_to_string(&out).unwrap();
         // table layer: word-specific conversion wins
-        assert!(content.contains("the ð i"));
+        assert!(content.contains("the||ð i"));
         // rules layer: fallback for out-of-table words
-        assert!(content.contains("day d ˈ A"));
+        assert!(content.contains("day||d ˈ A"));
     }
 
     #[test]
@@ -597,7 +601,7 @@ mod tests {
         // rules produce d ˈ e ɪ (all in vocab); table output rejected
         assert_eq!((stats.written, stats.via_table), (1, 0));
         let content = std::fs::read_to_string(&out).unwrap();
-        assert!(content.contains("day d ˈ e ɪ"));
+        assert!(content.contains("day||d ˈ e ɪ"));
     }
 
     #[test]

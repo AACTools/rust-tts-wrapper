@@ -474,7 +474,7 @@ pub fn generate_lexicon_txt(
         }
         match map.map_phonemes(&gruut_phones) {
             Some(mapped) => {
-                writeln!(writer, "{word} {}", mapped.join(" "))
+                writeln!(writer, "{word}||{}", mapped.join(" "))
                     .map_err(|e| LexiconGenError(format!("writing: {e}")))?;
                 written += 1;
             }
@@ -586,8 +586,8 @@ mod tests {
         assert_eq!(skipped, 1);
 
         let content = std::fs::read_to_string(&out).unwrap();
-        assert!(content.contains("hello h ə l o ʊ"));
-        assert!(content.contains("sky s k a ɪ"));
+        assert!(content.contains("hello||h ə l o ʊ"));
+        assert!(content.contains("sky||s k a ɪ"));
         assert!(!content.contains("xyz"));
     }
 
@@ -633,8 +633,8 @@ mod tests {
         assert_eq!((stats.written, stats.skipped, stats.via_table), (2, 0, 1)); // "the" table, "day" rules
         assert_eq!(stats.rules(), 1);
         let content = std::fs::read_to_string(model.join("lexicon.txt")).unwrap();
-        assert!(content.contains("the ð i"));
-        assert!(content.contains("day d ˈ A"));
+        assert!(content.contains("the||ð i"));
+        assert!(content.contains("day||d ˈ A"));
         assert!(!model.join("lexicon.txt.tmp").exists());
         // pid-suffixed temp variant also cleaned up
         assert!(
