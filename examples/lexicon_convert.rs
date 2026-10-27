@@ -27,8 +27,12 @@ fn main() {
     };
     let out_path = &args[4];
     let pairs = args.get(5).map(|p| {
-        rust_tts_wrapper::sherpa_p2p::P2pTable::from_tsv(std::path::Path::new(p))
-            .unwrap_or_else(|e| panic!("loading pairs {p}: {e}"))
+        rust_tts_wrapper::sherpa_p2p::P2pTable::from_tsv(std::path::Path::new(p)).unwrap_or_else(
+            |e| {
+                eprintln!("ERROR loading pairs {p}: {e}");
+                std::process::exit(1);
+            },
+        )
     });
 
     match rust_tts_wrapper::sherpa_convention::convert_lexicon_file(

@@ -45,47 +45,43 @@ impl P2pTable {
     pub fn from_tsv(path: &Path) -> Result<Self, LexiconGenError> {
         let file = std::fs::File::open(path)
             .map_err(|e| LexiconGenError(format!("reading {}: {e}", path.display())))?;
-        Ok(Self::from_reader(BufReader::new(file), path))
+        Self::from_reader(BufReader::new(file), path)
     }
 
     /// Build from inline TSV text (tests). Malformed lines are skipped.
+    /// In-memory text cannot hit I/O errors.
     #[must_use]
     pub fn from_tsv_str(text: &str) -> Self {
-        let (table, malformed) = Self::parse(std::io::Cursor::new(text));
+        let (table, malformed) = Self::parse(std::io::Cursor::new(text)).expect("in-memory read");
         if malformed > 0 {
             eprintln!("sherpa_p2p: skipped {malformed} malformed pair lines");
         }
         Self { table }
     }
 
-    fn from_reader(reader: impl BufRead, context: &Path) -> Self {
-        let (table, malformed) = Self::parse(reader);
+    fn from_reader(reader: impl BufRead, context: &Path) -> Result<Self, LexiconGenError> {
+        let (table, malformed) = Self::parse(reader)
+            .map_err(|e| LexiconGenError(format!("reading {}: {e}", context.display())))?;
         if malformed > 0 {
             eprintln!(
                 "sherpa_p2p: skipped {malformed} malformed pair lines in {}",
                 context.display()
             );
         }
-        Self { table }
+        Ok(Self { table })
     }
 
     /// Parse aligned pairs; returns (table, malformed-line count).
-    /// Unparseable lines count as malformed rather than aborting: a
-    /// pair table missing some lines degrades coverage, which the
-    /// malformed counter surfaces.
-    fn parse(mut reader: impl BufRead) -> (HashMap<String, Vec<String>>, usize) {
+    /// I/O errors propagate — a silently truncated table looks like a
+    /// smaller-but-valid table and quietly degrades coverage.
+    fn parse(mut reader: impl BufRead) -> std::io::Result<(HashMap<String, Vec<String>>, usize)> {
         let mut table = HashMap::new();
         let mut malformed = 0usize;
         let mut buf = String::new();
         loop {
             buf.clear();
-            match reader.read_line(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => {
-                    malformed = malformed.saturating_add(1);
-                    break;
-                }
+            if reader.read_line(&mut buf)? == 0 {
+                break;
             }
             let line = buf.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -105,7 +101,7 @@ impl P2pTable {
                 malformed += 1;
             }
         }
-        (table, malformed)
+        Ok((table, malformed))
     }
 
     /// Exact lookup: gruut phoneme tokens → target tokens, or `None`

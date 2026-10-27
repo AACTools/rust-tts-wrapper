@@ -271,12 +271,15 @@ pub fn detect_pairs_name(model_dir: &Path) -> String {
 
 /// Is this a lexicon file name sherpa collects (`lexicon.txt`,
 /// `lexicon-*.txt`)?
-fn is_lexicon_file_name(name: &str) -> bool {
+#[must_use]
+pub fn is_lexicon_file_name(name: &str) -> bool {
     name == "lexicon.txt" || name.starts_with("lexicon-")
 }
 
 /// True when the model dir already carries at least one lexicon file.
-fn has_lexicon_file(dir: &Path) -> bool {
+/// Cheap (one read_dir) — safe to call before any asset discovery.
+#[must_use]
+pub fn has_lexicon_file(dir: &Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|entries| {
         entries
             .filter_map(Result::ok)
@@ -342,6 +345,15 @@ pub fn ensure_generated_lexicon(
     let convention = detect_convention(&vocab);
 
     let table = crate::sherpa_p2p::P2pTable::from_tsv(pairs)?;
+    if table.is_empty() {
+        // an empty table would silently downgrade generation to
+        // rules-only, which garbles ~10% of common words — the exact
+        // failure the pairs requirement exists to prevent
+        return Err(LexiconGenError(format!(
+            "pairs table {} is empty — refusing rules-only generation",
+            pairs.display()
+        )));
+    }
     // atomic: write to a temp sibling, rename on success
     let tmp = model_dir.join("lexicon.txt.tmp");
     let stats = crate::sherpa_convention::convert_lexicon_file(
