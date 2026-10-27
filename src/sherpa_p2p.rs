@@ -24,7 +24,7 @@
 //! so the choice is arbitrary but stable).
 
 use std::collections::HashMap;
-use std::io::BufRead;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use crate::sherpa_lexicon::LexiconGenError;
@@ -36,21 +36,63 @@ pub struct P2pTable {
 }
 
 impl P2pTable {
-    /// Load an aligned-pairs TSV.
+    /// Load an aligned-pairs TSV. Malformed lines are counted and
+    /// reported once via `eprintln!` (missing tab, empty side) — I/O and
+    /// encoding errors propagate.
     ///
     /// # Errors
-    /// Returns an error if the file is unreadable.
+    /// Returns an error if the file is unreadable or contains invalid UTF-8.
     pub fn from_tsv(path: &Path) -> Result<Self, LexiconGenError> {
         let file = std::fs::File::open(path)
             .map_err(|e| LexiconGenError(format!("reading {}: {e}", path.display())))?;
-        let reader = std::io::BufReader::new(file);
+        Ok(Self::from_reader(BufReader::new(file), path))
+    }
+
+    /// Build from inline TSV text (tests). Malformed lines are skipped.
+    #[must_use]
+    pub fn from_tsv_str(text: &str) -> Self {
+        let (table, malformed) = Self::parse(std::io::Cursor::new(text));
+        if malformed > 0 {
+            eprintln!("sherpa_p2p: skipped {malformed} malformed pair lines");
+        }
+        Self { table }
+    }
+
+    fn from_reader(reader: impl BufRead, context: &Path) -> Self {
+        let (table, malformed) = Self::parse(reader);
+        if malformed > 0 {
+            eprintln!(
+                "sherpa_p2p: skipped {malformed} malformed pair lines in {}",
+                context.display()
+            );
+        }
+        Self { table }
+    }
+
+    /// Parse aligned pairs; returns (table, malformed-line count).
+    /// Unparseable lines count as malformed rather than aborting: a
+    /// pair table missing some lines degrades coverage, which the
+    /// malformed counter surfaces.
+    fn parse(mut reader: impl BufRead) -> (HashMap<String, Vec<String>>, usize) {
         let mut table = HashMap::new();
-        for line in reader.lines().map_while(Result::ok) {
-            let line = line.trim();
+        let mut malformed = 0usize;
+        let mut buf = String::new();
+        loop {
+            buf.clear();
+            match reader.read_line(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    malformed = malformed.saturating_add(1);
+                    break;
+                }
+            }
+            let line = buf.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
             let Some((source, target)) = line.split_once('\t') else {
+                malformed += 1;
                 continue;
             };
             // source: pipe-separated gruut phonemes; target: space-separated
@@ -59,30 +101,11 @@ impl P2pTable {
             if !key.is_empty() && !value.is_empty() {
                 // first entry wins (stable homograph choice)
                 table.entry(key).or_insert(value);
+            } else {
+                malformed += 1;
             }
         }
-        Ok(Self { table })
-    }
-
-    /// Build from inline TSV text (tests).
-    #[must_use]
-    pub fn from_tsv_str(text: &str) -> Self {
-        let mut table = HashMap::new();
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let Some((source, target)) = line.split_once('\t') else {
-                continue;
-            };
-            let key = source.replace('|', " ");
-            let value: Vec<String> = target.split_whitespace().map(str::to_owned).collect();
-            if !key.is_empty() && !value.is_empty() {
-                table.entry(key).or_insert(value);
-            }
-        }
-        Self { table }
+        (table, malformed)
     }
 
     /// Exact lookup: gruut phoneme tokens → target tokens, or `None`
@@ -155,13 +178,25 @@ w|ˈɚ|l|d\tw ˈ ɜ ɹ l d
 
     #[test]
     fn tsv_file_round_trip() {
-        let dir = std::env::temp_dir().join("sherpa_p2p_test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("pairs.tsv");
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("pairs.tsv");
         std::fs::write(&p, SAMPLE).unwrap();
         let t = P2pTable::from_tsv(&p).unwrap();
         assert_eq!(t.lookup(&["w", "ˈɚ", "l", "d"]).unwrap()[2], "ɜ");
-        let missing = P2pTable::from_tsv(&dir.join("nope.tsv"));
+        drop(dir);
+        let missing = P2pTable::from_tsv(&p);
         assert!(missing.is_err());
+    }
+
+    #[test]
+    fn malformed_lines_counted_not_fatal() {
+        // lines without a tab or with an empty side are skipped and
+        // counted; well-formed lines still load
+        let t = P2pTable::from_tsv_str("no tab here\n|\t\nð|ə\tð i\n");
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t.lookup(&["ð", "ə"]),
+            Some(vec!["ð".to_string(), "i".to_string()])
+        );
     }
 }

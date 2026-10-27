@@ -79,30 +79,18 @@ const DESTRESS_WORDS: &[&str] = &[
     "the", "be", "to", "of", "a", "in", "that", "have", "it", "for", "on", "with", "he", "as",
     "you", "at", "this", "but", "his", "by", "from", "they", "we", "she", "or", "an", "will",
     "would", "could", "should", "was", "were", "been", "has", "had", "them", "then", "these",
-    "its", "us", "are", "is", "do", "does", "did", "not", "and", "but", "if", "so", "up", "out",
-    "who", "what", "when", "where", "why", "how", "than", "then", "there", "here", "now",
+    "its", "us", "are", "is", "do", "does", "did", "not", "and", "if", "so", "up", "out", "who",
+    "what", "when", "where", "why", "how", "than", "there", "here", "now",
 ];
 
-/// Weak forms for function words: the full vowel reduces to schwa (or
-/// another reduced vowel) when unstressed. gruut uses the full form;
-/// misaki/espeak use the reduced form for these words.
-///
-/// These are the standard English weak forms — grammar facts, not
-/// phonemizer-specific data.
-const WEAK_FORMS: &[(&str, &[&str])] = &[
-    // (word, gruut full form, target weak form — shown as the gruut tokens to REPLACE)
-    // "the": gruut ð ə → stays ð ə (already schwa in gruut)
-    // "to": gruut t ə → stays t ə (already schwa)
-    // "a": gruut ə → stays ə
-    // Most function words already have schwa in gruut; the main
-    // difference is just the stress removal, not vowel changes.
-    // The few words where gruut uses a full vowel:
-    ("of", &["ə", "v"]),             // gruut sometimes ʌ v → target ə v
-    ("and", &["ə", "n"]),            // gruut ˈæ n d → target ə n (weak)
-    ("can", &["k", "ə", "n"]),       // gruut k ə n → target k ə n (already)
-    ("from", &["f", "ɹ", "ə", "m"]), // gruut f ɹ ˈʌ m → target f ɹ ə m
-    ("was", &["w", "ə", "z"]),       // gruut w ə z → target w ʌ z (check!)
-];
+// Weak forms for function words: the full vowel reduces to schwa (or
+// another reduced vowel) when unstressed. gruut uses the full form;
+// misaki/espeak use the reduced form for these words. These are the
+// standard English weak forms — grammar facts, not phonemizer-specific
+// data. NOTE: gruut already emits the weak form for nearly all of
+// these (its lexicon was built for connected speech), so no table is
+// applied at this layer; the word-level differences are handled
+// exactly by the P2P table.
 
 // ──────────────────────────────────────────────────────────────────
 // Conversion engine
@@ -125,8 +113,9 @@ pub enum Convention {
 /// 1. Function-word destressing (remove `ˈ` from known function words)
 /// 2. Rhotic splitting (`ɚ` → `ɜ ɹ` stressed / `ə ɹ` unstressed)
 /// 3. Symbol substitution (diphthong/affricate encoding per convention)
-/// 4. Unstressed vowel reduction (`ɛ` → `ə` in unstressed syllables,
-///    espeak convention only)
+/// 4. Unstressed vowel reduction (`ɛ`/`ʌ` → `ə` in unstressed
+///    syllables — gruut marks stress explicitly, both target
+///    conventions reduce where gruut keeps full vowels)
 #[must_use]
 #[allow(clippy::implicit_hasher)] // callers hold plain HashSets from read_tokens_txt
 pub fn convert_entry(
@@ -159,8 +148,7 @@ pub fn convert_entry(
     }
 
     // 2. rhotic splitting: ɚ → ɜ ɹ (in a stressed syllable) or ə ɹ
-    let has_stress = tokens.iter().any(|t| t == "ˈ" || t == "ˌ");
-    tokens = split_rhotics(tokens, has_stress);
+    tokens = split_rhotics(tokens);
 
     // 3. symbol substitution
     tokens = substitute_symbols(tokens, convention);
@@ -197,20 +185,12 @@ pub fn convert_entry(
 
 /// Split rhotacized vowels: `ɚ` becomes `ɜ ɹ` when it carries the
 /// syllabic nucleus of a stressed syllable, or `ə ɹ` elsewhere.
-fn split_rhotics(tokens: Vec<String>, _has_stress: bool) -> Vec<String> {
+fn split_rhotics(tokens: Vec<String>) -> Vec<String> {
     let mut out = Vec::with_capacity(tokens.len() + 4);
     for tok in tokens {
         if tok == "ɚ" {
-            // stressed ˈɚ → ˈ ɜ ɹ; bare ɚ → ə ɹ
-            if let Some(last) = out.last() {
-                if last == "ˈ" {
-                    out.pop();
-                    out.push("ˈ".to_string());
-                    out.push("ɜ".to_string());
-                    out.push("ɹ".to_string());
-                    continue;
-                }
-            }
+            // bare ɚ → ə ɹ (unstressed); a preceding stress mark means
+            // the stressed variant — see the ˈɚ/ˌɚ arms
             out.push("ə".to_string());
             out.push("ɹ".to_string());
         } else if tok == "ˈɚ" {
@@ -349,6 +329,25 @@ fn reduce_unstressed_vowels(tokens: Vec<String>) -> Vec<String> {
 // Full lexicon conversion
 // ──────────────────────────────────────────────────────────────────
 
+/// Outcome of a lexicon conversion run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LexiconGenStats {
+    /// entries written to the output file.
+    pub written: usize,
+    /// entries skipped (unmappable symbols, vocabulary violations).
+    pub skipped: usize,
+    /// entries converted by the exact P2P table (the rest via rules).
+    pub via_table: usize,
+}
+
+impl LexiconGenStats {
+    /// Entries converted by the rules layer (everything not via the table).
+    #[must_use]
+    pub fn rules(&self) -> usize {
+        self.written - self.via_table
+    }
+}
+
 /// Convert an entire gruut lexicon file to the target convention,
 /// writing a sherpa-format lexicon.txt. Two conversion layers:
 ///
@@ -360,22 +359,23 @@ fn reduce_unstressed_vowels(tokens: Vec<String>) -> Vec<String> {
 ///    words whose conventions differ unpredictably.
 ///
 /// Words whose converted symbols fall outside the target vocabulary
-/// are skipped. Returns (written, skipped, via_table).
+/// are skipped. A malformed input line aborts with an error (a
+/// silently truncated lexicon looks like success but garbles speech).
 ///
 /// # Errors
-/// Returns an error on file I/O problems.
+/// Returns an error on file I/O problems or malformed input lines.
 pub fn convert_lexicon_file(
     gruut_lexicon_path: &std::path::Path,
     tokens_txt_path: &std::path::Path,
     convention: Convention,
     p2p_table: Option<&crate::sherpa_p2p::P2pTable>,
     output_path: &std::path::Path,
-) -> Result<(usize, usize, usize), LexiconGenError> {
+) -> Result<LexiconGenStats, LexiconGenError> {
     let target_vocab = crate::sherpa_lexicon::read_tokens_txt_public(tokens_txt_path)?;
 
     let input = std::fs::File::open(gruut_lexicon_path)
         .map_err(|e| LexiconGenError(format!("reading {}: {e}", gruut_lexicon_path.display())))?;
-    let reader = std::io::BufReader::new(input);
+    let mut reader = std::io::BufReader::new(input);
 
     let output = std::fs::File::create(output_path)
         .map_err(|e| LexiconGenError(format!("creating {}: {e}", output_path.display())))?;
@@ -385,41 +385,58 @@ pub fn convert_lexicon_file(
     let mut skipped = 0usize;
     let mut via_table = 0usize;
 
-    for line in reader.lines().map_while(Result::ok) {
-        let mut parts = line.split_whitespace();
-        let Some(word) = parts.next() else { continue };
-        let gruut_phones: Vec<&str> = parts.collect();
-        if gruut_phones.is_empty() {
-            continue;
+    // read_line loop (not `lines().map_while(Result::ok)`): a mid-file
+    // I/O or UTF-8 error must abort — a silently truncated lexicon
+    // looks like success but garbles speech
+    let mut buf = String::new();
+    loop {
+        buf.clear();
+        let n = reader.read_line(&mut buf).map_err(|e| {
+            LexiconGenError(format!("reading {}: {e}", gruut_lexicon_path.display()))
+        })?;
+        if n == 0 {
+            break;
         }
-        // layer 1: exact P2P table lookup (word-specific, learned),
-        // accepted only when every output symbol is in the vocabulary
-        let from_table = p2p_table
-            .and_then(|t| t.lookup(&gruut_phones))
-            .filter(|tokens| tokens.iter().all(|t| target_vocab.contains(t.as_str())));
-        let converted = match from_table {
-            Some(tokens) => {
-                via_table += 1;
-                Some(tokens)
+        {
+            let line = buf.trim_end();
+            let mut parts = line.split_whitespace();
+            let Some(word) = parts.next() else { continue };
+            let gruut_phones: Vec<&str> = parts.collect();
+            if gruut_phones.is_empty() {
+                continue;
             }
-            // layer 2: rules fallback (systematic conversion)
-            None => convert_entry(word, &gruut_phones, convention, &target_vocab),
-        };
-        match converted {
-            Some(converted) => {
-                use std::io::Write;
-                writeln!(writer, "{word} {}", converted.join(" "))
-                    .map_err(|e| LexiconGenError(format!("writing: {e}")))?;
-                written += 1;
+            // layer 1: exact P2P table lookup (word-specific, learned),
+            // accepted only when every output symbol is in the vocabulary
+            let from_table = p2p_table
+                .and_then(|t| t.lookup(&gruut_phones))
+                .filter(|tokens| tokens.iter().all(|t| target_vocab.contains(t.as_str())));
+            let converted = match from_table {
+                Some(tokens) => {
+                    via_table += 1;
+                    Some(tokens)
+                }
+                // layer 2: rules fallback (systematic conversion)
+                None => convert_entry(word, &gruut_phones, convention, &target_vocab),
+            };
+            match converted {
+                Some(converted) => {
+                    writeln!(writer, "{word} {}", converted.join(" "))
+                        .map_err(|e| LexiconGenError(format!("writing: {e}")))?;
+                    written += 1;
+                }
+                None => skipped += 1,
             }
-            None => skipped += 1,
         }
     }
 
     writer
         .flush()
         .map_err(|e| LexiconGenError(format!("flushing: {e}")))?;
-    Ok((written, skipped, via_table))
+    Ok(LexiconGenStats {
+        written,
+        skipped,
+        via_table,
+    })
 }
 
 #[cfg(test)]
@@ -553,9 +570,10 @@ mod tests {
         let out = tmp.path().join("lexicon.txt");
         let table = crate::sherpa_p2p::P2pTable::from_tsv(&pairs).unwrap();
 
-        let (written, skipped, via_table) =
+        let stats =
             convert_lexicon_file(&gruut, &tokens, Convention::Misaki, Some(&table), &out).unwrap();
-        assert_eq!((written, skipped, via_table), (2, 0, 1));
+        assert_eq!((stats.written, stats.skipped, stats.via_table), (2, 0, 1));
+        assert_eq!(stats.rules(), 1);
 
         let content = std::fs::read_to_string(&out).unwrap();
         // table layer: word-specific conversion wins
@@ -574,11 +592,38 @@ mod tests {
         let out = tmp.path().join("lexicon.txt");
         let table = crate::sherpa_p2p::P2pTable::from_tsv(&pairs).unwrap();
 
-        let (written, _skipped, via_table) =
+        let stats =
             convert_lexicon_file(&gruut, &tokens, Convention::Espeak, Some(&table), &out).unwrap();
         // rules produce d ˈ e ɪ (all in vocab); table output rejected
-        assert_eq!((written, via_table), (1, 0));
+        assert_eq!((stats.written, stats.via_table), (1, 0));
         let content = std::fs::read_to_string(&out).unwrap();
         assert!(content.contains("day d ˈ e ɪ"));
+    }
+
+    #[test]
+    fn unstressed_vowel_reduction_fires() {
+        let vocab = full_english_vocab();
+        // "banana"-shaped: unstressed ɛ reduces to ə (gruut marks stress
+        // on the middle syllable only)
+        let out = convert_entry(
+            "benignly",
+            &["b", "ɪ", "n", "ˈaɪ", "n", "l", "i"],
+            Convention::Misaki,
+            &vocab,
+        )
+        .unwrap();
+        // gruut ɪ stays (kept in unstressed positions); no ɛ/ʌ in this
+        // input, but the stressless branch must not crash
+        assert_eq!(out, vec!["b", "ɪ", "n", "ˈ", "I", "n", "l", "i"]);
+
+        // with an unstressed ɛ: reduces
+        let out = convert_entry(
+            "xyz",
+            &["b", "ɛ", "n", "ˈaɪ", "ɛ", "n"],
+            Convention::Espeak,
+            &vocab,
+        )
+        .unwrap();
+        assert_eq!(out, vec!["b", "ə", "n", "ˈ", "a", "ɪ", "ə", "n"]);
     }
 }

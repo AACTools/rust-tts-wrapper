@@ -167,7 +167,7 @@ impl PhonemeMap {
 /// multi-character Unicode).
 ///
 /// # Errors
-/// Returns an error if the file is unreadable.
+/// Returns an error if the file is unreadable or contains invalid UTF-8.
 pub fn read_tokens_txt_public(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
     read_tokens_txt(path)
 }
@@ -181,30 +181,57 @@ pub struct LexiconAssets {
     pub pairs: Option<PathBuf>,
 }
 
+/// The five uppercase diphthong symbols that distinguish the misaki
+/// phoneme convention (kokoro-en, kitten) from espeak IPA (piper,
+/// matcha-en) in a model's `tokens.txt`.
+const MISAKI_SIGNATURE: [&str; 5] = ["A", "I", "O", "W", "Y"];
+
+/// Detect the model's phoneme convention from its vocabulary: the
+/// misaki convention uses the five uppercase diphthongs as standalone
+/// symbols; their absence means espeak IPA.
+fn detect_convention(vocab: &HashSet<String>) -> crate::sherpa_convention::Convention {
+    use crate::sherpa_convention::Convention;
+    if MISAKI_SIGNATURE.iter().all(|s| vocab.contains(*s)) {
+        Convention::Misaki
+    } else {
+        Convention::Espeak
+    }
+}
+
+/// An explicitly-set env var whose path doesn't exist — worth a
+/// warning, or the silent fallthrough costs an afternoon of debugging.
+fn env_path_or_warn(var: &str) -> Option<PathBuf> {
+    let val = std::env::var_os(var)?;
+    let p = PathBuf::from(&val);
+    if p.exists() {
+        Some(p)
+    } else {
+        eprintln!(
+            "sherpa: {var} is set but {} does not exist — ignoring",
+            p.display()
+        );
+        None
+    }
+}
+
 /// Discover conversion assets for an orphaned model: the `SHERPA_*` env
 /// vars first, then conventional locations (pairs beside the model or
 /// the gruut lexicon; the voicegarden lexicon cache).
 #[must_use]
 pub fn discover_lexicon_assets(model_dir: &Path, pairs_name: &str) -> LexiconAssets {
-    let gruut = std::env::var_os("SHERPA_GRUUT_LEXICON")
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| {
-            let cached = voicegarden_cache_dir()?.join("eng-US").join("lexicon.txt");
-            cached.exists().then_some(cached)
-        });
+    let gruut = env_path_or_warn("SHERPA_GRUUT_LEXICON").or_else(|| {
+        let cached = voicegarden_cache_dir()?.join("eng-US").join("lexicon.txt");
+        cached.exists().then_some(cached)
+    });
 
-    let pairs = std::env::var_os("SHERPA_P2P_PAIRS")
-        .map(PathBuf::from)
-        .filter(|p| p.exists())
-        .or_else(|| {
-            let in_model = model_dir.join(pairs_name);
-            if in_model.exists() {
-                return Some(in_model);
-            }
-            let beside = gruut.as_ref()?.parent()?.join(pairs_name);
-            beside.exists().then_some(beside)
-        });
+    let pairs = env_path_or_warn("SHERPA_P2P_PAIRS").or_else(|| {
+        let in_model = model_dir.join(pairs_name);
+        if in_model.exists() {
+            return Some(in_model);
+        }
+        let beside = gruut.as_ref()?.parent()?.join(pairs_name);
+        beside.exists().then_some(beside)
+    });
 
     LexiconAssets {
         gruut_lexicon: gruut,
@@ -215,6 +242,10 @@ pub fn discover_lexicon_assets(model_dir: &Path, pairs_name: &str) -> LexiconAss
 /// Discover conversion assets for an orphaned model, detecting the
 /// convention from the model's own `tokens.txt` (uppercase diphthongs
 /// `A I O W Y` ⇒ misaki pairs, else espeak pairs).
+///
+/// Cheap enough for per-load calls, but prefer calling it only after
+/// [`ensure_generated_lexicon`]'s "already has a lexicon" check — see
+/// the engine integration.
 #[must_use]
 pub fn discover_model_assets(model_dir: &Path) -> LexiconAssets {
     let pairs_name = detect_pairs_name(model_dir);
@@ -223,47 +254,72 @@ pub fn discover_model_assets(model_dir: &Path) -> LexiconAssets {
 
 /// Pairs filename for the model's phoneme convention (`p2p-misaki.tsv`
 /// when the model vocabulary has the five uppercase misaki diphthongs,
-/// else `p2p-espeak.tsv`). Defaults to misaki when there is no
-/// `tokens.txt` to inspect.
+/// else `p2p-espeak.tsv`).
 #[must_use]
 pub fn detect_pairs_name(model_dir: &Path) -> String {
-    let misaki = read_tokens_txt(&model_dir.join("tokens.txt")).map_or(true, |vocab| {
-        ["A", "I", "O", "W", "Y"].iter().all(|s| vocab.contains(*s))
-    });
-    if misaki {
-        "p2p-misaki.tsv".to_owned()
-    } else {
-        "p2p-espeak.tsv".into()
+    let convention = read_tokens_txt(&model_dir.join("tokens.txt")).map_or(
+        // no tokens.txt / unreadable: misaki pairs are the ones
+        // that exist today, so that's the useful default
+        crate::sherpa_convention::Convention::Misaki,
+        |vocab| detect_convention(&vocab),
+    );
+    match convention {
+        crate::sherpa_convention::Convention::Misaki => "p2p-misaki.tsv".to_owned(),
+        crate::sherpa_convention::Convention::Espeak => "p2p-espeak.tsv".to_owned(),
     }
+}
+
+/// Is this a lexicon file name sherpa collects (`lexicon.txt`,
+/// `lexicon-*.txt`)?
+fn is_lexicon_file_name(name: &str) -> bool {
+    name == "lexicon.txt" || name.starts_with("lexicon-")
+}
+
+/// True when the model dir already carries at least one lexicon file.
+fn has_lexicon_file(dir: &Path) -> bool {
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_str().is_some_and(is_lexicon_file_name))
+    })
 }
 
 /// Generate a lexicon.txt for an espeak-orphaned model when the needed
 /// assets are available. No-op (returns `None`) when the model already
-/// has a lexicon or the assets are incomplete.
+/// has a lexicon, has no `tokens.txt`, or the assets are incomplete.
+///
+/// **Callers must gate this to orphaned English model families** — the
+/// engine does (see `should_auto_generate_lexicon` there). This
+/// function only checks file presence, not model identity.
 ///
 /// **Convention detection**: from the model's own `tokens.txt` — the
 /// misaki convention (kokoro-en, kitten) uses the five uppercase
 /// diphthong symbols `A I O W Y`; their absence means the espeak
-/// convention (piper, matcha-en).
+/// convention (piper, matcha-en). An empty/unparseable vocabulary is an
+/// error, not a default.
 ///
 /// **Pairs are required** — rules alone garble ~10% of common words
 /// (word-specific stress/weak-form/allophone choices; see
 /// [`crate::sherpa_p2p`]).
 ///
+/// **Atomicity**: writes `lexicon.txt.tmp` first and renames — a crash
+/// mid-generation can't leave a truncated `lexicon.txt` that poisons
+/// every later load. An output with zero entries is deleted and
+/// reported as an error for the same reason.
+///
 /// Generation only runs for English models; non-English gruut languages
 /// can be wired the same way once their pairs exist.
 ///
 /// # Errors
-/// Returns an error when assets were found but generation failed (I/O
-/// or a rejected vocabulary); `Ok(None)` means "nothing to do".
+/// Returns an error when assets were found but generation failed (I/O,
+/// an unreadable vocabulary, or zero convertible entries); `Ok(None)`
+/// means "nothing to do".
 pub fn ensure_generated_lexicon(
     model_dir: &Path,
     assets: &LexiconAssets,
-) -> Result<Option<(usize, usize, usize)>, LexiconGenError> {
-    use crate::sherpa_convention::Convention;
-
+) -> Result<Option<crate::sherpa_convention::LexiconGenStats>, LexiconGenError> {
     // already has a lexicon (lexicon.txt or lexicon-*.txt)? done.
-    if collect_lexicon_files(model_dir).is_some_and(|files| !files.is_empty()) {
+    if has_lexicon_file(model_dir) {
         return Ok(None);
     }
     let tokens_path = model_dir.join("tokens.txt");
@@ -277,23 +333,48 @@ pub fn ensure_generated_lexicon(
 
     // detect the convention from the model's own vocabulary
     let vocab = read_tokens_txt(&tokens_path)?;
-    let misaki = ["A", "I", "O", "W", "Y"].iter().all(|s| vocab.contains(*s));
-    let convention = if misaki {
-        Convention::Misaki
-    } else {
-        Convention::Espeak
-    };
+    if vocab.is_empty() {
+        return Err(LexiconGenError(format!(
+            "{} parsed to an empty vocabulary — refusing to generate a lexicon",
+            tokens_path.display()
+        )));
+    }
+    let convention = detect_convention(&vocab);
 
     let table = crate::sherpa_p2p::P2pTable::from_tsv(pairs)?;
-    let out = model_dir.join("lexicon.txt");
+    // atomic: write to a temp sibling, rename on success
+    let tmp = model_dir.join("lexicon.txt.tmp");
     let stats = crate::sherpa_convention::convert_lexicon_file(
         gruut,
         &tokens_path,
         convention,
         Some(&table),
-        &out,
-    )?;
-    Ok(Some(stats))
+        &tmp,
+    );
+    match stats {
+        Ok(stats) if stats.written > 0 => {
+            std::fs::rename(&tmp, model_dir.join("lexicon.txt")).map_err(|e| {
+                LexiconGenError(format!("renaming into {}: {e}", model_dir.display()))
+            })?;
+            Ok(Some(stats))
+        }
+        Ok(stats) => {
+            // zero entries: a wrong-language gruut lexicon or an
+            // incompatible vocabulary — an empty lexicon.txt would
+            // change engine behaviour forever (the "has lexicon" check
+            // would pass on every later load). Remove and report.
+            let _ = std::fs::remove_file(&tmp);
+            Err(LexiconGenError(format!(
+                "generation produced 0 entries (skipped {}) — wrong gruut lexicon or \
+                 incompatible vocabulary? no lexicon written",
+                stats.skipped
+            )))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 /// voicegarden lexicon cache root (`~/.voicegarden/lexicons`), when it
@@ -304,30 +385,20 @@ fn voicegarden_cache_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
-/// All lexicon files in a model dir (`lexicon.txt`, `lexicon-*.txt`),
-/// or `None` when the directory can't be read.
-fn collect_lexicon_files(dir: &Path) -> Option<Vec<PathBuf>> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    let files: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n == "lexicon.txt" || n.starts_with("lexicon-"))
-        })
-        .collect();
-    Some(files)
-}
-
 fn read_tokens_txt(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
     let file = std::fs::File::open(path)
         .map_err(|e| LexiconGenError(format!("reading {}: {e}", path.display())))?;
     let reader = std::io::BufReader::new(file);
     let mut vocab = HashSet::new();
-    for line in reader.lines().map_while(Result::ok) {
-        // the format is "symbol<TAB or SPACE>id"
-        if let Some(sym) = line.rsplit_once(' ').map(|(s, _)| s) {
+    for line in reader.lines() {
+        let line = line.map_err(|e| LexiconGenError(format!("reading {}: {e}", path.display())))?;
+        // the format is "symbol<SPACE or TAB>id"; the symbol may itself
+        // contain anything except the separator
+        let sym = line
+            .rsplit_once(' ')
+            .or_else(|| line.rsplit_once('\t'))
+            .map(|(s, _)| s);
+        if let Some(sym) = sym {
             vocab.insert(sym.to_string());
         }
     }
@@ -522,13 +593,16 @@ mod tests {
         // misaki vocab (uppercase diphthongs)
         let model = orphan_model_dir(&["ð", "ə", "i", "d", "ˈ", "A", "I", "O", "W", "Y", "ʧ", "ʤ"]);
 
-        let (written, skipped, via_table) = ensure_generated_lexicon(&model, &assets)
+        let stats = ensure_generated_lexicon(&model, &assets)
             .unwrap()
             .expect("should generate");
-        assert_eq!((written, skipped, via_table), (2, 0, 1)); // "the" table, "day" rules
+        assert_eq!((stats.written, stats.skipped, stats.via_table), (2, 0, 1)); // "the" table, "day" rules
+        assert_eq!(stats.rules(), 1);
         let content = std::fs::read_to_string(model.join("lexicon.txt")).unwrap();
         assert!(content.contains("the ð i"));
         assert!(content.contains("day d ˈ A"));
+        // no temp file left behind
+        assert!(!model.join("lexicon.txt.tmp").exists());
     }
 
     #[test]
@@ -567,10 +641,52 @@ mod tests {
     }
 
     #[test]
+    fn zero_entry_generation_refused_and_cleaned_up() {
+        let tree = assets_tree();
+        // a gruut lexicon whose words nothing can convert (vocab without
+        // any matching symbols) → written == 0 must NOT leave a lexicon
+        let empty_out = tree.join("eng-US/empty.txt");
+        // combining-mark symbols no vocabulary contains
+        std::fs::write(&empty_out, "zzz x\u{0335} y\u{0335}\n").unwrap();
+        let assets = LexiconAssets {
+            gruut_lexicon: Some(empty_out),
+            pairs: Some(tree.join("eng-US/p2p-misaki.tsv")),
+        };
+        let model = orphan_model_dir(&["ð", "ə", "i", "A", "I", "O", "W", "Y"]);
+        let err = ensure_generated_lexicon(&model, &assets).unwrap_err();
+        assert!(err.0.contains("0 entries"), "got: {err}");
+        // neither the final file nor the temp remains
+        assert!(!model.join("lexicon.txt").exists());
+        assert!(!model.join("lexicon.txt.tmp").exists());
+    }
+
+    #[test]
+    fn empty_vocabulary_is_an_error() {
+        let assets = assets_for(&assets_tree());
+        // a tokens.txt whose lines don't parse → empty vocab, not a
+        // silent espeak-convention default
+        let model = tempfile::tempdir().unwrap().keep();
+        std::fs::write(model.join("tokens.txt"), "\n\n").unwrap();
+        assert!(ensure_generated_lexicon(&model, &assets).is_err());
+        assert!(!model.join("lexicon.txt").exists());
+    }
+
+    #[test]
     fn pairs_name_follows_vocabulary_convention() {
         let misaki = orphan_model_dir(&["a", "A", "I", "O", "W", "Y"]);
         let espeak = orphan_model_dir(&["a", "e", "ɪ"]);
         assert_eq!(detect_pairs_name(&misaki), "p2p-misaki.tsv");
         assert_eq!(detect_pairs_name(&espeak), "p2p-espeak.tsv");
+    }
+
+    #[test]
+    fn tokens_txt_tab_separator_parsed() {
+        let model = tempfile::tempdir().unwrap().keep();
+        std::fs::write(model.join("tokens.txt"), "a\t0\nb\t1\n").unwrap();
+        let vocab = read_tokens_txt(&model.join("tokens.txt")).unwrap();
+        assert!(
+            vocab.contains("a") && vocab.contains("b"),
+            "vocab: {vocab:?}"
+        );
     }
 }

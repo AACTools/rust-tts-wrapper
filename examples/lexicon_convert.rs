@@ -2,18 +2,28 @@
 // and generate lexicon.txt files for real models
 //
 // usage:
-//   lexicon_convert <gruut.txt> <tokens.txt> <misaki|espeak> <out.txt> [pairs.tsv]
+//   lexicon-convert <gruut.txt> <tokens.txt> <misaki|espeak> <out.txt> [pairs.tsv]
 //
 // pairs.tsv is optional; when given, the P2P table handles in-table
 // words exactly and the rules cover the rest.
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() < 5 {
+        eprintln!(
+            "usage: {} <gruut.txt> <tokens.txt> <misaki|espeak> <out.txt> [pairs.tsv]",
+            args.first().map_or("lexicon-convert", String::as_str)
+        );
+        std::process::exit(2);
+    }
     let gruut_path = &args[1];
     let tokens_path = &args[2];
     let convention = match args[3].as_str() {
         "misaki" => rust_tts_wrapper::sherpa_convention::Convention::Misaki,
         "espeak" => rust_tts_wrapper::sherpa_convention::Convention::Espeak,
-        _ => panic!("convention must be 'misaki' or 'espeak'"),
+        other => {
+            eprintln!("convention must be 'misaki' or 'espeak', got {other:?}");
+            std::process::exit(2);
+        }
     };
     let out_path = &args[4];
     let pairs = args.get(5).map(|p| {
@@ -28,10 +38,16 @@ fn main() {
         pairs.as_ref(),
         std::path::Path::new(out_path),
     ) {
-        Ok((written, skipped, via_table)) => {
-            let rules = written - via_table;
-            println!("written={written} (table={via_table}, rules={rules}) skipped={skipped}");
+        Ok(stats) => println!(
+            "written={} (table={}, rules={}) skipped={}",
+            stats.written,
+            stats.via_table,
+            stats.rules(),
+            stats.skipped
+        ),
+        Err(e) => {
+            eprintln!("ERROR: {e}");
+            std::process::exit(1);
         }
-        Err(e) => println!("ERROR: {e}"),
     }
 }
