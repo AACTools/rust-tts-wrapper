@@ -39,6 +39,11 @@ name = "voice-clone"
 path = "examples/voice-clone.rs"
 required-features = ["cloning"]
 
+[[example]]
+name = "sherpa2-smoke"
+path = "examples/sherpa2_smoke.rs"
+required-features = ["sherpaonnx"]
+
 [features]
 # sapi removed from defaults (issue #57): the build.rs assert makes
 # default-feature builds panic on macOS/Linux. Windows consumers add
@@ -128,7 +133,7 @@ serde_json = "1"  # non-optional: factory parse_credentials needs it (#58)
 # "Download sherpa-onnx x86 prebuilt"). A minor drift (crate 1.13.4 with
 # sys 1.13.5 doesn't even compile, and a newer crate references C-API
 # symbols an older prebuilt lib lacks → LNK2019). Bump both together.
-sherpa-onnx = { version = "=1.13.8", optional = true }
+sherpa-onnx = { version = "=2.0.1", optional = true }  # SHERPA_MAJOR in tests/sherpaonnx_live.rs must track this pin
 # rc.14: Session::builder(&Environment) — pocket passes a stored env.
 # Exact pin: prerelease-caret floats within 2.0.0-rc.*, and rc releases
 # have twice changed the builder signature; re-verify on bumps.
@@ -155,7 +160,7 @@ floravox-core = { version = "=0.8.8", optional = true }
 floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
 voicegarden-lexicons = { version = "0.3", optional = true }
 # Pin sys to match the main crate (cargo update can drift them apart).
-sherpa-onnx-sys = { version = "=1.13.8", optional = true }
+sherpa-onnx-sys = { version = "=2.0.1", optional = true }
 base64 = { version = "0.23", optional = true }
 speechmarkdown-rust = { version = "0.5.2", optional = true }
 anyhow = "1"

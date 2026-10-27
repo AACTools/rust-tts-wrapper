@@ -130,6 +130,16 @@ impl fmt::Debug for SherpaOnnxEngine {
 }
 
 impl SherpaOnnxEngine {
+    /// Sample rate of the loaded model (registry value; 0 when the model
+    /// id is unknown). Examples and callers writing WAV files should use
+    /// this rather than assuming a rate.
+    #[must_use]
+    pub fn loaded_sample_rate(&self) -> i32 {
+        self.models
+            .get(&self.loaded_model_id)
+            .map_or(0, |m| m.sample_rate as i32)
+    }
+
     /// Create a new Sherpa-ONNX engine.
     ///
     /// Credentials JSON keys:
@@ -422,7 +432,9 @@ impl TtsEngine for SherpaOnnxEngine {
                     model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
                     voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-                    data_dir: existing_path(&model_dir, "espeak-ng-data"),
+                    // 2.x: espeak is gone; a lexicon*.txt is required for
+                    // text-in synthesis (same story as kokoro-en/piper)
+                    lexicon: collect_lexicons(&model_dir),
                     ..Default::default()
                 },
                 num_threads: self.num_threads,
@@ -1042,11 +1054,12 @@ fn is_piper_or_github_model(model_id: &str) -> bool {
     PREFIXES.iter().any(|p| model_id.starts_with(p))
 }
 
-/// Collect lexicon paths for a Kokoro model. Multilingual releases (e.g.
-/// `kokoro-zh_en-int8`) ship several `lexicon-*.txt` files which
-/// sherpa-onnx accepts as a comma-separated list; English-only Kokoro has
-/// none and relies on `espeak-ng-data/` instead. Returns `None` when no
-/// lexicon files are present so the field is left unset.
+/// Collect all lexicon file paths in a model dir (lexicon.txt,
+/// lexicon-*.txt — multilingual Kokoro ships several). Comma-joined,
+/// deterministically sorted. Used by the Kokoro, VITS, and kitten
+/// configs: under sherpa-onnx 2.x the lexicon is the only phonetic
+/// front-end (espeak left the runtime). Returns `None` when no lexicon
+/// files are present so the field is left unset.
 fn collect_lexicons(dir: &std::path::Path) -> Option<String> {
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .ok()?
@@ -1420,7 +1433,8 @@ fn build_matcha_config(
 /// VITS-family config. The right combination of lexicon / data_dir / dict_dir
 /// depends on where the model came from:
 ///
-/// - Piper / GitHub models → prefer `espeak-ng-data/`, never `dict_dir`.
+/// - Piper / GitHub models → espeak-ng-data under 1.x; under 2.x the
+///   lexicon is the only front-end (see the note in the function body).
 /// - Chinese/Cantonese models → use `dict/` for jieba segmentation.
 /// - MMS and other VITS → `lexicon.txt` if present, else nothing.
 fn build_vits_config(
@@ -1435,6 +1449,13 @@ fn build_vits_config(
         .unwrap_or_else(|| model_dir.join("model.onnx"));
 
     // Pick the right phonetic back-end.
+    //
+    // sherpa-onnx 2.x removed the bundled espeak-ng phonemizer: `data_dir`
+    // is deprecated and ignored at runtime, and the text front-ends are
+    // the built-in lexicon (lexicon.txt) or caller-side phonemization.
+    // Piper models ship espeak-ng-data only, so under 2.x they speak only
+    // when a lexicon.txt is supplied alongside — the engine drops one in
+    // from the voicegarden lexicon cache when available (Phase 2).
     let (data_dir, dict_dir) = if is_piper_or_github {
         // Piper & friends ship espeak-ng-data; jieba would just complain.
         (existing_path(model_dir, "espeak-ng-data"), None)
@@ -1469,7 +1490,11 @@ fn build_vits_config(
     sherpa_onnx::OfflineTtsVitsModelConfig {
         model: Some(model.to_string_lossy().to_string()),
         tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-        lexicon: existing_path(model_dir, "lexicon.txt"),
+        // 2.x: the lexicon IS the phonetic back-end. Pass every
+        // lexicon*.txt found (lexicon.txt, lexicon-us-en.txt, …) —
+        // including Piper models, whose 1.x behavior ("prefer espeak,
+        // ignore lexicon") inverted when espeak left the runtime.
+        lexicon: collect_lexicons(model_dir),
         data_dir,
         dict_dir,
         ..Default::default()
@@ -2239,7 +2264,10 @@ mod tests {
             .as_deref()
             .unwrap()
             .ends_with("en_US-amy-low.onnx"));
-        assert!(cfg.data_dir.is_some(), "Piper needs espeak-ng-data");
+        assert!(
+            cfg.data_dir.is_some(),
+            "Piper ships espeak-ng-data (data_dir is set but ignored at runtime under 2.x)"
+        );
         assert!(
             cfg.dict_dir.is_none(),
             "Piper must NOT set dict_dir (jieba would warn)"
