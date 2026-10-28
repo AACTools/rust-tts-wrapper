@@ -245,6 +245,23 @@ jobs:
           rm pocket.tar.bz2
           ls -la kyutai-en-pocket-tts-int8/ | head -5
 
+      - name: Ensure sherpa-onnx prebuilt libs are complete
+        # sherpa-onnx-sys caches its downloaded static libs under
+        # target/sherpa-onnx-prebuilt and SKIPS the download when the
+        # directory exists. A partially-restored rust-cache then fails
+        # at link time ("could not find native static library
+        # sherpa-onnx-c-api") on every rerun. Delete the cache when it
+        # lacks the lib so the build script re-downloads.
+        shell: bash
+        run: |
+          DIR="target/sherpa-onnx-prebuilt"
+          if [ -d "$DIR" ] && [ -z "$(find "$DIR" -name 'libsherpa-onnx-c-api.a' -o -name 'sherpa-onnx-c-api.lib' 2>/dev/null | head -1)" ]; then
+            echo "cached sherpa-onnx prebuilt libs incomplete — forcing re-download"
+            rm -rf "$DIR"
+          else
+            echo "sherpa-onnx prebuilt cache OK (or absent)"
+          fi
+
       - name: Run live SherpaOnnx tests
         shell: bash
         run: |
