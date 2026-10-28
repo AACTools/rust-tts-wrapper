@@ -207,3 +207,18 @@ strip = true
 all = "warn"
 pedantic = "warn"
 cargo = "warn"
+
+[[example]]
+name = "lexicon-convert"
+path = "examples/lexicon_convert.rs"
+required-features = ["sherpaonnx"]
+
+[[example]]
+name = "kokoro-ab"
+path = "examples/kokoro_ab.rs"
+required-features = ["sherpaonnx"]
+
+[[example]]
+name = "sherpa-debug"
+path = "examples/sherpa_debug.rs"
+required-features = ["sherpaonnx"]

@@ -44,7 +44,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.rust-tts-wrapper/sherpaonnx/piper-nl_BE-rdh-low
+            ~/.rust-tts-wrapper/sherpaonnx/piper-en_US-amy-low
             ~/.rust-tts-wrapper/sherpaonnx/icefall-en-ljspeech
             ~/.rust-tts-wrapper/sherpaonnx/kokoro-zh_en-int8
             ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
@@ -52,6 +52,7 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/kyutai-en-pocket-tts-int8
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
             ~/.rust-tts-wrapper/sherpaonnx/vocos_24khz.onnx
+            ~/.voicegarden/lexicons/eng-US
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             sherpa-models-${{ matrix.os }}-
@@ -76,23 +77,45 @@ jobs:
           echo "MODEL_DIR=$HOME/.rust-tts-wrapper/sherpaonnx" >> $GITHUB_ENV
           echo "$GITHUB_WORKSPACE/scripts" >> $GITHUB_PATH
 
-      - name: Download VITS test model (piper-nl_BE-rdh-low)
+      - name: Download VITS test model (piper-en_US-amy-low)
+        # English piper: espeak left sherpa-onnx 2.x, so this voice
+        # speaks via the auto-generated lexicon from the voicegarden
+        # eng-US bundle (downloaded in the next step).
         shell: bash
         run: |
           set -e
           mkdir -p "$MODEL_DIR"
           cd "$MODEL_DIR"
-          if [ -d "piper-nl_BE-rdh-low" ] && [ -n "$(ls -A piper-nl_BE-rdh-low 2>/dev/null)" ]; then
-            echo "piper-nl_BE-rdh-low already present, skipping download"
+          if [ -d "piper-en_US-amy-low" ] && [ -n "$(ls -A piper-en_US-amy-low 2>/dev/null)" ]; then
+            echo "piper-en_US-amy-low already present, skipping download"
             exit 0
           fi
-          URL=$(get-model-url.py piper-nl_BE-rdh-low)
+          URL=$(get-model-url.py piper-en_US-amy-low)
           echo "Downloading $URL"
           curl -fsSL -o piper.tar.bz2 "$URL"
-          mkdir -p piper-nl_BE-rdh-low
-          tar -xjf piper.tar.bz2 -C piper-nl_BE-rdh-low --strip-components=1
+          mkdir -p piper-en_US-amy-low
+          tar -xjf piper.tar.bz2 -C piper-en_US-amy-low --strip-components=1
           rm piper.tar.bz2
-          ls -la piper-nl_BE-rdh-low/
+          ls -la piper-en_US-amy-low/
+
+      - name: Download voicegarden eng-US lexicon assets
+        # gruut lexicon + P2P convention pairs — the engine
+        # auto-generates lexicon.txt for espeak-orphaned English models
+        # (piper, matcha-en, kokoro-en, kitten) from these (#66/#67).
+        shell: bash
+        run: |
+          set -e
+          DEST="$HOME/.voicegarden/lexicons/eng-US"
+          if [ -f "$DEST/lexicon.txt" ] && [ -f "$DEST/p2p-espeak.tsv" ]; then
+            echo "voicegarden eng-US assets already present"
+            exit 0
+          fi
+          mkdir -p "$DEST"
+          curl -fsSL -o eng-US.tar.gz \
+            https://github.com/AACTools/voicegarden-lexicons/releases/latest/download/eng-US.tar.gz
+          tar -xzf eng-US.tar.gz -C "$DEST"
+          rm eng-US.tar.gz
+          ls -la "$DEST"
 
       - name: Download Matcha test model (icefall-en-ljspeech)
         shell: bash
@@ -221,6 +244,23 @@ jobs:
           tar -xjf pocket.tar.bz2 -C kyutai-en-pocket-tts-int8 --strip-components=1
           rm pocket.tar.bz2
           ls -la kyutai-en-pocket-tts-int8/ | head -5
+
+      - name: Ensure sherpa-onnx prebuilt libs are complete
+        # sherpa-onnx-sys caches its downloaded static libs under
+        # target/sherpa-onnx-prebuilt and SKIPS the download when the
+        # directory exists. A partially-restored rust-cache then fails
+        # at link time ("could not find native static library
+        # sherpa-onnx-c-api") on every rerun. Delete the cache when it
+        # lacks the lib so the build script re-downloads.
+        shell: bash
+        run: |
+          DIR="target/sherpa-onnx-prebuilt"
+          if [ -d "$DIR" ] && [ -z "$(find "$DIR" -name 'libsherpa-onnx-c-api.a' -o -name 'sherpa-onnx-c-api.lib' 2>/dev/null | head -1)" ]; then
+            echo "cached sherpa-onnx prebuilt libs incomplete — forcing re-download"
+            rm -rf "$DIR"
+          else
+            echo "sherpa-onnx prebuilt cache OK (or absent)"
+          fi
 
       - name: Run live SherpaOnnx tests
         shell: bash

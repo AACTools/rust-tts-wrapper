@@ -412,6 +412,30 @@ impl TtsEngine for SherpaOnnxEngine {
         // directory (mirrors VoiceGarden's ResolveModelScanDir).
         let model_dir = resolve_model_scan_dir(&model_dir);
 
+        // sherpa-onnx 2.x: espeak-orphaned models (piper, matcha-en,
+        // kokoro-en, kitten) need a lexicon. Cheap checks first (family
+        // gate, then whether a lexicon already exists — discovery
+        // parses tokens.txt); when assets are available, generate one
+        // into the model dir.
+        if should_auto_generate_lexicon(model_info.model_type.as_str(), &id_lower)
+            && !crate::sherpa_lexicon::has_lexicon_file(&model_dir)
+        {
+            let assets = crate::sherpa_lexicon::discover_model_assets(&model_dir);
+            match crate::sherpa_lexicon::ensure_generated_lexicon(&model_dir, &assets) {
+                Ok(Some(stats)) => eprintln!(
+                    "sherpa: generated lexicon.txt for '{}' — {} entries \
+                     ({} via P2P table, {} via rules, {} skipped)",
+                    self.loaded_model_id,
+                    stats.written,
+                    stats.via_table,
+                    stats.rules(),
+                    stats.skipped
+                ),
+                Ok(None) => {}
+                Err(e) => eprintln!("sherpa: lexicon generation failed: {e}"),
+            }
+        }
+
         let model_config = match model_info.model_type.as_str() {
             "kokoro" => sherpa_onnx::OfflineTtsModelConfig {
                 kokoro: build_kokoro_config(&model_dir),
@@ -1054,6 +1078,73 @@ fn is_piper_or_github_model(model_id: &str) -> bool {
     PREFIXES.iter().any(|p| model_id.starts_with(p))
 }
 
+/// English-market model id? Matches the id spellings the registry
+/// actually uses (`en_US`/`en_GB` locales, `-en-` segments, `-en`
+/// suffixes). Deliberately NOT a bare "en" substring — that would
+/// match "thorsten_emotional" and friends.
+fn is_english_model_id(mid: &str) -> bool {
+    ["-en-", "en_us", "en_gb", "en-us", "en-gb"]
+        .iter()
+        .any(|m| mid.contains(m))
+        || mid.ends_with("-en")
+}
+
+/// Bilingual `<lang>_en` compound (zh_en, fa_en, …)? These models need
+/// their own multi-language front-end — an English-only lexicon would
+/// be wrong for them even though their id contains "en".
+fn is_bilingual_en_compound(mid: &str) -> bool {
+    let b = mid.as_bytes();
+    if b.len() < 5 {
+        return false;
+    }
+    for i in 0..=b.len() - 5 {
+        if b[i].is_ascii_lowercase()
+            && b[i + 1].is_ascii_lowercase()
+            && b[i + 2] == b'_'
+            && b[i + 3] == b'e'
+            && b[i + 4] == b'n'
+            && (i + 5 == b.len() || b[i + 5] == b'-' || b[i + 5] == b'_')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Should lexicon auto-generation run for this model? Only for the
+/// espeak-orphaned ENGLISH families (sherpa-onnx 2.x removed the
+/// espeak-ng phonemizer, so piper / matcha-en / kokoro-en / kitten
+/// synthesize silence without a lexicon). The gruut lexicon and the
+/// aligned pairs are English; writing them into a non-English or
+/// bilingual model would break it.
+///
+/// Id spellings verified against the pinned sherpa-onnx-models 1.1.0
+/// registry: piper voices are `piper-en_US-amy-low` (no `vits-`
+/// prefix), bilinguals are `kokoro-zh_en-*` / `matcha-fa_en-*`.
+fn should_auto_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool {
+    if !is_english_model_id(model_id_lower) || is_bilingual_en_compound(model_id_lower) {
+        return false;
+    }
+    match model_type {
+        // misaki-convention orphans (pairs proven: p2p-misaki.tsv) and
+        // espeak-convention matcha-en (generation becomes possible
+        // once p2p-espeak.tsv ships, see #66; until then the pairs
+        // lookup in ensure_generated_lexicon finds nothing)
+        "kokoro" | "kitten" | "matcha" => true,
+        // piper-style VITS layouts (registry: piper-en_US-*,
+        // coqui-en-*, icefall-en-ljspeech-*, melo-en-*, vctk-en-*,
+        // ljs-en-*). Plus inflect-en-* (tarball-verified: espeak-ng-data
+        // and no lexicon) and willwade-patched-en_* (piper voice
+        // re-exports, same orphan layout).
+        "vits" => {
+            is_piper_or_github_model(model_id_lower)
+                || model_id_lower.starts_with("inflect-en")
+                || model_id_lower.starts_with("willwade-patched-en")
+        }
+        _ => false,
+    }
+}
+
 /// Collect all lexicon file paths in a model dir (lexicon.txt,
 /// lexicon-*.txt — multilingual Kokoro ships several). Comma-joined,
 /// deterministically sorted. Used by the Kokoro, VITS, and kitten
@@ -1071,7 +1162,7 @@ fn collect_lexicons(dir: &std::path::Path) -> Option<String> {
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
                 && p.file_name()
                     .and_then(|n| n.to_str())
-                    .is_some_and(|n| n == "lexicon.txt" || n.starts_with("lexicon-"))
+                    .is_some_and(crate::sherpa_lexicon::is_lexicon_file_name)
         })
         .collect();
     if paths.is_empty() {
@@ -1560,6 +1651,144 @@ mod tests {
         assert!(is_piper_or_github_model("ljs-en"));
         assert!(is_piper_or_github_model("cantonese-yue-xiaomaiiwn"));
         assert!(is_piper_or_github_model("kokoro-en-v0_19"));
+    }
+
+    #[test]
+    fn test_lexicon_gate_against_full_registry() {
+        // Run the gate over the real registry and compare per-family
+        // counts against pinned expectations. Loop-2 found piper ids
+        // carry no vits- prefix (the whole fleet excluded) and loop-3
+        // found inflect-en-* / willwade-patched-en_* excluded — both
+        // false negatives invisible to invariant-only assertions.
+        // When a registry update adds models, update these counts
+        // deliberately: a count DROP is a gate regression.
+        let mut families: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for (id, m) in sherpa_onnx_models::models() {
+            let lower = id.to_lowercase();
+            let gated = should_auto_generate_lexicon(&m.model_type, &lower);
+            // bilingual <lang>_en compounds are never included ("_en"
+            // alone is too crude — "northern_english" contains it)
+            assert!(
+                !(gated && is_bilingual_en_compound(&lower)),
+                "bilingual model {id} passed the lexicon gate"
+            );
+            // everything included is an English-market id
+            assert!(
+                !gated || is_english_model_id(&lower),
+                "{id} passed the gate without an English id marker"
+            );
+            if gated {
+                let family = lower.split(['-', '_']).next().unwrap_or("?").to_string();
+                *families.entry(family).or_default() += 1;
+            }
+        }
+        let expected: &[(&str, usize)] = &[
+            // piper fleet + piper-style layouts
+            ("piper", 132),
+            ("willwade", 6), // willwade-patched-en_* piper re-exports
+            ("coqui", 3),
+            ("icefall", 3), // matcha icefall-en-ljspeech + vits -low/-high
+            ("inflect", 2),
+            ("melo", 1),
+            ("vctk", 1),
+            ("ljs", 1),
+            // misaki-convention orphans
+            ("kokoro", 2), // kokoro-en-v0_19, kokoro-en-int8-v0_19
+            // kitten ids split across nano/micro/mini name prefixes
+            ("nano", 4),
+            ("micro", 1),
+            ("mini", 2),
+        ];
+        for (family, count) in expected {
+            assert_eq!(
+                families.get(*family).copied().unwrap_or(0),
+                *count,
+                "family '{family}' gated count changed — gate regression or registry update: {families:?}"
+            );
+        }
+        // nothing outside the expected families sneaks in
+        assert_eq!(
+            families.len(),
+            expected.len(),
+            "unexpected families gated in: {families:?}"
+        );
+    }
+
+    #[test]
+    fn test_should_auto_generate_lexicon_orphaned_english_families() {
+        // ids as they appear in the sherpa-onnx-models registry
+        // misaki-convention orphans
+        assert!(should_auto_generate_lexicon("kokoro", "kokoro-en-v0_19"));
+        assert!(should_auto_generate_lexicon(
+            "kokoro",
+            "kokoro-en-int8-v0_19"
+        ));
+        assert!(should_auto_generate_lexicon("kitten", "nano-en-v0_1-fp16"));
+        assert!(should_auto_generate_lexicon("kitten", "micro-en-v0_8"));
+        // espeak-convention orphans
+        assert!(should_auto_generate_lexicon(
+            "matcha",
+            "icefall-en-ljspeech"
+        ));
+        // piper registry ids carry NO vits- prefix
+        assert!(should_auto_generate_lexicon("vits", "piper-en_us-amy-low"));
+        assert!(should_auto_generate_lexicon(
+            "vits",
+            "piper-en_gb-alan-medium"
+        ));
+        // piper-style GitHub layouts
+        assert!(should_auto_generate_lexicon("vits", "coqui-en-ljspeech"));
+        assert!(should_auto_generate_lexicon(
+            "vits",
+            "icefall-en-ljspeech-low"
+        ));
+        assert!(should_auto_generate_lexicon("vits", "melo-en-melo-tts"));
+        assert!(should_auto_generate_lexicon("vits", "vctk-en-vctk"));
+    }
+
+    #[test]
+    fn test_should_auto_generate_lexicon_refuses_everything_else() {
+        // bilingual <lang>_en compounds must never get an English-only
+        // lexicon, even though their ids contain "en"
+        assert!(!should_auto_generate_lexicon("kokoro", "kokoro-zh_en-int8"));
+        assert!(!should_auto_generate_lexicon(
+            "kokoro",
+            "kokoro-zh_en-multi-lang"
+        ));
+        assert!(!should_auto_generate_lexicon(
+            "matcha",
+            "matcha-fa_en-khadijah"
+        ));
+        assert!(!should_auto_generate_lexicon(
+            "matcha",
+            "icefall-zh_en-zh-en"
+        ));
+        assert!(!should_auto_generate_lexicon("vits", "melo-zh_en-melo-tts"));
+        // non-English models
+        assert!(!should_auto_generate_lexicon("kokoro", "kokoro-jp-v1"));
+        assert!(!should_auto_generate_lexicon(
+            "vits",
+            "piper-de_de-thorsten-high"
+        ));
+        // "en" inside another word is not an English marker
+        assert!(!should_auto_generate_lexicon(
+            "vits",
+            "piper-de_de-thorsten_emotional-medium"
+        ));
+        assert!(!should_auto_generate_lexicon("vits", "vits-mms-deu"));
+        // English but not an orphaned family (MMS ships lexicons;
+        // supertonic/pocket have their own front-ends)
+        assert!(!should_auto_generate_lexicon("mms", "mms-eng"));
+        assert!(!should_auto_generate_lexicon(
+            "supertonic",
+            "supertonic-3-en"
+        ));
+        assert!(!should_auto_generate_lexicon("pocket", "pocket-en"));
+        // English vits that isn't a piper-style layout
+        assert!(!should_auto_generate_lexicon("vits", "vits-mms-eng"));
+        // unknown type
+        assert!(!should_auto_generate_lexicon("unknown", "some-en"));
     }
 
     #[test]
