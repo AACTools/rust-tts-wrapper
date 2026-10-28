@@ -214,23 +214,51 @@ fn env_path_or_warn(var: &str) -> Option<PathBuf> {
     }
 }
 
+/// voicegarden lexicon cache layouts that can hold the gruut English
+/// lexicon, in preference order:
+/// - `eng-US/` — the expanded v2 layout (what the local machine and
+///   the CI download use)
+/// - `en/` — the `lexicons.json` client layout (`fetch("en")`)
+/// - `expanded/eng-US/` — the `expanded.json` client layout
+const GRUUT_CACHE_LAYOUTS: [&str; 3] = ["eng-US", "en", "expanded/eng-US"];
+
+/// Locate the cached gruut English lexicon across the known cache
+/// layouts (see [`GRUUT_CACHE_LAYOUTS`]).
+fn cached_gruut_lexicon() -> Option<PathBuf> {
+    let cache = voicegarden_cache_dir()?;
+    GRUUT_CACHE_LAYOUTS
+        .iter()
+        .map(|sub| cache.join(sub).join("lexicon.txt"))
+        .find(|p| p.exists())
+}
+
 /// Discover conversion assets for an orphaned model: the `SHERPA_*` env
 /// vars first, then conventional locations (pairs beside the model or
 /// the gruut lexicon; the voicegarden lexicon cache).
 #[must_use]
 pub fn discover_lexicon_assets(model_dir: &Path, pairs_name: &str) -> LexiconAssets {
-    let gruut = env_path_or_warn("SHERPA_GRUUT_LEXICON").or_else(|| {
-        let cached = voicegarden_cache_dir()?.join("eng-US").join("lexicon.txt");
-        cached.exists().then_some(cached)
-    });
+    let gruut = env_path_or_warn("SHERPA_GRUUT_LEXICON").or_else(cached_gruut_lexicon);
 
     let pairs = env_path_or_warn("SHERPA_P2P_PAIRS").or_else(|| {
         let in_model = model_dir.join(pairs_name);
         if in_model.exists() {
             return Some(in_model);
         }
-        let beside = gruut.as_ref()?.parent()?.join(pairs_name);
-        beside.exists().then_some(beside)
+        // beside whichever gruut lexicon was found, then any other
+        // cache layout (the voicegarden release ships the pairs inside
+        // every English bundle)
+        let beside = gruut
+            .as_ref()
+            .and_then(|g| g.parent())
+            .map(|d| d.join(pairs_name));
+        if let Some(p) = beside.filter(|p| p.exists()) {
+            return Some(p);
+        }
+        let cache = voicegarden_cache_dir()?;
+        GRUUT_CACHE_LAYOUTS
+            .iter()
+            .map(|sub| cache.join(sub).join(pairs_name))
+            .find(|p| p.exists())
     });
 
     LexiconAssets {
