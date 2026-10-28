@@ -4,6 +4,19 @@ Not committed; the working checklist for this effort. One PR per numbered
 phase, loop-review on each, CI-clean (fmt + clippy -D warnings + tests
 across feature combos).
 
+## STATUS: Phases 0–2 COMPLETE (2026-10-28)
+
+- Phase 1 (#65, merged): sherpa-onnx 2.0.1 upgrade
+- Phase 2 (#67, merged; #66 closed): P2P lexicon generation
+  - pairs shipped: voicegarden-lexicons v0.3.1 (p2p-misaki.tsv +
+    p2p-espeak.tsv inside en/eng-US bundles; release tooling with
+    reproducible tars + corrected manifest shas)
+  - floravox #18 (merged): PhonemeTransducer + trainer --p2p (WFST
+    fallback 76.6% exact after loop-review fixed the search bugs)
+  - floravox v0.8.10 tagged; **publish workflow blocked by GitHub
+    Actions billing** — rerun the Publish run after fixing billing
+- Phase 3 (Hume): not started
+
 ## Phase 0 — investigation (DONE, findings below)
 
 **The headline**: sherpa-onnx 2.0.0 REMOVED espeak-ng + piper-phonemize
@@ -122,14 +135,31 @@ Progress:
       not this PR's scope.
 - [x] CI green on the loop-2 commit (28/28) → READY TO MERGE
 
-## Phase 2 — lexicon generation PR (tracking issue #66) — PR #67 OPEN
+## Phase 2 — lexicon generation PR (tracking issue #66) — DONE, #67 MERGED
 
 Branch: feat/sherpa-lexicons (off main, after #65 merged).
 
-**STATUS: misaki half done. PR #67 open after 4 review loops (6→6→7→8/10,
-merge). Engine auto-generation validated end-to-end on kokoro-en.
-floravox side pushed as feat/p2p-transducer (PhonemeTransducer hybrid +
-trainer --p2p + prepare_p2p_data.py).**
+**STATUS: COMPLETE. #67 merged (28/28 CI), #66 closed. Both conventions
+shipped: misaki pairs (kokoro-en, kitten) + espeak pairs (piper,
+matcha-en) in voicegarden-lexicons v0.3.1. Live tests un-guarded and
+passing on all 3 CI platforms.**
+
+Key discoveries (recorded for posterity):
+- sherpa-onnx 2.x has TWO lexicon formats: space-separated (old) feeds
+  raw ids with no BOS/EOS/pads — garbles piper; `word||phonemes`
+  (new) routes through ParseLexiconFile with proper piper-style
+  wrapping + phrase matching. Generation emits the new format.
+- CMUdict's stress markers largely agree with espeak conventions once
+  function words are destressed (CMUdict stresses every monosyllable;
+  espeak doesn't stress function words).
+- The "structural WFST limitation" was two search bugs + a trainer bug
+  (see floravox #18): pipe keys stripped in build (compound arcs
+  unreachable), epsilon arcs teleporting the input cursor (the vowel
+  dropping), double-joined compound symbols. Fixed: 76.6% exact /
+  4.4% PER / 100% coverage on held-out pairs.
+- The old voicegarden manifests' sha256s mismatched the downloadable
+  bytes for 13/14 bundles (non-reproducible tars) — the client's
+  checksum would have failed. v0.3.1 fixes this + reproducible tars.
 
 Scope locked by Phase 1 results: the ONLY viable front-end for
 espeak-orphaned families (piper 536 voices, matcha-en, kokoro-en,
@@ -270,20 +300,20 @@ pairs beside the model or gruut lexicon → voicegarden cache. Pairs are
 REQUIRED (rules alone garble ~10% of words); no pairs → no generation.
 A/B wavs generated (`examples/kokoro-ab`).
 
-### Phase 2 remaining
-- [ ] PR #67 review + merge; then un-guard the 12 orphaned live tests
-      (search `is_sherpa2_orphan`); close #66
-- [ ] Ship the aligned pairs as a voicegarden-lexicons release asset
-      (`p2p-misaki.tsv` alongside `lexicon.txt` in eng-US) so
-      auto-generation works out of the box
-- [ ] piper / matcha-en (espeak convention): need an espeak-convention
-      reference lexicon to align against (CMUdict is BSD; generate
-      `p2p-espeak.tsv` from gruut↔CMUdict-IPA alignment)
-- [ ] floravox PR: review feat/p2p-transducer, publish 0.8.10+ with
-      the `p2p` module (PhonemeTransducer) so the WFST fallback is
-      available downstream
-- [ ] A/B: whisper round-trip comparison per family (wavs generated,
-      whisper not installed locally — CI or manual listen)
+### Phase 2 remaining — ALL DONE (2026-10-28)
+- [x] PR #67 merged (4 review loops 6→6→7→8, then the `||`-format
+      fix + un-guarding); #66 closed
+- [x] Pairs shipped as voicegarden-lexicons v0.3.1 release assets
+      (both tables inside en.tar.gz + eng-US.tar.gz, beside
+      lexicon.txt) — auto-generation works out of the box; CI
+      downloads the eng-US bundle
+- [x] p2p-espeak.tsv generated from gruut↔CMUDict-IPA alignment
+      (123,747 overlap words, 94% of the gruut lexicon routes through
+      the exact table)
+- [x] floravox #18 merged (2 loops 5→8.5); v0.8.10 tagged — publish
+      workflow BLOCKED by GitHub Actions billing (rerun after fixing)
+- [x] A/B: whisper round-trips word-identical to the pre-2.x espeak
+      reference (piper-en_US-amy-low, 4 sentences incl. stress cases)
 
 ## Phase 3 — Hume cloud engine (separate quiet PR)
 - [ ] cloud_engine: hume provider following cartesia/deepgram patterns
