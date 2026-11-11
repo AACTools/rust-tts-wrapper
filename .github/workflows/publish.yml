@@ -575,17 +575,35 @@ jobs:
       - name: Publish to NuGet
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
-        # Trusted Publishing only (GH discussion: "WE SHOULD USE TRUSTED
-        # PUBLISHING. NOT API KEYS!"): nuget.org verifies the GitHub
-        # OIDC token — no API key secret involved. Requires the job's
-        # id-token: write permission above and the trusted publisher
-        # registered on nuget.org (AACTools/rust-tts-wrapper,
+        # Trusted Publishing only — NO API key secret. We perform the
+        # GitHub OIDC exchange explicitly (audience api.nuget.org) and
+        # pass the federated token as the credential, instead of
+        # relying on `dotnet nuget push`'s auto-detection: on the
+        # v1.7.0 run the client silently sent no token (plain 401).
+        # nuget.org validates the token against the registered trusted
+        # publisher (AACTools/rust-tts-wrapper,
         # .github/workflows/publish.yml, environment "nuget").
         run: |
           $pkg = Get-ChildItem bindings/dotnet/bin/Release/*.nupkg | Select-Object -First 1
           if (-not $pkg) { Write-Host "No .nupkg found"; exit 0 }
           Write-Host "Publishing $($pkg.Name) via Trusted Publishing (OIDC)"
-          dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+          if (-not $env:ACTIONS_ID_TOKEN_REQUEST_URL -or -not $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN) {
+            throw "GitHub did not provide the OIDC token endpoint - is 'permissions: id-token: write' set on this job?"
+          }
+          $audience = [uri]::EscapeDataString("api.nuget.org/v3/index.json")
+          $url = "$($env:ACTIONS_ID_TOKEN_REQUEST_URL)&audience=$audience"
+          $hdr = @{ Authorization = "bearer $($env:ACTIONS_ID_TOKEN_REQUEST_TOKEN)" }
+          $oidcToken = (Invoke-RestMethod -Uri $url -Headers $hdr).value
+          if (-not $oidcToken) { throw "OIDC token request returned no value" }
+
+          # Diagnostics: decode and print the JWT CLAIMS (never the token).
+          $payload = $oidcToken.Split('.')[1].Replace('-','+').Replace('_','/')
+          while ($payload.Length % 4) { $payload += '=' }
+          $claims = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+          Write-Host "OIDC claims: aud=$($claims.aud) repository=$($claims.repository) workflow=$($claims.workflow) environment=$($claims.environment) ref=$($claims.ref)"
+
+          dotnet nuget push $pkg.FullName --api-key $oidcToken --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   npm:
     name: Publish @aactools/tts-wrapper to npm
