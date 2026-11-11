@@ -476,10 +476,18 @@ public class RustTtsClient : AbstractTtsClient
     {
         if (disposing)
         {
+            // Order matters: the BASE Dispose calls Stop() — it must run
+            // while the native client is still alive (calling Stop() on
+            // a disposed TtsClient throws; this exact ordering bug
+            // shipped in 1.6.6 and crashed host apps at shutdown).
+            base.Dispose(disposing);
             _scheduler.Dispose();
             _inner.Dispose();
         }
-        base.Dispose(disposing);
+        else
+        {
+            base.Dispose(disposing);
+        }
     }
 
     // -------------------------------------------------------------------

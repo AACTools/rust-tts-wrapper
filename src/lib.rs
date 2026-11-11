@@ -1,12 +1,16 @@
 //! # rust-tts-wrapper
 //!
 //! Cross-platform TTS (Text-to-Speech) wrapper with a C ABI.
-//! Mirrors [`js-tts-wrapper`] and `SwiftTTSWrapper`, supporting 25 engines:
+//! Mirrors [`js-tts-wrapper`] and `SwiftTTSWrapper`, supporting 28 engines:
 //! system (speech-dispatcher), AVSpeech (macOS), SAPI (Windows),
-//! Sherpa-ONNX + floravox (local ONNX voices — 1300+ models / ~1,100
-//! languages), and 20 cloud providers.
+//! Sherpa-ONNX + floravox + qwen3-local + omnivoice-local + pocket
+//! (local ONNX/GGML voices — 1300+ models / ~1,100 languages), and 22
+//! cloud providers.
 //!
-//! [`js-tts-wrapper`]: https://github.com/AACTools/js-tts-wrapper
+//! Guides: [engines](https://github.com/AACTools/rust-tts-wrapper/blob/main/docs/engines.md)
+//! · [voice cloning](https://github.com/AACTools/rust-tts-wrapper/blob/main/docs/voice-cloning.md)
+//! · [C ABI](https://github.com/AACTools/rust-tts-wrapper/blob/main/docs/c-abi.md)
+//! · language bindings in `docs/`.
 //!
 //! ## Quick start (C)
 //!
@@ -15,7 +19,20 @@
 //! tts_speak(ctx, "Hello world");
 //! tts_destroy(ctx);
 //! ```
+//!
+//! ## Quick start (Rust)
+//!
+//! ```no_run
+//! use rust_tts_wrapper::{create_engine, TtsEngine};
+//!
+//! let engine = create_engine("openai", r#"{"apiKey":"key"}"#)?;
+//! engine.speak_sync("Hello world", None, 1.0, 1.0, 1.0, None, None, None)?;
+//! # Ok::<(), rust_tts_wrapper::types::TtsError>(())
+//! ```
+//!
+//! [`js-tts-wrapper`]: https://github.com/AACTools/js-tts-wrapper
 
+#![warn(missing_docs)]
 #![allow(
     clippy::missing_panics_doc,
     clippy::not_unsafe_ptr_arg_deref,
@@ -141,13 +158,19 @@ pub type CBoundaryCb =
 /// char_offset is -1 when unknown; start/end are the measured (or
 /// estimated) audio position the mark fires at.
 pub type CMarkCb = Option<extern "C" fn(*const c_char, i32, f32, f32, *mut std::ffi::c_void)>;
+/// Viseme callback: cb(viseme_id, audio_offset_sec, userdata).
 pub type CVisemeCb = Option<extern "C" fn(i32, f32, *mut std::ffi::c_void)>;
+/// Payload-free lifecycle callback (start/end): cb(userdata).
 pub type CVoidCb = Option<extern "C" fn(*mut std::ffi::c_void)>;
+/// Error callback: cb(message_cstr, userdata). The message pointer is
+/// valid only for the duration of the call.
 pub type CErrorCb = Option<extern "C" fn(*const c_char, *mut std::ffi::c_void)>;
 type BoxedAudioCb = Box<dyn FnMut(&[u8])>;
 type BoxedBoundaryCb = Box<dyn FnMut(&str, f32, f32, i32, i32, bool)>;
 type BoxedMarkCb = Box<dyn FnMut(&str, f32, f32, i32)>;
 
+/// Opaque engine context returned by [`tts_create`] and consumed by
+/// every other `tts_*` function. Destroy with [`tts_destroy`].
 pub struct tts_ctx {
     // The TtsEngine trait already requires Send + Sync, and every engine
     // impl uses internal Mutexes (or atomic state) for thread safety. The

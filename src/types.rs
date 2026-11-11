@@ -7,8 +7,11 @@ use std::os::raw::c_char;
 /// Voice gender, matching Swift's `UnifiedVoice.Gender`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gender {
+    /// Male voice.
     Male,
+    /// Female voice.
     Female,
+    /// Not reported by the provider.
     Unknown,
 }
 
@@ -99,6 +102,7 @@ pub fn locale_display_name(bcp47: &str) -> String {
     }
 }
 
+/// Fallback without the `display_names` feature: the raw code itself.
 #[cfg(not(feature = "display_names"))]
 #[must_use]
 pub fn locale_display_name(bcp47: &str) -> String {
@@ -108,12 +112,19 @@ pub fn locale_display_name(bcp47: &str) -> String {
 /// Audio output format, matching Swift's `AudioFormat`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioFormat {
+    /// MPEG audio.
     Mp3,
+    /// RIFF/WAVE (PCM).
     Wav,
+    /// Ogg container.
     Ogg,
+    /// Opus in Ogg.
     Opus,
+    /// AAC (ADTS).
     Aac,
+    /// Free Lossless Audio Codec.
     Flac,
+    /// Raw PCM samples.
     Pcm,
 }
 
@@ -134,10 +145,15 @@ impl fmt::Display for AudioFormat {
 /// Named speech rate presets, matching Swift's `SpeechRate`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpeechRate {
+    /// Half speed (×0.5).
     XSlow,
+    /// Slow (×0.75).
     Slow,
+    /// Normal (×1.0).
     Medium,
+    /// Fast (×1.25).
     Fast,
+    /// Fastest (×1.5).
     XFast,
 }
 
@@ -158,10 +174,15 @@ impl SpeechRate {
 /// Named speech pitch presets, matching Swift's `SpeechPitch`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpeechPitch {
+    /// Very low (×0.5).
     XLow,
+    /// Low (×0.75).
     Low,
+    /// Normal (×1.0).
     Medium,
+    /// High (×1.25).
     High,
+    /// Highest (×1.5).
     XHigh,
 }
 

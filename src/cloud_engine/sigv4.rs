@@ -76,7 +76,9 @@ fn uri_encode(value: &str) -> String {
 
 /// A parsed `https://host/path?query` split for canonicalization.
 pub struct SignedUrl {
+    /// Lowercase host (e.g. `polly.us-east-1.amazonaws.com`).
     pub host: String,
+    /// URI-encoded path, starting with `/`.
     pub path: String,
     /// (name, value) pairs; canonicalization sorts by encoded name.
     pub query: Vec<(String, String)>,
@@ -84,9 +86,13 @@ pub struct SignedUrl {
 
 /// The credentials a SigV4 request carries.
 pub struct SigV4Credentials<'a> {
+    /// AWS access key id.
     pub access_key: &'a str,
+    /// AWS secret access key.
     pub secret_key: &'a str,
+    /// Region the request targets (e.g. `us-east-1`).
     pub region: &'a str,
+    /// Service namespace (e.g. `polly`).
     pub service: &'a str,
 }
 

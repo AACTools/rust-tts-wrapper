@@ -137,6 +137,20 @@ impl fmt::Display for TtsErrorCode {
 /// boundary. Order matters: authentication beats network (a 401 over
 /// HTTPS is an auth problem, not a connectivity one), and file lookups
 /// beat generic failures.
+///
+/// # Examples
+///
+/// ```
+/// use rust_tts_wrapper::error_codes::{classify_error_message, TtsErrorCode};
+///
+/// assert_eq!(classify_error_message("HTTP status client error (401 Unauthorized)"),
+///            TtsErrorCode::CredentialsRejected);
+/// assert_eq!(classify_error_message("error sending request: connection refused"),
+///            TtsErrorCode::NetworkError);
+/// // Digit substrings without HTTP context are NOT auth failures:
+/// assert_ne!(classify_error_message("loaded chunk 4012"),
+///            TtsErrorCode::CredentialsRejected);
+/// ```
 #[must_use]
 pub fn classify_error_message(msg: &str) -> TtsErrorCode {
     let m = msg.to_lowercase();
@@ -234,6 +248,17 @@ pub fn classify_error_message(msg: &str) -> TtsErrorCode {
 ///-style `sk-…` keys (at word boundaries), `Bearer` headers, and JSON
 /// `"apiKey":"…"` fragments (camelCase, snake_case and kebab-case key
 /// spellings).
+///
+/// # Examples
+///
+/// ```
+/// use rust_tts_wrapper::error_codes::redact_message;
+///
+/// let out = redact_message(r#"key sk-abcdef123456 rejected for {"apiKey":"k2"}"#);
+/// assert!(!out.contains("abcdef123456"));
+/// assert!(!out.contains("k2"));
+/// assert!(out.contains("«redacted»"));
+/// ```
 #[must_use]
 pub fn redact_message(msg: &str) -> String {
     let redacted = replace_prefixed_tokens(msg, &["sk-", "rk-", "gsk_"], "«redacted»");

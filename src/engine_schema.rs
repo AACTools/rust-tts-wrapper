@@ -592,6 +592,14 @@ pub fn engine_setup_schemas() -> Vec<EngineSetup> {
 
 /// The full schema list serialized as a JSON array (for
 /// `tts_get_engine_setups_json`).
+///
+/// # Examples
+///
+/// ```
+/// let json = rust_tts_wrapper::engine_schema::engine_setups_json();
+/// let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+/// assert!(parsed.as_array().unwrap().len() > 0);
+/// ```
 #[must_use]
 pub fn engine_setups_json() -> String {
     serde_json::to_string(&engine_setup_schemas()).unwrap_or_else(|_| "[]".into())
@@ -713,7 +721,7 @@ mod tests {
             .expect("region field");
         assert!(region.required);
         assert_eq!(region.kind, SetupFieldKind::Choice);
-        assert!(!region.choices.is_empty());
+        assert_ne!(region.choices.len(), 0);
         assert!(azure.capabilities.supports_streaming);
         assert!(!azure.capabilities.static_voice_catalog);
     }
@@ -913,7 +921,7 @@ mod tests {
         let json = engine_setups_json();
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
         let arr = parsed.as_array().expect("array");
-        assert!(!arr.is_empty());
+        assert_ne!(arr.len(), 0);
         let azure = arr
             .iter()
             .find(|v| v["id"] == "azure")

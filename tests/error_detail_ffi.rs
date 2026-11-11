@@ -210,7 +210,7 @@ fn engine_setups_json_is_parseable_and_covers_azure() {
         .iter()
         .find(|f| f["key"] == "region")
         .expect("region field");
-    assert!(!region["choices"].as_array().unwrap().is_empty());
+    assert_ne!(region["choices"].as_array().unwrap().len(), 0);
     assert_eq!(
         azure["capabilities"]["supportsStreaming"], true,
         "azure capabilities present"

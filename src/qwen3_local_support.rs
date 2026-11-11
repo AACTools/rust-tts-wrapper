@@ -25,6 +25,7 @@ pub fn supported_languages() -> &'static [(&'static str, &'static str, &'static 
     ]
 }
 
+/// Map a qwen3 language id to its ISO 639-3 form (e.g. `zh` → `zho`).
 #[must_use]
 pub fn id_to_iso639_3(id: &str) -> String {
     match id {
@@ -42,6 +43,8 @@ pub fn id_to_iso639_3(id: &str) -> String {
     .to_string()
 }
 
+/// Resolve a voice name or language tag to the qwen3-tts language id
+/// used by the tokenizer (None = the model default).
 #[must_use]
 pub fn language_id_for(voice_or_lang: &str) -> Option<i32> {
     let needle = voice_or_lang.trim().to_lowercase();

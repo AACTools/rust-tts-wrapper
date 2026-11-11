@@ -551,7 +551,19 @@ internal sealed class TtsClientBackend : ISpeechBackend
     }
 
     public void SpeakSync(string text) => _client.SpeakSync(text);
-    public void Stop() => _client.Stop();
+
+    public void Stop()
+    {
+        try
+        {
+            _client.Stop();
+        }
+        catch (ObjectDisposedException)
+        {
+            // The owning client was disposed mid-stop (host shutdown
+            // ordering): nothing left to stop.
+        }
+    }
 
     public void SetBoundaryHandler(Action<string, int, int, float, float, bool>? handler) =>
         _client.SetOnBoundary(handler is null

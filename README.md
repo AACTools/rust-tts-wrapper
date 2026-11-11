@@ -1,674 +1,102 @@
 # rust-tts-wrapper
 
-Cross-platform TTS (Text-to-Speech) wrapper with C ABI. Mirrors [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) and [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper).
+Cross-platform text-to-speech for Rust — 28 engines behind one API,
+plus a flat C ABI with bindings for .NET, Python, Node and Swift.
 
-## Engines (28 total)
+- **One API, three families**: OS voices (SAPI, AVSpeech,
+  speech-dispatcher), offline engines (Sherpa-ONNX, floravox, qwen3,
+  OmniVoice, Kyutai pocket), and 22 cloud providers (Azure, Google,
+  OpenAI, ElevenLabs, Polly, …).
+- **Real word timings** where the engine provides them (Azure/Edge
+  WebSockets, Google timepoints, floravox duration tensors, pocket
+  attention), honest estimates everywhere else.
+- **Streaming audio** through callbacks as it arrives, SpeechMarkdown
+  input, SSML, voice cloning (experimental).
+- **A stable C ABI** (`include/tts_wrapper.h`) with stable error
+  codes, a typed engine-setup schema and a tri-state credential check.
 
-| Engine | Type | Credentials | Streaming | Voice List | Word Boundaries | Speech Markdown |
-|--------|------|-------------|-----------|------------|-----------------|-----------------|
-| System (speech-dispatcher) | Local | None | — (daemon plays) | — | Estimated | — |
-| AVSpeech (macOS) | Local | None | — (system plays) | — | Estimated | — |
-| SAPI (Windows) | Local | None | — (system plays) | — | Estimated (SAPI events) | — |
-| Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
-| Qwen3-TTS local | Local (qwen3-tts.cpp, GGML) | Model dir (+ lib via QWEN3_TTS_LIB) | After generation | 10 languages + any reference audio | Estimated | Stripped |
-| floravox | Local (piper/MMS/Matcha/Kokoro ONNX — 1,100+ voices across ~1,100 languages) | Model dir | Streamed (per segment) | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
-| Pocket (Kyutai) | Local (phoneme ONNX bundle + any donor wav) | None | Frame-by-frame | Reference wav | **Measured** (attention tap) | Native SSML + IPA phonemes |
-| Azure | Cloud | Key + Region | Real-time (WS) / Streamed (REST) | API | **Real** (WS) | Platform-aware |
-| Microsoft Edge (Read Aloud) | Cloud | **None** (free) | Real-time (WS) | API | **Real** (WS) | Platform-aware |
-| Google Cloud | Cloud | API Key | After response (JSON) | API | **Real** (v1beta1 timepoints) | Platform-aware |
-| Google Gemini (3.8 TTS) | Cloud | API Key | After response (JSON) | API | Estimated (scaled) | Platform-aware |
-| Qwen (Alibaba Cloud Model Studio / DashScope) | Cloud | API Key (+ optional Model/Region/Instruction) | Real-time (WS) | Static (14 system voices) | **Real** (word timestamps, voice-dependent) | Stripped |
-| OpenAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| ElevenLabs | Cloud | API Key (+ optional Model/Voice/Language) | Streamed (JSON w/ timestamps) | API | Estimated | Platform-aware (v4 default: audio tags + inline IPA) |
-| Cartesia | Cloud | API Key | Streamed | API | Estimated | Platform-aware |
-| Deepgram | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| PlayHT | Cloud | API Key + User ID | Streamed | — | Estimated | Platform-aware |
-| Fish Audio | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| Hume AI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| Mistral | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| Murf | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| Resemble AI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| Unreal Speech | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| UpliftAI | Cloud | API Key | Streamed | — | Estimated | Platform-aware |
-| Amazon Polly | Cloud | Key + Secret + Region | Streamed | — | Estimated | Platform-aware |
-| IBM Watson | Cloud | Key + Region + Instance | Chunked | — | Estimated | Platform-aware |
-| Wit.ai | Cloud | Token | Chunked | — | Estimated | Platform-aware |
-| xAI | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
-| ModelsLab | Cloud | API Key | Chunked | — | Estimated | Platform-aware |
+Sibling projects: [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) ·
+[swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper) ·
+[dotnet-tts-wrapper](https://github.com/AACTools/dotnet-tts-wrapper)
 
-- **Streaming**: Audio is delivered through the `on_audio` callback in chunks, as it becomes available. REST engines stream the response body as bytes arrive over the network (MP3 decoded to PCM16 mono incrementally on a background reader thread; raw-PCM providers pass straight through); Azure and Edge deliver real-time over WebSockets; Sherpa-ONNX delivers each sentence batch as it is synthesised (via the generate progress callback — a single-sentence utterance still completes before delivery). Exceptions: Google and ElevenLabs `with-timestamps` return one JSON document with base64 audio, so they can only deliver after the response completes (an API limitation, not buffering). Estimated word boundaries (engines without API timing data) fire progressively during streaming, anchored to delivered audio, rather than all at once when the response completes.
-
-## Qwen3-TTS local (`qwen3-local` feature)
-
-Third offline engine — [qwen3-tts.cpp](https://github.com/predict-woo/qwen3-tts.cpp) (MIT; models Apache-2.0), and the only local engine with **zero-shot voice cloning**. The C++ library is not vendored: build it once, then point the build at it.
-
-```bash
-scripts/build-qwen3-local.sh                 # clones + builds GGML into ~/spikes
-cd ~/spikes/qwen3-tts.cpp && python scripts/setup_pipeline_models.py   # one-time GGUF conversion
-QWEN3_TTS_LIB=~/spikes/qwen3-tts.cpp cargo build --features qwen3-local
-```
+## Quick start
 
 ```rust
-// Speak with any reference audio — voice = path to a WAV:
-engine.speak("Hello", Some("/path/to/reference.wav"), 1.0, 1.0, 1.0, Some(&mut cb), None, None)?;
-// Or a language voice ("en", "fr", … — the 10 Qwen locales), "default",
-// or an emb:<base64> speaker-embedding handle from the qwen3-local
-// cloner (--features qwen3-local,cloning): embedding extracted once,
-// reused per utterance. Fully offline — reference audio never leaves
-// the machine.
-```
+use rust_tts_wrapper::{create_engine, TtsEngine};
 
-Behaviour: PCM16 mono 24 kHz output; SSML-in is stripped; volume is real PCM gain; rate/pitch have no upstream control; word boundaries are duration-scaled estimates; engine calls are serialized (upstream is not concurrent-safe); CPU synthesis is batch-grade (~0.1× realtime on 6 cores — use Metal/CUDA builds for speed). Cloning is timbre-grade: the upstream x-vector mode carries the speaker's timbre, while accent/prosody come from the model's language prior.
+let engine = create_engine("openai", r#"{"apiKey":"sk-…"}"#)?;
 
-## Voice cloning (experimental, `cloning` feature)
-
-Bank a voice once, enroll it with every cloning-capable engine, speak it everywhere. Rust-only for now (no FFI); enable with `--features cloning`.
-
-```rust
-use rust_tts_wrapper::cloning::{create_cloner, VoiceCorpus};
-
-// Import an Apple Personal Voice "Recordings" export (CAF/ALAC → PCM),
-// or an LJSpeech corpus directory (metadata.csv + wav/).
-let corpus = VoiceCorpus::from_personal_voice_zip("Will's Personal Voice 1 - Recordings.zip")?;
-let identity = corpus.to_identity(Some("en"));
-
-// Enroll: qwen + elevenlabs are instant; google/azure are consent-gated (below).
-let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#).ok_or("no cloner")?;
-let handle = match cloner.clone_voice(&identity)? {
-    rust_tts_wrapper::cloning::CloneOutcome::Ready(h) => h,
-    _ => unreachable!("qwen cloning is instant"),
+let mut boundary = |word: &str, start: f32, end: f32, _: i32, _: i32, est: bool| {
+    println!("{word} @ {start:.2}s–{end:.2}s{}", if est { " (est.)" } else { "" });
 };
-
-// Speak it — a cloned voice id is just a voice string; Qwen handles are
-// model-bound, so pass the recorded model via modelId.
-let engine = create_engine("qwen", r#"{"apiKey":"sk-...","modelId":"qwen-audio-3.0-tts-flash"}"#)?;
-engine.speak("Hello", Some(&handle.voice_id), 1.0, 1.0, 1.0, Some(&mut audio_cb), None, None)?;
-
-cloner.delete_cloned(&handle)?; // quota hygiene
+engine.speak("Hello world", Some("alloy"), 1.0, 1.0, 1.0,
+    Some(&mut |_chunk: &[u8]| {}), Some(&mut boundary), None)?;
 ```
-
-- Capture is source-agnostic: `VoiceIdentityBuilder` records live microphone PCM clip-by-clip (`start_clip` / `push_pcm` / `finish_clip`), `VoiceIdentity::from_transcribed_pairs` takes audio files + transcripts, `AudioClip::from_audio_file` loads wav/mp3/m4a/flac, `VoiceCorpus::from_audio_dir` imports a folder. Personal Voice and LJSpeech are just two importers.
-- `CloneRegistry` persists identity → engine handles (`~/.rust-tts-wrapper/clones.json`):
-
-```rust
-use rust_tts_wrapper::cloning::{default_registry_path, CloneRegistry};
-let mut registry = CloneRegistry::load(default_registry_path().unwrap())?;
-registry.add(&identity.name, handle.clone());
-registry.save()?;                       // atomic write
-let handles: &[rust_tts_wrapper::cloning::CloneHandle] = registry.handles(&identity.name);
-```
-
-- Consent-gated engines (Google ICV, Azure) need a recording of their fixed script first — discoverable before you ask the user to record:
-
-```rust
-let cloner = create_cloner("google", creds)?;
-if let Some(spec) = cloner.consent_spec() {
-    // record spec.script verbatim, then attach:
-    identity.consent.push(ConsentRecording {
-        engine: "google".into(),
-        pcm,                                    // PCM16 LE mono
-        sample_rate: 24_000,
-        metadata: [("language_code".to_string(), "en-US".to_string())].into(),
-    });
-}
-// azure additionally requires voiceTalentName/companyName/locale metadata
-// and is the one Job-mode engine: clone_voice may return
-// CloneOutcome::Pending { job_id } — resolve it with cloner.poll_clone(&job_id).
-```
-- Personal Voice exports are audio-only (no transcripts); attach them via `VoiceCorpus::phrases` or ASR when an engine needs them (Qwen doesn't).
-- Consent-gated providers are implemented behind their real-world gates: **Google Chirp 3 ICV** (`generateVoiceCloningKey`, allow-listed projects — `consent_spec()` returns the exact script to record) and **Azure Personal Voice** (consent → personal voice → long-running-operation `poll_clone`; intake-gated at aka.ms/customneural; requires a `projectId` Custom Voice project). Azure cloned voices speak via the `"{base_model}/{speakerProfileId}"` voice-string convention (`mstts:ttsembedding`). Neither is live-testable without vendor approval; request shapes are doc-verified and unit-tested.
-- **qwen3-local** cloner (with `--features qwen3-local,cloning`): zero-shot and fully offline — extracts an ECAPA speaker embedding from the identity's best clip; the resulting `emb:` handle is reused per utterance without re-encoding. No upload, no consent gate, no quota (live-verified).
-- Job-based providers (Murf, Resemble) are not implemented yet.
-- Cloning someone's voice requires their permission; banked-voice programs' licensed synthetic voices must not be re-cloned.
-
-### From an Apple Personal Voice backup
-
-The whole banked-voice-in-iOS pipeline works with no external tools:
-
-1. **Export on device.** The user exports their Personal Voice from the
-   Accessibility → Personal Voice settings (a user-initiated on-device
-   export — apps cannot trigger it). The artifact is
-   `"{Voice Name} - Recordings.zip"`.
-2. **What's inside.** A `TrainingData/` folder of
-   `{session5}_{NN}.caf` clips — Core Audio Format / Apple Lossless,
-   48 kHz mono. An iOS 17-era bank is ~150 clips (~12 min) across
-   several recording sessions; iOS 26 banks ~10 prompts. Both are far
-   more than every instant cloner needs (10–20 s) — engines pick the
-   best clips.
-3. **Import (pure Rust).** `from_personal_voice_zip` decodes CAF/ALAC
-   via symphonia (no ffmpeg), canonicalizes to PCM16 mono 24 kHz,
-   skips any corrupt frames, and takes the voice name from the zip
-   title:
-
-```rust
-use rust_tts_wrapper::cloning::{create_cloner, CloneOutcome, VoiceCorpus};
-
-let corpus = VoiceCorpus::from_personal_voice_zip("Dad's Voice - Recordings.zip")?;
-// corpus.name == "Dad's Voice"; ~150 clips; 24 kHz mono PCM
-let identity = corpus.to_identity(Some("en"));
-
-let cloner = create_cloner("qwen", r#"{"apiKey":"sk-..."}"#).ok_or("no cloner")?;
-let CloneOutcome::Ready(handle) = cloner.clone_voice(&identity)? else { unreachable!() };
-// speak with create_engine("qwen", ...) + Some(&handle.voice_id) as above
-```
-
-4. **Transcripts are not in the zip** (Apple includes audio only). If
-   an engine needs them, attach via `VoiceCorpus::phrases` (prompt-list
-   mapping by the `{NN}` filename index) or ASR; Qwen and ElevenLabs
-   ignore transcripts entirely.
-
-`examples/voice-clone.rs` runs this exact flow end-to-end
-(`--zip "… - Recordings.zip"`), and `tests/cloning_live.rs` exercises
-import → clone → list → speak → delete against a real export.
-
-End-to-end demo: `examples/voice-clone.rs`. Live test: `tests/cloning_live.rs` (`QWEN_API_KEY` + `QWEN_PV_ZIP`, `--ignored`).
-
-## Pocket TTS (offline phoneme voice cloning)
-
-`pocket-timing` feature — Kyutai pocket-tts as a fully local engine: clone a
-voice from any donor wav and speak **IPA phonemes** with attention-measured
-word boundaries (`estimated=false`). Enable with
-`--no-default-features --features pocket-timing`.
 
 ```bash
-cargo run --release --no-default-features --features pocket-timing \
-  --example pocket-engine-demo -- <bundle_dir> <reference.wav> \
-  "w ˈɛ ɹ| ɪ z| ð ə| b æ θ ɹ u m"
+cargo build --no-default-features --features system,cloud   # Linux
+cargo build --no-default-features --features sapi,cloud     # Windows
+cargo build --no-default-features --features avsynth,cloud  # macOS
 ```
 
-Two bundle layouts are auto-detected:
+## Documentation
 
-- **Sherpa 6L** (`lm_main*.onnx` + `vocab.json`): orthographic text,
-  Viterbi tokenizer
-- **Phoneme 24L** (`flow_lm_main*.onnx` + `bundle.json` +
-  `tokenizer4.json`): our published phoneme fine-tune
-  ([`willwade/pocket-tts-en-phonemes-24l`](https://huggingface.co/willwade/pocket-tts-en-phonemes-24l),
-  CC-BY-4.0), WordLevel whitespace tokenizer, `bos_before_voice.npy`
-  prepended to voice conditioning
-
-Phoneme input uses `|` to mark word boundaries (the model tokenizes single
-phones; the separators carry word grouping for the timing output):
-
-```
-"w ˈɛ ɹ| ɪ z| ð ə| b æ θ ɹ u m"  →  "Where is the bathroom"
-```
-
-SSML/SpeechMarkdown is compiled via floravox-ssml: `<break>` pauses become
-real silence between segments, `<mark>` events fire at exact positions.
-
-**Honest caveats (measured, 2026-10):**
-
-- Zero-shot cloning is timbre-approximate: donor style dominates — clean
-  narrator-style prompts read far more intelligibly than casual/filler-style
-  donors. Validate clones for intelligibility, not just similarity.
-- For a true personal voice, a ~600-step adaptation fine-tune on a 15-min
-  Personal Voice corpus embeds the speaker's timbre in the weights
-  (~$0.50 GPU; see `floravox/docs/PHONEME-POCKET.md` for the recipe and the
-  frozen-latent-stats requirement).
-- English (en-US phoneme inventory); first word of an utterance is
-  occasionally fragile; 1-step flow decode is intended.
-
-## Formatting & Testing
-
-```bash
-# Format and lint (required before commit)
-cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings
-
-# Run tests
-cargo test --all-features
-```
-
-**CI requires:** rustfmt check, clippy clean, and tests pass.
-
-## Status
-
-Active development. Engine constructors, the C ABI, and the offline test suite run in CI on Linux, macOS, and Windows. Live cloud API calls are not exercised in CI — see `tests/live_cloud.rs.template` (copy to `tests/live_cloud.rs`, gitignored) and `.env.example` for running them locally with your own credentials. Live SherpaOnnx synthesis IS exercised in CI by the `sherpaonnx-live.yml` workflow (downloads small VITS/Matcha/Kokoro models and runs `tests/sherpaonnx_live.rs`), triggered on PRs touching `src/sherpaonnx_engine.rs` and available as a manual `workflow_dispatch`.
-- **Voice List**: Engines with "API" can enumerate voices from the provider's API.
-- **Word Boundaries**: Google returns real timing via v1beta1 timepoints with SSML marks. All others use word-length-adjusted estimation (150 WPM baseline, configurable).
-- **Speech Markdown**: Auto-detected and converted to platform-specific SSML via [speechmarkdown-rust](https://github.com/AACTools/speechmarkdown-rust). Azure gets Microsoft SSML, Google gets Assistant SSML, ElevenLabs gets model-matched prompt markup (see below), others get Alexa SSML.
-- **Playback timeline** (`timeline` module): turn word boundaries into a `(playback_time → byte_offset)` timeline for reader-style highlighting — `PlaybackTimeline` (built from `synth_with_boundaries` output or boundary-callback tuples; keyed in playback time so a tempo/speed factor is compensated) plus `PlaybackClock` (pause/resume/seek wall-clock). Binary-search lookups hold the last position across gaps. See `examples/timeline-demo.rs` for the full pattern.
-- **ElevenLabs markup**: ElevenLabs parses no SSML documents. The default model is `eleven_v3`, so SpeechMarkdown renders as audio tags (`[whispers]`, `[pause]`, `[long pause]`, native `"/IPA/"`); set the `modelId` credential to a pre-v3 model (`eleven_multilingual_v2`, `flash_v2_5`, `flash_v2`) to get `<break time>` prompt markup (≤3s, clamped) instead. The dialect is chosen from the model because v3 reads stray XML aloud and pre-v3 models read audio tags aloud. The `rate` parameter maps to the deterministic `voice_settings.speed` API setting (0.7–1.2).
-
-## Rust API
-
-### `TtsEngine` Trait
-
-```rust
-pub trait TtsEngine: Send + Sync + Debug {
-    // Speaking
-    fn speak(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32,
-             on_audio: Option<OnAudioCallback>, on_boundary: Option<OnBoundaryCallback>) -> TtsResult<()>;
-    fn speak_with_options(&self, text: &str, options: Option<&SpeakOptions>,
-                          on_audio: Option<OnAudioCallback>, on_boundary: Option<OnBoundaryCallback>) -> TtsResult<()>;
-    fn speak_sync(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32,
-                  on_audio: Option<OnAudioCallback>, on_boundary: Option<OnBoundaryCallback>) -> TtsResult<()>;
-
-    // Synthesis (no playback)
-    fn synth_to_bytes(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32) -> TtsResult<Vec<u8>>;
-    fn synth_to_bytes_with_options(&self, text: &str, options: Option<&SpeakOptions>) -> TtsResult<Vec<u8>>;
-    fn synth_with_boundaries(&self, text: &str, voice: Option<&str>, rate: f32, pitch: f32, volume: f32) -> TtsResult<(Vec<u8>, Vec<WordBoundary>)>;
-
-    // Control
-    fn stop(&self) -> TtsResult<()>;
-    fn pause(&self) -> TtsResult<()>;
-    fn resume(&self) -> TtsResult<()>;
-
-    // Introspection
-    fn get_voices(&self) -> TtsResult<Vec<Voice>>;
-    fn engine_id(&self) -> &'static str;
-    fn check_credentials(&self) -> TtsResult<bool>;
-}
-```
-
-### Callback Types
-
-```rust
-pub type OnAudioCallback<'a>    = &'a mut dyn FnMut(&[u8]);
-pub type OnBoundaryCallback<'a> = &'a mut dyn FnMut(&str, f32, f32);  // word, start_s, end_s
-pub type OnStartCallback<'a>    = &'a mut dyn FnMut();
-pub type OnEndCallback<'a>      = &'a mut dyn FnMut();
-pub type OnErrorCallback<'a>    = &'a mut dyn FnMut(&str);
-```
-
-### Core Types
-
-```rust
-pub struct Voice {
-    pub id: String,
-    pub name: String,
-    pub gender: Gender,             // Male | Female | Unknown
-    pub provider: String,
-    pub language_codes: Vec<LanguageCode>,
-}
-
-pub struct LanguageCode {
-    pub bcp47: String,              // "en-US"
-    pub iso639_3: String,           // "eng"
-    pub display: String,            // "English (United States)"
-}
-
-pub struct WordBoundary {
-    pub text: String,
-    pub offset: u64,                // milliseconds
-    pub duration: u64,              // milliseconds
-}
-
-pub struct SpeakOptions {
-    pub rate: Option<f32>,
-    pub speech_rate: Option<SpeechRate>,      // XSlow | Slow | Medium | Fast | XFast
-    pub pitch: Option<f32>,
-    pub speech_pitch: Option<SpeechPitch>,    // XLow | Low | Medium | High | XHigh
-    pub volume: Option<f32>,
-    pub voice: Option<String>,
-    pub format: Option<AudioFormat>,          // Mp3 | Wav | Ogg | Opus | Aac | Flac | Pcm
-    pub use_speech_markdown: bool,
-    pub use_word_boundary: bool,
-    pub raw_ssml: bool,
-    pub extra: HashMap<String, String>,
-}
-
-pub enum Gender { Male, Female, Unknown }
-pub enum AudioFormat { Mp3, Wav, Ogg, Opus, Aac, Flac, Pcm }
-pub enum SpeechRate { XSlow, Slow, Medium, Fast, XFast }
-pub enum SpeechPitch { XLow, Low, Medium, High, XHigh }
-```
-
-### Utility Functions
-
-```rust
-// Word boundary estimation (matches Swift WordTimingEstimator)
-pub fn estimate_word_boundaries(text: &str) -> Vec<WordBoundary>;
-pub fn estimate_word_boundaries_with_wpm(text: &str, words_per_minute: f64) -> Vec<WordBoundary>;
-
-// Speech Markdown preprocessing
-pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool);
-
-// Gender normalization
-pub fn normalize_gender(value: &str) -> Gender;
-```
-
-### Factory
-
-```rust
-pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Box<dyn TtsEngine>>;
-pub fn engine_count() -> usize;
-pub fn engine_list() -> Vec<EngineDescriptor>;
-```
-
-## C API
-
-All functions are `extern "C"`, `#[no_mangle]`:
-
-| Function | Description |
-|----------|-------------|
-| `tts_create(engine_id, credentials_json)` | Create engine, returns opaque `tts_ctx*` |
-| `tts_destroy(ctx)` | Free engine context |
-| `tts_speak(ctx, text)` | Speak (returns 0/-1) |
-| `tts_speak_ssml(ctx, ssml)` | Speak pre-built SSML, bypassing rate/pitch/volume wrapping. Engines that parse SSML get it directly; ElevenLabs gets it translated via SpeechMarkdown into its model-matched dialect (it parses no SSML) |
-| `tts_speak_sync(ctx, text)` | Speak (blocking) |
-| `tts_stop(ctx)` | Stop speech |
-| `tts_pause(ctx)` | Pause in-progress speech |
-| `tts_resume(ctx)` | Resume paused speech |
-| `tts_synth_to_bytes(ctx, text, out_bytes, out_len)` | Synth to buffer (returns 0/-1) |
-| `tts_free_bytes(bytes, len)` | Free buffer from tts_synth_to_bytes |
-| `tts_get_voices(ctx, out_voices, out_count)` | Get voice list |
-| `tts_free_voices(voices, count)` | Free voice array |
-| `tts_set_voice(ctx, voice_id)` | Set voice |
-| `tts_set_rate(ctx, rate)` | Set rate (1.0 = normal) |
-| `tts_set_pitch(ctx, pitch)` | Set pitch (1.0 = normal) |
-| `tts_set_volume(ctx, volume)` | Set volume (1.0 = normal) |
-| `tts_set_on_audio(ctx, cb, userdata)` | Set streaming audio callback |
-| `tts_set_on_boundary(ctx, cb, userdata)` | Set word boundary callback: cb(word, byte_offset, byte_len, start_s, end_s, estimated, userdata). Offsets/lengths are bytes into the spoken text; an unlocatable word holds the last known offset with length -1 |
-| `tts_set_on_viseme(ctx, cb, userdata)` | Set viseme callback for lip-sync |
-| `tts_set_on_start(ctx, cb, userdata)` | Set speech-started callback |
-| `tts_set_on_end(ctx, cb, userdata)` | Set speech-completed callback |
-| `tts_set_on_error(ctx, cb, userdata)` | Set error callback |
-| `tts_get_engine_count()` | Count registered engines |
-| `tts_get_engines(out_engines, out_count)` | Get engine descriptors |
-| `tts_free_engines(engines, count)` | Free engine info array |
-| `tts_get_last_error(ctx)` | Get last error message |
-
-### C Example
-
-```c
-#include "tts_wrapper.h"
-#include <stdio.h>
-
-void on_audio(const uint8_t* chunk, uintptr_t size, void* userdata) {
-    printf("Audio chunk: %zu bytes\n", size);
-}
-
-void on_boundary(const char* word, int32_t offset, int32_t len,
-                 float start, float end, int32_t estimated, void* userdata) {
-    printf("Word '%s' %d+%d %.3f-%.3f %s\n", word, offset, len, start, end,
-           estimated ? "(estimated)" : "(measured)");
-}
-
-int main() {
-    tts_ctx* ctx = tts_create("openai", "{\"apiKey\":\"your-key\"}");
-    tts_set_on_audio(ctx, on_audio, NULL);
-    tts_set_on_boundary(ctx, on_boundary, NULL);
-    tts_set_voice(ctx, "alloy");
-    tts_speak_sync(ctx, "Hello world");
-    tts_destroy(ctx);
-}
-```
-
-### Rust Example
-
-```rust
-use rust_tts_wrapper::{factory, types::SpeakOptions};
-
-let engine = factory::create_engine("openai", r#"{"apiKey":"key"}"#).unwrap();
-
-// Simple speak
-engine.speak("Hello", Some("alloy"), 1.0, 1.0, 1.0, None, None).unwrap();
-
-// With callbacks
-let mut audio_cb = |chunk: &[u8]| println!("{} bytes", chunk.len());
-let mut boundary_cb = |word: &str, s: f32, e: f32| println!("{}: {:.3}-{:.3}", word, s, e);
-engine.speak_sync("Hello world", Some("alloy"), 1.0, 1.0, 1.0,
-    Some(&mut audio_cb), Some(&mut boundary_cb)).unwrap();
-
-// With SpeakOptions
-let opts = SpeakOptions { voice: Some("alloy".into()), ..Default::default() };
-engine.speak_with_options("Hello", Some(&opts), None, None).unwrap();
-
-// Synth to bytes
-let audio = engine.synth_to_bytes("Hello", Some("alloy"), 1.0, 1.0, 1.0).unwrap();
-
-// Get voices
-for v in engine.get_voices().unwrap() {
-    println!("{} ({}) - {}", v.name, v.gender, v.primary_language());
-}
-
-// Check credentials
-assert!(engine.check_credentials().unwrap());
-```
-
-## Build
-
-```bash
-cargo build --all-features
-```
-
-### Features
-
-- `system` — speech-dispatcher (Linux system TTS)
-- `avsynth` — AVSpeechSynthesizer (macOS system TTS)
-- `sapi` — SAPI (Windows system TTS)
-- `cloud` — all 20 cloud engines via HTTP + speechmarkdown-rust + base64
-- `sherpaonnx` — Sherpa-ONNX offline TTS (1300+ models)
-- `floravox` — floravox offline TTS (piper/MMS/Matcha/Kokoro ONNX voices, ~1,100 languages; native SSML — `<break>`/`<prosody>`/`<mark>`/`<phoneme>`/`<sub>` — with three-tier word timings: measured on patched voices, student sidecar, proportional. See the [floravox Voices](#floravox-voices) section)
-- `floravox-lexicons` — adds the lexicon+Phonetisaurus G2P chain and the `lang` credential that auto-fetches published bundles (non-English phoneme voices)
-- `pocket-timing` — PocketTtsEngine: Kyutai pocket-tts ONNX bundle with real attention-measured word boundaries, voice cloning from any donor wav, and IPA-phoneme input (see the [Pocket TTS](#pocket-tts-offline-phoneme-voice-cloning) section)
-- `cloning` — voice banking: import an Apple Personal Voice zip or LJSpeech corpus, enroll with cloud cloning engines (see [Voice cloning](#voice-cloning-experimental-cloning-feature))
-
-### Lint & Test
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-features -- -D warnings
-cargo test --all-features
-```
-
-## Bindings
-
-Every binding wraps the flat C ABI in `include/tts_wrapper.h`; see
-**[bindings/README.md](bindings/README.md)** for the full guide (loading
-conventions, test matrix, which package to use). All five suites — Rust
-ABI conformance, a C harness compiled with `-Wall -Wextra -Werror`, Node,
-.NET and Swift — run in CI on every push (`.github/workflows/bindings.yml`).
-
-### Python (`bindings/python/tts_wrapper.py`)
-
-```python
-from tts_wrapper import TTSClient
-
-client = TTSClient("openai", {"apiKey": "your-key"})
-client.on_audio(lambda chunk: print(f"{len(chunk)} bytes"))
-# word, byte_offset, byte_len, start_s, end_s, estimated
-client.on_boundary(lambda w, off, ln, s, e, est: print(f"{w}: {s:.3f}-{e:.3f}{'~' if est else ''}"))
-client.set_voice("alloy")
-client.speak_sync("Hello world")
-client.stop()
-```
-
-### .NET (`bindings/dotnet/` — NuGet: `RustTtsWrapper.Bindings`)
-
-```csharp
-using RustTtsWrapper;
-
-using var client = new TtsClient("openai", new() { ["apiKey"] = "your-key" });
-client.SetOnBoundary((word, offset, len, start, end, estimated) =>
-    Console.WriteLine($"{word}: {start:F3}-{end:F3} {(estimated ? "estimated" : "measured")}"));
-client.SetVoice("alloy");
-client.SpeakSync("Hello world");
-
-// Typed engine setup schema: render credential rows without a provider
-// switch (GH #68) — secret / file / directory / URL / choice / number.
-foreach (var field in TtsClient.GetEngineSetup("azure")!.Fields) { /* … */ }
-
-// Tri-state credential check: static catalogs answer Unverified (GH #69).
-var check = client.CheckCredentials(); // 1=Verified 0=Rejected 2=Unverified
-```
-
-The `RustTtsClient` adapter (drop-in `AbstractTtsClient` replacement)
-adds cancellable voice discovery, request-scoped speech with
-queue/replace semantics and request ids, structured errors with stable
-codes + field keys, and schema-driven capabilities — see
-[bindings/dotnet/README.md](bindings/dotnet/README.md) and the runnable
-[Avalonia example](examples/dotnet/avalonia-nuget) (GH #71) for the
-`AbstractTtsClient` migration guide.
-
-**NuGet contents per RID**: `win-x64` and `win-x86` bundle one DLL with
-`sapi` + `cloud` + `sherpaonnx` (the sherpa builds carry lexicon/G2P
-bundles, measured boundaries, SSML marks). Since GH #62 the `win-x64`
-DLL also compiles in the **`qwen3-local`** and **`omnivoice-local`**
-offline engines, **`pocket`** (real word timings via the tapped Kyutai
-graphs) and the **`cloning`** tooling (enrollment clients, corpus,
-Apple Personal Voice import), and the package ships the engine shared
-libraries (`engine-qwen3tts.dll`, `engine-omnivoice.dll`,
-`engine-ggml*.dll`) beside `rust_tts_wrapper.dll` under
-`runtimes/win-x64/native/`. GGUF/ONNX models are NOT bundled — point
-the engines' credentials at a models directory. `win-x86` stays
-engine-less (32-bit payload degrades cleanly: `tts_create` returns a
-not-enabled error for those ids).
-
-**Out-of-process hosts** (e.g. a SAPI host loading the DLL from its own
-directory): the engine DLLs resolve by name from the wrapper's import
-table, so the directory containing them must be on \`PATH\` or the library
-loaded with \`LoadLibraryExW(..., LOAD_WITH_ALTERED_SEARCH_PATH)\`; a
-plain \`LoadLibrary\` from a foreign working directory will fail with
-error 126.
-
-The **macOS flagship release artifact**
-(`avsynth-cloud-floravox-aarch64-macos`) carries the same offline
-engine set plus `floravox` + `floravox-lexicons` (lexicon-tier G2P for
-non-English voices). Pocket's ONNX sessions pin
-`AutoDevicePolicy::PreferCPU` — without that, ort rc.14+'s silent
-`MaxEfficiency` policy delegates them into CoreML/BNNS on macOS and
-crashes (floravox#17).
-
-### Swift (`bindings/swift/` — SwiftPM package `RustTtsWrapper`)
-
-```swift
-let client = try TtsClient(engineId: "openai", credentials: ["apiKey": "your-key"])
-client.setOnBoundary { word, offset, len, start, end, estimated in
-    print("\(word): \(start)-\(end) \(estimated ? "estimated" : "measured")")
-}
-client.setVoice("alloy")
-try client.speakSync("Hello world")
-```
-
-### Node (`bindings/nodejs/` — npm: `@aactools/tts-wrapper`)
-
-```js
-const { TtsClient } = require("@aactools/tts-wrapper");
-
-const client = new TtsClient({ engineId: "openai", credentials: { apiKey: "your-key" } });
-client.on("boundary", ({ word, startSec, endSec, estimated }) =>
-  console.log(`${word}: ${startSec}-${endSec} ${estimated ? "estimated" : "measured"}`));
-client.setVoice("alloy");
-client.speakSync("Hello world");
-client.close();
-```
-
-### C (`bindings/c/` — reference harness)
-
-`bindings/c/tts_abi_harness.c` exercises the whole ABI against the
-cdylib; `make -C bindings/c test` builds, compiles the header with
-`-Wall -Wextra -Werror` and runs it.
-
-## Architecture
-
-```
-                    TtsEngine (trait)
-                          |
-   +----------+----------+----------+----------+
-   |          |          |          |          |
-SystemEngine CloudEngine SherpaOnnx Floravox  PocketTts
-(speech-     (20 cloud   (1300+     (student  (cloning +
-dispatcher)  providers)  models)    fleet)    phonemes)
-```
-
-Cloud engines use provider-specific `CloudConfig`:
-- **Azure**: SSML XML body with prosody tags, XML escaping
-- **Google**: JSON body with base64 audio, v1beta1 timepoint support
-- **All others**: Standard JSON bodies
-
-## Sherpa-ONNX Models
-
-1300+ models from the [sherpa-onnx-models](https://crates.io/crates/sherpa-onnx-models) registry crate (canonical: [AACTools/sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts-models); updates are dependency bumps). Models are loaded from `~/.rust-tts-wrapper/sherpaonnx/`.
-
-### Updating the registry
-
-The registry ships as the
-[`sherpa-onnx-models`](https://crates.io/crates/sherpa-onnx-models) crate,
-published from [`AACTools/sherpa-onnx-tts-models`](https://github.com/AACTools/sherpa-onnx-tts-models)
-(tag `crate-v*`). Refresh it like any dependency:
-
-```bash
-cargo update -p sherpa-onnx-models   # within the pinned 0.x line
-# or bump the version in Cargo.toml for a new line
-```
-
-The registry's enriched fields (`license`, `sha256`, `voice_names`,
-`min_sherpa_onnx_version`, `deprecated`, …) are currently ignored by
-`parse_model` but carried through for future opt-in — the sync is
-backwards-compatible.
-
-## floravox Voices
-
-[floravox](https://github.com/AACTools/floravox) (Apache-2.0 OR MIT, pure
-Rust, no Python, no GPL) is an offline synthesis engine over four ONNX
-voice families. Enable with `--features floravox`.
-
-| Family | Files on disk | Languages (typical) | Notes |
-|---|---|---|---|
-| piper VITS | `X.onnx` + `X.onnx.json` | ~30 (per-voice) | the original target |
-| MMS VITS | `X.onnx` + `tokens.txt` (+ `config.json`) | ~1,100 (per-voice, one language each) | the 1,138-voice patched collection ships on Hugging Face |
-| Matcha | acoustic `*.onnx` + `tokens.txt` + vocoder (`hifigan*`/`vocos*`) | per-voice | audio comes from the vocoder |
-| Kokoro | `model.onnx` + `tokens.txt` + `voices.bin` | en + zh (11 voices in en-v0.19) | multi-speaker via the `speaker` credential |
-
-### Word-timing tiers
-
-Every boundary carries an honest `estimated` flag saying which tier
-produced it — the engine never re-estimates or upgrades a tier:
-
-1. **Measured** (`estimated: false`) — duration-patched voices report
-   word timings from the model's own duration tensor, sample-accurate.
-   `<break>` lands at a real silence edge; `<mark>` fires at a measured
-   position.
-2. **Student** (`estimated: true`) — a sibling `<voice-stem>.student`
-   file engages the timing student automatically (~340 languages
-   trained; median error 59 ms against the teacher).
-3. **Proportional** (`estimated: true`) — 150-wpm estimate, same as the
-   other local engines.
-
-### SSML support
-
-`<break>`, `<prosody rate>`, `<mark>`, `<phoneme>`, `<sub>`, `<say-as>`
-are parsed locally by floravox-ssml with byte-exact spans. `<mark>`
-events surface through the `on_mark` callback **and** as zero-duration
-measured boundaries. SpeechMarkdown input expands through the standard
-pipeline into the SSML dialect floravox parses natively.
-
-### Credentials
-
-| Key | Meaning |
+| Doc | Contents |
 |---|---|
-| `modelsDir` | voice directory (defaults to `~/.rust-tts-wrapper/floravox`); a voice is a directory or flat pair holding `X.onnx` (+ `.onnx.json` / `tokens.txt`) |
-| `modelId` | voice to load (bare stem, directory, or `.onnx` path); also selectable per call via `voice` |
-| `misaki` | `"us"` (default) / `"gb"` — English document pre-pass (heteronyms, numbers); `"off"` disables |
-| `chars` | character frontend for MMS-style voices: `"true"` lowercases through the voice's own table; any other value is an ISO 639-3 uroman code (e.g. `"hin"`) |
-| `speaker` | speaker id for multi-speaker voices (kokoro style slots, piper `sid`) |
+| [Rust usage](docs/rust.md) | creating engines, callbacks, voices, errors, setup schema, timeline, feature flags |
+| [.NET usage](docs/dotnet.md) | NuGet package, `TtsClient`, the `AbstractTtsClient` adapter, migration guide |
+| [Python usage](docs/python.md) | ctypes client, loading, examples |
+| [Node usage](docs/node.md) | npm package, events API |
+| [Swift usage](docs/swift.md) | SwiftPM package |
+| [C ABI reference](docs/c-abi.md) | every symbol, ownership rules, error codes |
+| [Engines](docs/engines.md) | capability matrix, credential keys, local-engine guides |
+| [Voice cloning](docs/voice-cloning.md) | banking, enrollment, consent-gated providers |
 
-### G2P
+Full API docs are generated from source (`#![warn(missing_docs)]`
+keeps every public item documented):
 
-- **English**: misaki (the phonemizer Kokoro voices were trained with —
-  heteronyms and numbers come out right). Dialect `us`/`gb`.
-- **MMS voices (1,100+ languages)**: character frontend, auto-detected;
-  non-Latin scripts romanized with uroman.
-- **Non-English phoneme voices** (German/French/… piper): the
-  lexicon+Phonetisaurus chain, enabled by `--features floravox-lexicons`.
-  Point `lexicon` at a compiled lexicon stem (`stem.fst` + `stem.pho`,
-  gruut-derived bundles from
-  [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons)),
-  `phonetisaurus` at a WFST for unseen words, or just pass `lang`
-  (e.g. `"de"`) and the published bundle is fetched automatically.
-- **ByT5** (opt-in): set `byt5Encoder` + `byt5Decoder` to the
-  [byt5-g2p-multilingual](https://huggingface.co/willwade/byt5-g2p-multilingual-tiny)
-  ONNX pair (~18.5 MB int8) and unseen words in ~130 languages resolve
-  neurally instead of letter-spelling. Chain order: lexicon →
-  Phonetisaurus → ByT5 → letter spelling.
+```bash
+cargo doc --open
+```
 
-wasm32 is available for the floravox offline engine via the published
-[`floravox-wasm`](https://crates.io/crates/floravox-wasm) crate (ort-web
-backend), consumed by the floravox-web demo; the JavaScript/Node package
-in `js/` (unified `speak()` across floravox + cloud engines) is built and
-awaiting `npm publish`.
+Runnable examples live in [`examples/`](examples/README.md) — including
+a complete [Avalonia app on the released NuGet package](examples/dotnet/avalonia-nuget).
 
-## License
+## Language bindings
 
-MIT
+| Binding | Package | Status |
+|---|---|---|
+| .NET | [`RustTtsWrapper.Bindings`](https://www.nuget.org/packages/RustTtsWrapper.Bindings/) (NuGet, native assets included) | CI-tested on Windows + Linux |
+| Node | [`@aactools/tts-wrapper`](https://www.npmjs.com/package/@aactools/tts-wrapper) (npm) | CI-tested on 3 OSes |
+| Swift | `RustTtsWrapper` (SwiftPM, in-repo) | CI-tested on macOS |
+| Python | [`bindings/python/`](bindings/python/) (single file, vendor it) | ABI conformance-tested |
+| C | [`bindings/c/`](bindings/c/) reference harness | compiled `-Wall -Wextra -Werror` |
+
+All five suites run in CI on every push (`.github/workflows/bindings.yml`).
+
+## Feature flags
+
+`system` `sapi` `avsynth` — OS voices · `cloud` — 22 providers ·
+`sherpaonnx` `qwen3-local` `omnivoice-local` `floravox` `pocket-timing`
+— offline engines · `cloning` — voice banking · `display_names` — ICU
+locale names. Details in the [engines doc](docs/engines.md); local
+GGML engines need their C++ runtime built first
+([`scripts/dev-stubs/`](scripts/dev-stubs/) has dev stubs).
+
+## Development
+
+```bash
+cargo fmt --all && cargo clippy --all-targets -- -D warnings
+cargo test --no-default-features --features system,cloud
+cargo doc --no-deps --document-private-items   # docs build is CI-enforced
+```
+
+CI runs the full matrix: lint + tests on 3 OSes, every binding suite,
+the offline engines against their real C++ runtimes, and release
+builds for ~20 targets. Live cloud calls are exercised locally via
+`tests/live_cloud.rs.template` + `.env.example`.
+
+## Status & license
+
+Active development; the C ABI surface is additive-only in practice
+(see [docs/c-abi.md](docs/c-abi.md)). MIT — see [LICENSE](LICENSE).

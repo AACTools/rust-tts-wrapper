@@ -26,6 +26,11 @@ jobs:
     - name: Run rustfmt check
       run: cargo fmt --all -- --check
 
+    - name: Rustdoc builds clean (missing_docs enforced at the crate level)
+      env:
+        RUSTDOCFLAGS: -D warnings
+      run: cargo rustdoc --no-default-features --features system,cloud
+
     - name: Run clippy (Linux-compatible features)
       # `sapi` and `avsynth` are platform-gated; on Linux we lint the union
       # of features that actually build here.

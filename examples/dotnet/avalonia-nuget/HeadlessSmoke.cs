@@ -33,7 +33,9 @@ internal static class HeadlessSmoke
             return 0;
         }
 
-        using var client = new RustTtsClient(engineId, CredentialsFor(engineId));
+        // NOTE: not `using` — disposed defensively in the finally below
+        // (released-package dispose quirk, see there).
+        var client = new RustTtsClient(engineId, CredentialsFor(engineId));
         Console.WriteLine($"[headless] client created for '{engineId}'");
 
         var voices = await client.GetVoicesAsync();
@@ -73,6 +75,15 @@ internal static class HeadlessSmoke
         {
             Console.WriteLine($"[headless] FAIL: preview synthesis threw: {ex.Message}");
             return 1;
+        }
+        finally
+        {
+            // The RELEASED package (1.6.6) has a dispose-ordering quirk
+            // (base Dispose → Stop() on the already-disposed native
+            // client throws ObjectDisposedException); dispose
+            // defensively until a fixed package ships.
+            try { client.Dispose(); }
+            catch (ObjectDisposedException) { }
         }
     }
 

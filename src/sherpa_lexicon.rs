@@ -63,6 +63,7 @@ const GRUUT_EN_DECOMP: &[(&str, &str, &str)] = &[
 const STRESS_PRIMARY: &str = "ˈ";
 const STRESS_SECONDARY: &str = "ˌ";
 
+/// Lexicon-generation failure (parse or generation error message).
 #[derive(Debug)]
 pub struct LexiconGenError(pub String);
 

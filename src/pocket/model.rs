@@ -40,13 +40,22 @@ unsafe impl Sync for RunCell {}
 pub(crate) const STEP_SECONDS: f32 = 0.08;
 pub(crate) const SAMPLE_RATE: u32 = 24_000;
 
+/// Paths to the ONNX files of a pocket-tts bundle (auto-detected
+/// layout: Sherpa 6L or phoneme 24L).
 pub struct PocketConfig {
+    /// Main language-model graph (`lm_main*.onnx`).
     pub lm_main: PathBuf,
+    /// Flow head graph (`lm_flow*.onnx` / `flow_lm_main*.onnx`).
     pub lm_flow: PathBuf,
+    /// Text encoder graph.
     pub encoder: PathBuf,
+    /// Audio decoder graph.
     pub decoder: PathBuf,
+    /// Text conditioner graph.
     pub text_conditioner: PathBuf,
+    /// Viterbi `vocab.json` (Sherpa bundles).
     pub vocab: Option<PathBuf>,
+    /// `token_scores.txt` (Sherpa bundles).
     pub token_scores: Option<PathBuf>,
     /// WordLevel tokenizer.json (phoneme bundles) — mutually exclusive with
     /// vocab/token_scores.
@@ -129,8 +138,11 @@ impl PocketConfig {
     }
 }
 
+/// Raw generation output before PCM16 conversion.
 pub struct GeneratedSpeech {
+    /// f32 samples (mono).
     pub samples: Vec<f32>,
+    /// Sample rate of `samples` (Hz).
     pub sample_rate: u32,
     /// per generation step: head-averaged attention over the TARGET tokens
     pub text_attention: Vec<Vec<f32>>,
@@ -151,6 +163,7 @@ enum RawTensor {
     Bool(Vec<bool>, Vec<i64>),
 }
 
+/// Loaded ONNX session set + tokenizer for one bundle.
 pub struct PocketTtsModel {
     /// ort 2.0.0-rc.14+: sessions take their environment at build time
     /// and hold only weak references — the environment must outlive them.
@@ -160,6 +173,7 @@ pub struct PocketTtsModel {
     encoder: RunCell,
     decoder: RunCell,
     conditioner: RunCell,
+    /// The bundle's tokenizer (Viterbi or WordLevel).
     pub tokenizer: AnyTokenizer,
     /// [1,1,1024] prepended to voice embeddings when the bundle ships it
     bos: Option<Vec<f32>>,

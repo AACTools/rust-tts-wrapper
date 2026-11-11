@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+/// Viterbi tokenizer over `vocab.json` + scores (Sherpa 6L bundles).
 pub struct PocketTokenizer {
     token2id: HashMap<String, u32>,
     token2score: HashMap<String, f32>,
@@ -41,6 +42,7 @@ impl PocketTokenizer {
     }
 
     /// Encode text to token ids (Viterbi over scores; byte fallback).
+    /// Tokenize text to model ids.
     #[must_use]
     pub fn encode(&self, text: &str) -> Vec<u32> {
         let mut s = text.replace(' ', "\u{2581}");
@@ -88,6 +90,7 @@ impl PocketTokenizer {
     }
 
     /// Map token ids back to piece strings (for word grouping).
+    /// Render a token id back to its text piece.
     #[must_use]
     pub fn id_to_piece(&self, id: u32) -> String {
         self.token2id
@@ -204,6 +207,7 @@ impl WordLevelTokenizer {
     }
 
     /// Encode a raw phoneme string (whitespace-split tokens; unknown -> 0).
+    /// Tokenize text to model ids.
     #[must_use]
     pub fn encode(&self, text: &str) -> Vec<u32> {
         text.split_whitespace()
@@ -244,6 +248,7 @@ impl WordLevelTokenizer {
     }
 
     /// Piece for an id (for display).
+    /// Render a token id back to its text piece.
     #[must_use]
     pub fn id_to_piece(&self, id: u32) -> String {
         self.id2token.get(id as usize).cloned().unwrap_or_default()
@@ -258,11 +263,14 @@ impl WordLevelTokenizer {
 
 /// Either tokenizer flavor, chosen by the bundle layout.
 pub enum AnyTokenizer {
+    /// Viterbi graph tokenizer (Sherpa 6L layout).
     Viterbi(PocketTokenizer),
+    /// Whitespace WordLevel tokenizer (phoneme 24L layout).
     WordLevel(WordLevelTokenizer),
 }
 
 impl AnyTokenizer {
+    /// Tokenize text to model ids.
     #[must_use]
     pub fn encode(&self, text: &str) -> Vec<u32> {
         match self {
@@ -271,6 +279,7 @@ impl AnyTokenizer {
         }
     }
 
+    /// Render a token id back to its text piece.
     #[must_use]
     pub fn id_to_piece(&self, id: u32) -> String {
         match self {

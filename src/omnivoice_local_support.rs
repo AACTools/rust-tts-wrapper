@@ -367,14 +367,7 @@ pub fn bcp47_to_omnivoice_lang(bcp47: &str) -> String {
     let table = omnivoice_runtime_languages();
     let normalized = bcp47.trim().to_ascii_lowercase();
     if table.is_empty() {
-        return macrolanguage_fixup(
-            &normalized
-                .split(['-', '_'])
-                .next()
-                .unwrap_or("")
-                .to_string(),
-            &[],
-        );
+        return macrolanguage_fixup(normalized.split(['-', '_']).next().unwrap_or(""), &[]);
     }
     // Exact id match (defensive: the current runtime table has no
     // regional ids, but honour one if a future table adds them).

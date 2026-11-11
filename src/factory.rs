@@ -22,6 +22,7 @@ pub struct EngineSetupError {
 }
 
 impl EngineSetupError {
+    /// Build a setup error (the constructor redacts the message).
     #[must_use]
     pub fn new(
         code: TtsErrorCode,
@@ -119,6 +120,31 @@ use crate::system_engine::SystemEngine;
 /// `credentials_json` is a JSON object with engine-specific credentials
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
 ///
+/// # Examples
+///
+/// Cloud engines construct lazily — creation succeeds offline, the
+/// first synthesis call exercises the credentials:
+///
+/// ```no_run
+/// use rust_tts_wrapper::factory::create_engine;
+///
+/// let engine = create_engine("openai", r#"{"apiKey":"sk-…"}"#)?;
+///
+/// // 24 kHz mono PCM16 chunks arrive as they are decoded:
+/// let mut chunks = 0;
+/// engine.speak("Hello world", None, 1.0, 1.0, 1.0,
+///     Some(&mut |_chunk: &[u8]| chunks += 1), None, None)?;
+/// # Ok::<(), rust_tts_wrapper::types::TtsError>(())
+/// ```
+///
+/// The error is structured (GH #69): unknown or compiled-out engines
+/// carry [`TtsErrorCode::EngineNotAvailable`]; missing local setup
+/// paths carry [`TtsErrorCode::MissingConfiguration`] with the
+/// offending field key.
+///
+/// [`TtsErrorCode::EngineNotAvailable`]: crate::error_codes::TtsErrorCode::EngineNotAvailable
+/// [`TtsErrorCode::MissingConfiguration`]: crate::error_codes::TtsErrorCode::MissingConfiguration
+///
 /// # Errors
 /// Returns [`EngineSetupError`] with a stable code (GH #69):
 /// `EngineNotAvailable` for unknown/compiled-out ids,
@@ -212,7 +238,7 @@ pub fn create_engine(
                 // Name the first missing path so the error carries the
                 // exact field key (GH #69).
                 for key in ["modelPath", "codecPath"] {
-                    if creds.get(key).map_or(true, String::is_empty) {
+                    if creds.get(key).is_none_or(String::is_empty) {
                         return Err(EngineSetupError::new(
                             TtsErrorCode::MissingConfiguration,
                             engine_id,
@@ -326,7 +352,20 @@ pub fn engine_count() -> usize {
     engine_list().len()
 }
 
-/// Return a list of all registered engine descriptors.
+/// Return a list of all registered engine descriptors (only the
+/// engines compiled into this build — see the [features
+/// list](https://github.com/AACTools/rust-tts-wrapper#features) in
+/// the README).
+///
+/// # Examples
+///
+/// ```
+/// let engines = rust_tts_wrapper::factory::engine_list();
+/// assert!(!engines.is_empty());
+/// for e in &engines {
+///     println!("{}: {} (credentials: {})", e.id, e.name, e.credential_keys_json);
+/// }
+/// ```
 #[must_use]
 #[allow(clippy::vec_init_then_push)]
 #[allow(clippy::too_many_lines)]
