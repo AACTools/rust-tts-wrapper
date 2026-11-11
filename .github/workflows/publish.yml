@@ -646,8 +646,27 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install build deps (Linux)
+        # Inline (this job has no checkout step, so the repo script
+        # isn't present): resilient against canonical-mirror DNS
+        # outages — retry, then fall back to mirrors.kernel.org.
         if: runner.os == 'Linux'
-        run: scripts/ci/apt-install-resilient.sh cmake libopenblas-dev
+        run: |
+          set -uo pipefail
+          pkgs="cmake libopenblas-dev"
+          try_install() {
+            sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends $pkgs
+          }
+          if try_install; then exit 0; fi
+          echo "::warning::canonical apt mirrors unreachable; retrying after 60s"
+          sleep 60
+          if try_install; then exit 0; fi
+          echo "::warning::apt still failing — swapping to mirrors.kernel.org"
+          codename="$(lsb_release -cs)"
+          sudo mv /etc/apt/apt-mirrors.txt /etc/apt/apt-mirrors.txt.bak 2>/dev/null || true
+          for pocket in "" "-updates" "-security"; do
+            echo "deb https://mirrors.kernel.org/ubuntu ${codename}${pocket} main restricted universe multiverse"               | sudo tee -a /etc/apt/sources.list >/dev/null
+          done
+          try_install
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:
