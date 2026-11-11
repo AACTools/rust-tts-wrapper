@@ -35,7 +35,7 @@ fn detail_json(ctx: *mut rust_tts_wrapper::tts_ctx) -> Option<String> {
     }
     // SAFETY: p is a heap C string owned by the caller after return.
     let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
-    unsafe { rust_tts_wrapper::tts_free_string(p) };
+    rust_tts_wrapper::tts_free_string(p);
     Some(s)
 }
 
@@ -188,7 +188,7 @@ fn engine_setups_json_is_parseable_and_covers_azure() {
     assert!(!p.is_null(), "setups JSON must not be null");
     // SAFETY: p is a heap C string owned by the caller after return.
     let json = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
-    unsafe { tts_free_string(p) };
+    tts_free_string(p);
 
     let arr: serde_json::Value = serde_json::from_str(&json).expect("valid JSON array");
     let arr = arr.as_array().expect("top-level array");

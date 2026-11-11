@@ -318,8 +318,12 @@ fn redact_json_secret_values(s: &str) -> String {
             if let Some(value) = after_colon.strip_prefix('"') {
                 if let Some(end_rel) = value.find('"') {
                     if end_rel > 0 {
-                        // `"key" : "value"` → keep key, redact value.
+                        // `"key" : "value"` → keep the quoted key and
+                        // the separator, redact the value. (The closing
+                        // quote of the key MUST be re-emitted — it was
+                        // consumed into after_key.)
                         out.push_str(key);
+                        out.push('"');
                         out.push_str(&after_key[..after_key.len() - after_colon.len()]);
                         out.push_str("\"«redacted»\"");
                         rest = &value[end_rel + 1..];
@@ -353,14 +357,14 @@ fn token_len(s: &str, pos: usize) -> usize {
 }
 
 /// True when `status` (e.g. "401") appears as a standalone token AND
-/// the message carries an HTTP/auth context word — so "loaded chunk
+/// the message carries an HTTP-status context word — so "loaded chunk
 /// 4012 at offset 401" never classifies as an auth failure, while
-/// "HTTP status client error (401 Unauthorized)" does.
+/// "HTTP status client error (401 Unauthorized)" does. "request"/
+/// "response" are deliberately NOT context words: reqwest transport
+/// errors always contain them ("error sending request…"), and a stray
+/// byte count there must not flip the classification.
 fn http_status_in(lower_msg: &str, statuses: &[&str]) -> bool {
-    let has_context = lower_msg.contains("http")
-        || lower_msg.contains("status")
-        || lower_msg.contains("response")
-        || lower_msg.contains("request");
+    let has_context = lower_msg.contains("http") || lower_msg.contains("status");
     if !has_context {
         return false;
     }
@@ -647,6 +651,36 @@ mod tests {
         let out = redact_message(r#"sent {"api-key":"supersecret1","region":"us"}"#);
         assert!(!out.contains("supersecret1"), "secret leaked: {out}");
         assert!(out.contains("us"), "over-redacted: {out}");
+    }
+
+    #[test]
+    fn redacted_output_stays_parseable_json() {
+        // The redacted message is displayed and serialized verbatim
+        // (ErrorDetail JSON, TtsException.Message) — it must remain
+        // valid JSON when the input was.
+        for input in [
+            r#"sent {"apiKey":"supersecret123"}"#,
+            r#"sent {"apiKey": "supersecret123", "model": "tts-1"}"#,
+            r#"sent { "api-key" : "x" , "n": 5}"#,
+        ] {
+            let redacted = redact_message(input);
+            let reparsed =
+                serde_json::from_str::<serde_json::Value>(&redacted.replace("sent ", ""))
+                    .unwrap_or_else(|e| panic!("redacted output not parseable: {redacted} ({e})"));
+            assert!(reparsed.is_object(), "{redacted}");
+        }
+    }
+
+    #[test]
+    fn classifier_transport_errors_with_stray_status_digits_stay_network() {
+        // reqwest transport errors always say "request"; a byte count
+        // there must not read as an auth rejection.
+        assert_eq!(
+            classify_error_message(
+                "error sending request: connection closed with 401 bytes remaining"
+            ),
+            TtsErrorCode::NetworkError
+        );
     }
 
     #[test]

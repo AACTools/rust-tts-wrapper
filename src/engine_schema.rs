@@ -318,6 +318,13 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         "westus",
         "westus2",
         "westus3",
+        "qatarcentral",
+        "italynorth",
+        "polandcentral",
+        "spaincentral",
+        "mexicocentral",
+        "taiwannorth",
+        "israelcentral",
     ];
     match id {
         // ── Zero-config system engines ───────────────────────────────
@@ -341,12 +348,11 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         "sherpaonnx" => Some((
             vec![
                 SetupField::directory("modelPath", "Model directory")
-                    .help("Directory (or registry id) holding the sherpa-onnx voice")
-                    .default("bundled default"),
+                    .help("Directory (or registry id) holding the sherpa-onnx voice; empty = bundled default"),
                 SetupField::text("modelId", "Voice / model id"),
-                SetupField::text("numThreads", "Threads").default("2"),
-                SetupField::text("numSteps", "Steps").default("8"),
-                SetupField::text("provider", "Provider")
+                SetupField::number("numThreads", "Threads").default("2"),
+                SetupField::number("numSteps", "Steps").default("8"),
+                SetupField::choice("provider", "Provider")
                     .choices(&["cpu", "coreml", "cuda", "directml"]),
                 SetupField::file("referenceAudio", "Reference audio (cloning)")
                     .help("WAV used as the zero-shot cloning reference"),
@@ -393,7 +399,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                 SetupField::directory("modelsDir", "Models directory"),
                 SetupField::text("modelId", "Voice / model id"),
                 SetupField::text("misaki", "G2P (misaki) variant"),
-                SetupField::text("chars", "Characters").default("5"),
+                SetupField::text("chars", "Character frontend")
+                    .help("\"true\" or an ISO 639-3 code (e.g. \"hin\") to force per-language G2P"),
                 SetupField::text("speaker", "Speaker"),
             ],
             EngineCapabilityInfo::new(true, false, true, true, false, false, false, true)
@@ -462,7 +469,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             vec![
                 SetupField::secret("apiKey", "API key").required(),
                 SetupField::text("modelId", "Model"),
-                SetupField::text("region", "Region"),
+                SetupField::choice("region", "Region"),
                 SetupField::text("instruction", "Instruction"),
                 SetupField::url("wsUrl", "WebSocket URL").default("wss://dashscope.aliyuncs.com"),
                 SetupField::url("customizationUrl", "Customization URL"),
@@ -527,7 +534,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         "watson" => Some((
             vec![
                 SetupField::secret("apiKey", "API key").required(),
-                SetupField::text("region", "Region")
+                SetupField::choice("region", "Region")
                     .choices(&[
                         "us-south", "us-east", "eu-de", "eu-gb", "jp-tok", "au-syd", "ca-tor",
                     ])

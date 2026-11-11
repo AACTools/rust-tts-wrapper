@@ -211,75 +211,76 @@ internal sealed class SpeechRequestScheduler : IDisposable
             _backend.Stop();
         }
 
-        return RunRequestAsync(request, text, prepare, ct);
+        // The PUBLIC task is the request's own completion source: it is
+        // completed with a result on every path (including
+        // stop/supersede/cancel from other threads), so machinery
+        // faults in the runner can never leak to the caller. The runner
+        // itself is watched by a catch-all.
+        _ = RunRequestAsync(request, text, prepare, ct);
+        return request.Tcs.Task;
     }
 
-    private async Task<SpeechRequestResult> RunRequestAsync(
+    private async Task RunRequestAsync(
         Request request,
         string text,
         Action? prepare,
         CancellationToken ct)
     {
-        // Cancelled while waiting for the gate: complete as Cancelled
-        // with a result object — never fault the caller's task (the
-        // "returned task completes with the request's final status"
-        // contract holds for every cancellation interleaving).
+        bool holdsGate = false;
         try
         {
-            await _gate.WaitAsync(ct).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            lock (_sync)
-            {
-                request.State = SpeechRequestStatus.Cancelled;
-                _queued.Remove(request);
-                request.Tcs.TrySetResult(MakeResult(request));
-                return request.Tcs.Task.Result;
-            }
-        }
-        try
-        {
-            // FIFO head-of-queue check: SemaphoreSlim does not guarantee
-            // FIFO wakeups under contention, so after acquiring the gate
-            // verify this request is the oldest queued one; otherwise
-            // yield the gate and re-wait (rapid-preview bursts are the
-            // exact scenario this guards).
+            // FIFO head-of-queue acquisition loop: SemaphoreSlim does
+            // not guarantee FIFO wakeups under contention, so after
+            // acquiring the gate verify this request is the oldest
+            // queued one; otherwise yield the gate and re-wait. Gate
+            // ownership is tracked explicitly so a cancellation landing
+            // on a re-wait can never double-release.
             while (true)
             {
+                try
+                {
+                    await _gate.WaitAsync(ct).ConfigureAwait(false);
+                    holdsGate = true;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancelled while waiting: complete as Cancelled
+                    // with a result object — never fault the caller's
+                    // task ("completes with the request's final status"
+                    // holds for every cancellation interleaving).
+                    lock (_sync)
+                    {
+                        request.State = SpeechRequestStatus.Cancelled;
+                        _queued.Remove(request);
+                        request.Tcs.TrySetResult(MakeResult(request));
+                    }
+                    return;
+                }
+
                 lock (_sync)
                 {
                     if (request.State == SpeechRequestStatus.Superseded ||
-                        request.State == SpeechRequestStatus.Cancelled)
+                        request.State == SpeechRequestStatus.Cancelled ||
+                        request.State == SpeechRequestStatus.Stopped)
                     {
-                        // Stopped/removed while queued.
+                        // Terminal state landed while queued.
                         _queued.Remove(request);
                         request.Tcs.TrySetResult(MakeResult(request));
-                        return request.Tcs.Task.Result;
+                        return;
                     }
                     if (_queued.Count == 0 || ReferenceEquals(_queued[0], request))
                     {
                         _queued.Remove(request);
                         request.State = SpeechRequestStatus.Speaking;
                         _active = request;
-                        break;
+                        break; // gate held, we are the head
                     }
+                    // Not the head: another waiter jumped the queue.
+                    // Yield the gate and re-wait.
                 }
+                holdsGate = false;
                 _gate.Release();
-                try
-                {
-                    await _gate.WaitAsync(ct).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    lock (_sync)
-                    {
-                        request.State = SpeechRequestStatus.Cancelled;
-                        _queued.Remove(request);
-                        request.Tcs.TrySetResult(MakeResult(request));
-                        return request.Tcs.Task.Result;
-                    }
-                }
+                await Task.Yield();
             }
 
             // Prepare (apply options) under the gate; a failure here is
@@ -299,8 +300,8 @@ internal sealed class SpeechRequestScheduler : IDisposable
                         _active = null;
                     }
                     request.Tcs.TrySetResult(MakeResult(request));
-                    return request.Tcs.Task.Result;
                 }
+                return;
             }
 
             // Final pre-flight check: a Stop/supersede that landed between
@@ -315,7 +316,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
                         _active = null;
                     }
                     request.Tcs.TrySetResult(MakeResult(request));
-                    return request.Tcs.Task.Result;
+                    return;
                 }
             }
 
@@ -363,12 +364,33 @@ internal sealed class SpeechRequestScheduler : IDisposable
                     _active = null;
                 }
                 request.Tcs.TrySetResult(MakeResult(request));
-                return request.Tcs.Task.Result;
+            }
+        }
+        catch (Exception ex)
+        {
+            // Runner-machinery safety net: the public task (the TCS)
+            // must always complete with a result, never fault.
+            lock (_sync)
+            {
+                if (request.State is SpeechRequestStatus.Queued or SpeechRequestStatus.Speaking)
+                {
+                    request.ErrorException = ex;
+                    request.State = SpeechRequestStatus.Failed;
+                    if (ReferenceEquals(_active, request))
+                    {
+                        _active = null;
+                    }
+                }
+                _queued.Remove(request);
+                request.Tcs.TrySetResult(MakeResult(request));
             }
         }
         finally
         {
-            _gate.Release();
+            if (holdsGate)
+            {
+                _gate.Release();
+            }
         }
     }
 
@@ -456,17 +478,37 @@ internal sealed class SpeechRequestScheduler : IDisposable
 
     public void Dispose()
     {
+        Task? activeTask;
         lock (_sync)
         {
             if (_disposed) return;
             _disposed = true;
+            activeTask = _active?.Tcs.Task;
         }
         StopAll();
         _backend.SetBoundaryHandler(null);
+        if (activeTask is not null)
+        {
+            // Drain: wait for the in-flight native speak to unwind after
+            // the stop request before returning — owners (e.g.
+            // RustTtsClient.Dispose → _inner.Dispose) free the native
+            // engine right after this, and the speak thread must be out
+            // of tts_speak first. Bounded so a wedged engine can't hang
+            // Dispose forever.
+            try
+            {
+                activeTask.Wait(TimeSpan.FromSeconds(10));
+            }
+            catch (AggregateException)
+            {
+                // TCS tasks complete with results, never fault; any
+                // observed aggregate is timeout-adjacent noise.
+            }
+        }
         // NOTE: the gate is deliberately NOT disposed — an in-flight
-        // speak still holds it and its finally-block would throw
+        // runner still holds it and its finally-block would throw
         // ObjectDisposedException after the result was already
-        // delivered (faulting the caller's task). The semaphore is
+        // delivered (faulting internal machinery). The semaphore is
         // GC-owned; nothing leaks.
     }
 }

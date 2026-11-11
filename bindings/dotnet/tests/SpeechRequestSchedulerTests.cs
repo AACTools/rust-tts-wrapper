@@ -24,6 +24,7 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
 
         public ManualResetEventSlim Speaking = new(false);
         public volatile bool StopRequested;
+        public int StopCalls;
         public List<string> Spoken { get; } = new();
         public int SpeakMillis { get; set; } = 200;
         /// <summary>Words the fake engine emits per utterance.</summary>
@@ -50,7 +51,11 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
             }
         }
 
-        public void Stop() => StopRequested = true;
+        public void Stop()
+        {
+            StopRequested = true;
+            Interlocked.Increment(ref StopCalls);
+        }
 
         public void SetBoundaryHandler(Action<string, int, int, float, float, bool>? handler) =>
             _handler = handler;
@@ -108,6 +113,11 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
 
         var oldResult = await old;
         Assert.Equal(SpeechRequestStatus.Superseded, oldResult.Status);
+        // The scheduler must have asked the backend to unwind the
+        // superseded in-flight call (cooperative stop), not just
+        // flagged it.
+        Assert.True(_backend.StopCalls >= 1,
+            $"Replace must call backend.Stop() (calls: {_backend.StopCalls})");
 
         var newResult = await replacement;
         Assert.Equal(SpeechRequestStatus.Completed, newResult.Status);

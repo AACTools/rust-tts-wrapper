@@ -53,10 +53,11 @@ mod audit {
     mod omnivoice {
         use crate::omnivoice_local_support::bcp47_to_omnivoice_lang;
 
-        /// The runtime's language table uses lowercase codes; regional
-        /// entries (`pt-br`, `zh-cn`) exist as exact lowercase ids
-        /// (GH #64). Every mapping must be lowercase, dash-free OR an
-        /// exact runtime-table entry — never a display name.
+        /// The runtime's language table uses lowercase ISO 639-3 ids
+        /// with NO regional variants (verified against lang-map.h —
+        /// `pt-br`/`zh-cn` do not exist). Regional BCP-47 input maps to
+        /// the base id; a mapping may only be lowercase, or an exact
+        /// runtime-table entry — never a display name.
         #[test]
         fn mapped_names_are_iso_codes_not_display_names() {
             for bcp47 in [
@@ -71,7 +72,9 @@ mod audit {
                 );
                 if !mapped.is_empty() {
                     // Either a bare base subtag, or an exact entry the
-                    // runtime's own table accepts (e.g. "pt-br").
+                    // runtime's own table accepts (defensive against a
+                    // future table adding regional ids — none exist
+                    // today).
                     let bare_ok = mapped
                         .chars()
                         .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());

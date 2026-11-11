@@ -349,8 +349,9 @@ const CORE_VERIFIED_LANGUAGES: &[(&str, &str)] = &[
 /// Map a BCP-47 code to the OmniVoice language parameter (GH #63/#64).
 ///
 /// Resolution order, all against the runtime's own accepted table:
-/// 1. Exact match on the full lowercased code (handles the runtime's
-///    regional entries like `pt-br` / `zh-cn` correctly).
+/// 1. Exact match on the full lowercased code (defensive: the current
+///    runtime table has no regional ids — verified against
+///    lang-map.h — but honour one if a future table adds it).
 /// 2. Base ISO subtag match (`en-GB` → `en`) — the runtime's table has
 ///    no en-XX entries (#63).
 /// 3. Macrolanguage fixup (GH #64): BCP-47 `ar` has no matching id in

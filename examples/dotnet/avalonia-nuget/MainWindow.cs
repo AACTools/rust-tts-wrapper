@@ -93,6 +93,9 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
+            // Broad catch: fire-and-forget handlers swallow anything
+            // unobserved in .NET Core (a missing native library would
+            // otherwise vanish without a status message).
             SetStatus($"Engine enumeration failed: {ex.Message}");
         }
     }
@@ -241,6 +244,9 @@ public partial class MainWindow : Window
     private async Task ReloadVoicesAsync()
     {
         // Recreate the client with current credentials, then reload.
+        // NOTE: pass the token explicitly — calling the parameterless
+        // overload from here would recurse into itself (C# prefers the
+        // exact-arity candidate over the optional-parameter one).
         if (_engineBox.SelectedItem is not string engineId)
         {
             return;
@@ -249,7 +255,7 @@ public partial class MainWindow : Window
         {
             _client?.Dispose();
             _client = new RustTtsClient(engineId, _credentials);
-            await ReloadVoicesAsync();
+            await ReloadVoicesAsync(_discoveryCts?.Token ?? CancellationToken.None);
         }
         catch (TtsException ex)
         {
@@ -285,6 +291,14 @@ public partial class MainWindow : Window
         _timings.Clear();
         try
         {
+            // Preview the SELECTED voice (settings-screen parity with
+            // the headless smoke, which also SetVoices first).
+            if (_voiceList.SelectedIndex >= 0 &&
+                _voiceList.SelectedItem is string entry)
+            {
+                var voiceId = entry.Substring(entry.LastIndexOf("(", StringComparison.Ordinal) + 1).TrimEnd(')');
+                _client.SetVoice(voiceId);
+            }
 #if USE_LOCAL_BINDINGS
             // Replace dispatch: a new preview supersedes the previous
             // one (settings-screen preview semantics — Dasher parity).

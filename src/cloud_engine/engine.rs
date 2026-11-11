@@ -59,8 +59,15 @@ impl CloudEngine {
         // mirrors synthUrl — lets the tristate check be exercised
         // against a deterministic local server.
         if let Some(voices_override) = credentials.get("voicesUrl") {
-            if !voices_override.is_empty() && config.voices_url.is_some() {
-                config.voices_url = Some(voices_override.clone());
+            if !voices_override.is_empty() {
+                if config.voices_url.is_some() {
+                    config.voices_url = Some(voices_override.clone());
+                } else {
+                    eprintln!(
+                        "Engine '{id}' has no voice-list endpoint: credential \
+                         'voicesUrl' has no effect (GH #69)"
+                    );
+                }
             }
         }
         // Google migration path (GH #68/#69): DotNetTtsWrapper's
@@ -88,7 +95,8 @@ impl CloudEngine {
                 .and_then(|content| {
                     content
                         .lines()
-                        .map(|l| l.trim().trim_start_matches('\u{feff}'))
+                        // BOM first, then whitespace: "\u{feff} key" → "key"
+                        .map(|l| l.trim_start_matches('\u{feff}').trim())
                         .find(|l| !l.is_empty())
                         .map(std::string::ToString::to_string)
                 })
@@ -1350,6 +1358,13 @@ impl TtsEngine for CloudEngine {
                         .map(|(k, v)| (k.into_owned(), v.into_owned()))
                         .collect();
                     let (amz_date, _) = amz_date_now();
+                    // GET with an empty body: sign the empty-payload hash
+                    // (same value sigv4_request computes via
+                    // sha256_hex(&[])) — a wrong hash changes the
+                    // canonical request and AWS answers 403
+                    // SignatureDoesNotMatch, which would read as a false
+                    // "credentials rejected".
+                    let payload_hash = sha256_hex(&[] as &[u8]);
                     let auth = authorization_header(
                         "GET",
                         &SignedUrl {
@@ -1360,7 +1375,7 @@ impl TtsEngine for CloudEngine {
                         &creds,
                         &amz_date,
                         None,
-                        "",
+                        &payload_hash,
                     );
                     req = req
                         .header("X-Amz-Date", &amz_date)
@@ -1373,8 +1388,16 @@ impl TtsEngine for CloudEngine {
                     Ok(resp) if resp.status().is_success() => Ok(CredentialCheck::Verified),
                     Ok(resp) => {
                         let code = resp.status().as_u16();
-                        if code == 401 || code == 403 || code == 407 {
+                        if code == 401 || code == 403 {
                             Ok(CredentialCheck::Rejected)
+                        } else if code == 407 {
+                            // Proxy auth: the provider never saw the
+                            // credentials — a retry/config issue, not a
+                            // rejection.
+                            Err(TtsError(
+                                "credential check failed: proxy authentication required (407)"
+                                    .into(),
+                            ))
                         } else {
                             Err(TtsError(format!(
                                 "credential check service error (HTTP {code})"

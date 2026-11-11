@@ -57,15 +57,23 @@ internal static class HeadlessSmoke
         // asset, so a preview failure here is a real regression — fail
         // the smoke run rather than silently passing (GH #71).
         client.SetVoice(voices[0].Id);
-        var audio = await client.SynthToBytesAsync("Avalonia preview");
-        if (audio.AudioData.Length == 0)
+        try
         {
-            Console.WriteLine("[headless] FAIL: preview synthesized 0 bytes " +
-                "with a voice installed");
+            var audio = await client.SynthToBytesAsync("Avalonia preview");
+            if (audio.AudioData.Length == 0)
+            {
+                Console.WriteLine("[headless] FAIL: preview synthesized 0 bytes " +
+                    "with a voice installed");
+                return 1;
+            }
+            Console.WriteLine($"[headless] preview synthesized: {audio.AudioData.Length} bytes");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[headless] FAIL: preview synthesis threw: {ex.Message}");
             return 1;
         }
-        Console.WriteLine($"[headless] preview synthesized: {audio.AudioData.Length} bytes");
-        return 0;
     }
 
     /// <summary>Credential keys per engine, as the Rust factory expects

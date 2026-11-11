@@ -266,11 +266,11 @@ public class RustTtsClient : AbstractTtsClient
 
     public override async Task SpeakAsync(string text, TtsOptions? options = null)
     {
-        var prepared = await PrepareTextAsync(text, options);
-        // Queue behind anything outstanding so SpeakAsync and request-
-        // scoped speech share one serialized path (GH #70).
+        // SpeakRequestAsync runs PrepareTextAsync itself — pass the raw
+        // text through (preparing here would convert SpeechMarkdown
+        // twice).
         var result = await SpeakRequestAsync(
-            prepared,
+            text,
             timing: null,
             options,
             new SpeechRequestOptions(),

@@ -306,7 +306,9 @@ public sealed class TtsEngineSetup
             : "";
 
     private static string? OptStr(JsonElement e, string prop) =>
-        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(prop, out var v)
+        e.ValueKind == JsonValueKind.Object
+            && e.TryGetProperty(prop, out var v)
+            && v.ValueKind == JsonValueKind.String
             ? v.GetString()
             : null;
 
