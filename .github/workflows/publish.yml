@@ -575,21 +575,17 @@ jobs:
       - name: Publish to NuGet
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
-        # Supports both Trusted Publishing (OIDC) and API key auth.
-        # If NUGET_API_KEY secret is set, use it. Otherwise rely on
-        # OIDC Trusted Publishing (requires nuget.org configuration).
+        # Trusted Publishing only (GH discussion: "WE SHOULD USE TRUSTED
+        # PUBLISHING. NOT API KEYS!"): nuget.org verifies the GitHub
+        # OIDC token — no API key secret involved. Requires the job's
+        # id-token: write permission above and the trusted publisher
+        # registered on nuget.org (AACTools/rust-tts-wrapper,
+        # .github/workflows/publish.yml, environment "nuget").
         run: |
           $pkg = Get-ChildItem bindings/dotnet/bin/Release/*.nupkg | Select-Object -First 1
           if (-not $pkg) { Write-Host "No .nupkg found"; exit 0 }
-          Write-Host "Publishing $($pkg.Name)"
-          $apiKey = '${{ secrets.NUGET_API_KEY }}'
-          if ($apiKey) {
-            Write-Host "Using API key authentication"
-            dotnet nuget push $pkg.FullName --api-key $apiKey --source https://api.nuget.org/v3/index.json --skip-duplicate
-          } else {
-            Write-Host "Using Trusted Publishing (OIDC) — no API key set"
-            dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
-          }
+          Write-Host "Publishing $($pkg.Name) via Trusted Publishing (OIDC)"
+          dotnet nuget push $pkg.FullName --source https://api.nuget.org/v3/index.json --skip-duplicate
 
   npm:
     name: Publish @aactools/tts-wrapper to npm
