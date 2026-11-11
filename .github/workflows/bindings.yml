@@ -93,9 +93,9 @@ jobs:
       - name: Install native deps (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
-      - name: Build library
+      - name: Build library (release)
         shell: bash
-        run: cargo build --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+        run: cargo build --release --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
       - name: unittest (ABI conformance + GH #68/#69/#73 parity)
         shell: bash
         working-directory: bindings/python
