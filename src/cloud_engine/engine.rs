@@ -1298,14 +1298,14 @@ impl TtsEngine for CloudEngine {
     }
 
     /// Tristate credential check (GH #69). Engines with a `voices_url`
-    /// verify against the provider: 2xx → Verified; 401/403/407 →
+    /// verify against the provider: 2xx → Verified; 401/403 →
     /// Rejected (the service answered and refused *these credentials*);
     /// any other non-2xx and transport failures are `Err` — provider
-    /// outages (5xx), rate limits (429) and unreachable hosts must not
-    /// tell the user to "fix your key". Engines without an
-    /// authenticated endpoint report Unverified — including OpenAI-style
-    /// static catalogs where `get_voices()` succeeds with any (or no)
-    /// key.
+    /// outages (5xx), rate limits (429), proxy auth (407) and
+    /// unreachable hosts must not tell the user to "fix your key".
+    /// Engines without an authenticated endpoint report Unverified —
+    /// including OpenAI-style static catalogs where `get_voices()`
+    /// succeeds with any (or no) key.
     fn check_credentials_status(&self) -> TtsResult<CredentialCheck> {
         let Some(ref voices_url) = self.config.voices_url else {
             return Ok(CredentialCheck::Unverified);
@@ -1393,9 +1393,12 @@ impl TtsEngine for CloudEngine {
                         } else if code == 407 {
                             // Proxy auth: the provider never saw the
                             // credentials — a retry/config issue, not a
-                            // rejection.
+                            // rejection. NOTE: keep auth keywords
+                            // ("authentication"/"unauthorized") OUT of
+                            // this message — the FFI classifier would
+                            // otherwise map it to CredentialsRejected.
                             Err(TtsError(
-                                "credential check failed: proxy authentication required (407)"
+                                "credential check failed: proxy authorization required (HTTP 407)"
                                     .into(),
                             ))
                         } else {

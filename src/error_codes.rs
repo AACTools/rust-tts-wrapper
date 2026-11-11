@@ -159,7 +159,9 @@ pub fn classify_error_message(msg: &str) -> TtsErrorCode {
     // Authentication: explicit rejections by the provider. Bare digit
     // substrings are NOT matched ("loaded chunk 4012" is not an auth
     // failure) — the digits must appear as standalone tokens AND in an
-    // HTTP/auth context.
+    // HTTP/auth context. 407 (proxy auth) is deliberately absent: the
+    // provider never saw the credentials, so it is a retry/config
+    // issue, not a rejection.
     if m.contains("unauthorized")
         || m.contains("forbidden")
         || m.contains("invalid api key")
@@ -168,7 +170,7 @@ pub fn classify_error_message(msg: &str) -> TtsErrorCode {
         || m.contains("authentication")
         || m.contains("credentials rejected")
         || m.contains("incorrect api key")
-        || http_status_in(&m, &["401", "403", "407"])
+        || http_status_in(&m, &["401", "403"])
     {
         return TtsErrorCode::CredentialsRejected;
     }
@@ -316,7 +318,22 @@ fn redact_json_secret_values(s: &str) -> String {
         if SECRET_KEYS.contains(&key.to_lowercase().as_str()) && trimmed.starts_with(':') {
             let after_colon = trimmed[1..].trim_start();
             if let Some(value) = after_colon.strip_prefix('"') {
-                if let Some(end_rel) = value.find('"') {
+                // Find the value's closing quote, honouring backslash
+                // escapes ("a\"b" is one value, not two).
+                let mut end_rel = None;
+                let bytes = value.as_bytes();
+                let mut i = 0;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' => i += 2, // skip the escaped character
+                        b'"' => {
+                            end_rel = Some(i);
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                if let Some(end_rel) = end_rel {
                     if end_rel > 0 {
                         // `"key" : "value"` → keep the quoted key and
                         // the separator, redact the value. (The closing
@@ -662,6 +679,8 @@ mod tests {
             r#"sent {"apiKey":"supersecret123"}"#,
             r#"sent {"apiKey": "supersecret123", "model": "tts-1"}"#,
             r#"sent { "api-key" : "x" , "n": 5}"#,
+            // Escaped quotes inside the secret value.
+            r#"sent {"token":"a\"b"}"#,
         ] {
             let redacted = redact_message(input);
             let reparsed =
@@ -669,6 +688,18 @@ mod tests {
                     .unwrap_or_else(|e| panic!("redacted output not parseable: {redacted} ({e})"));
             assert!(reparsed.is_object(), "{redacted}");
         }
+    }
+
+    #[test]
+    fn classifier_proxy_auth_407_is_not_a_rejection() {
+        // The engine's 407 wording (chosen to avoid auth keywords) must
+        // classify as a retryable failure, never CredentialsRejected.
+        assert_ne!(
+            classify_error_message(
+                "credential check failed: proxy authorization required (HTTP 407)"
+            ),
+            TtsErrorCode::CredentialsRejected
+        );
     }
 
     #[test]

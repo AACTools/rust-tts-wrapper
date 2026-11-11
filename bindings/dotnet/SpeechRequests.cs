@@ -400,8 +400,15 @@ internal sealed class SpeechRequestScheduler : IDisposable
     /// <see cref="SpeechRequestStatus.Stopped"/>; queued requests never
     /// start and complete <see cref="SpeechRequestStatus.Cancelled"/>.
     /// </summary>
-    public void StopAll()
+    public void StopAll() => _ = StopAllCollecting();
+
+    /// <summary>StopAll that also returns the in-flight request's
+    /// completion task (for Dispose's drain — avoids the snapshot/
+    /// stop race where a request activates between snapshotting and
+    /// stopping).</summary>
+    private List<Task> StopAllCollecting()
     {
+        var stoppedInFlight = new List<Task>();
         Request? activeToStop;
         lock (_sync)
         {
@@ -416,6 +423,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
             if (_active is { State: SpeechRequestStatus.Speaking })
             {
                 _active.State = SpeechRequestStatus.Stopped;
+                stoppedInFlight.Add(_active.Tcs.Task);
             }
             _active = null;
         }
@@ -425,6 +433,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
         {
             _backend.Stop();
         }
+        return stoppedInFlight;
     }
 
     private void OnBoundary(string word, int charOffset, int charLen, float start, float end, bool estimated)
@@ -476,33 +485,34 @@ internal sealed class SpeechRequestScheduler : IDisposable
         ErrorException = r.ErrorException,
     };
 
+    /// <summary>
+    /// Stop everything and drain: the in-flight native speak unwinds
+    /// (bounded) before this returns, so owners can free the native
+    /// engine immediately after. Must NOT be called from a timing
+    /// callback (it runs on the speak thread — the drain would block
+    /// the only thread able to complete it for the full timeout).
+    /// </summary>
     public void Dispose()
     {
-        Task? activeTask;
         lock (_sync)
         {
             if (_disposed) return;
             _disposed = true;
-            activeTask = _active?.Tcs.Task;
         }
-        StopAll();
+        // StopAllCollecting captures the in-flight task(s) under the
+        // SAME lock that stops them — no snapshot/stop window.
+        var stoppedInFlight = StopAllCollecting();
         _backend.SetBoundaryHandler(null);
-        if (activeTask is not null)
+        foreach (var task in stoppedInFlight)
         {
-            // Drain: wait for the in-flight native speak to unwind after
-            // the stop request before returning — owners (e.g.
-            // RustTtsClient.Dispose → _inner.Dispose) free the native
-            // engine right after this, and the speak thread must be out
-            // of tts_speak first. Bounded so a wedged engine can't hang
-            // Dispose forever.
+            // Bounded so a wedged engine can't hang Dispose forever.
             try
             {
-                activeTask.Wait(TimeSpan.FromSeconds(10));
+                task.Wait(TimeSpan.FromSeconds(10));
             }
             catch (AggregateException)
             {
-                // TCS tasks complete with results, never fault; any
-                // observed aggregate is timeout-adjacent noise.
+                // TCS tasks complete with results, never fault.
             }
         }
         // NOTE: the gate is deliberately NOT disposed — an in-flight

@@ -221,7 +221,7 @@ fn engine_setups_json_is_parseable_and_covers_azure() {
 fn free_string_accepts_null() {
     // Bindings call tts_free_string(null) defensively; it must be a
     // safe no-op.
-    unsafe { tts_free_string(std::ptr::null_mut()) };
+    tts_free_string(std::ptr::null_mut());
 }
 
 // ---------------------------------------------------------------------------

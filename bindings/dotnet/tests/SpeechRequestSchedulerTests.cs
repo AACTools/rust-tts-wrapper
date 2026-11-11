@@ -72,6 +72,31 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
     public void Dispose() => _backend.Speaking.Dispose();
 
     [Fact]
+    public async Task Queue_Maintains_Order_Under_Multi_Request_Contention()
+    {
+        // Three requests through real gate contention (slow head);
+        // exercises the acquisition loop's machinery. The not-head
+        // re-wait branch is defensive against non-FIFO semaphore
+        // wakeups, which .NET does not exhibit deterministically — this
+        // test pins the ordering guarantee it protects.
+        using var scheduler = Scheduler;
+        _backend.SpeakMillis = 40;
+
+        var tasks = Enumerable.Range(0, 3)
+            .Select(i => scheduler.SubmitAsync($"r{i}", null, null, null, CancellationToken.None))
+            .ToList();
+
+        var results = await Task.WhenAll(tasks);
+        Assert.All(results, r => Assert.Equal(SpeechRequestStatus.Completed, r.Status));
+        lock (_backend.Spoken)
+        {
+            Assert.Equal(new[] { "r0", "r1", "r2" }, _backend.Spoken);
+        }
+        // Distinct request ids across all events/results.
+        Assert.Equal(3, results.Select(r => r.RequestId).Distinct().Count());
+    }
+
+    [Fact]
     public async Task Queue_Serializes_Requests_In_Order()
     {
         using var scheduler = Scheduler;

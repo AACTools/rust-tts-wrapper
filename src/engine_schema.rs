@@ -469,7 +469,10 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             vec![
                 SetupField::secret("apiKey", "API key").required(),
                 SetupField::text("modelId", "Model"),
-                SetupField::choice("region", "Region"),
+                SetupField::choice("region", "Region")
+                    .choices(&["qwencloud", "intl", "beijing"])
+                    .default("qwencloud")
+                    .help("Regional endpoint; wsUrl overrides"),
                 SetupField::text("instruction", "Instruction"),
                 SetupField::url("wsUrl", "WebSocket URL").default("wss://dashscope.aliyuncs.com"),
                 SetupField::url("customizationUrl", "Customization URL"),
@@ -481,7 +484,13 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             vec![
                 SetupField::secret("accessKeyId", "Access key id").required(),
                 SetupField::secret("secretAccessKey", "Secret access key").required(),
-                SetupField::choice("region", "Region").default("us-east-1"),
+                SetupField::choice("region", "Region")
+                    .choices(&[
+                        "us-east-1", "us-east-2", "us-west-1", "us-west-2", "eu-west-1",
+                        "eu-west-2", "eu-central-1", "ap-southeast-1", "ap-southeast-2",
+                        "ap-northeast-1", "ap-south-1", "ca-central-1", "sa-east-1",
+                    ])
+                    .default("us-east-1"),
             ],
             EngineCapabilityInfo::new(true, true, true, false, true, false, true, false),
         )),
