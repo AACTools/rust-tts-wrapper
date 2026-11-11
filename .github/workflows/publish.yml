@@ -39,7 +39,8 @@ jobs:
           name: version-sync
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        # Resilient against canonical-mirror DNS outages (see the script).
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Clippy (Linux features)
         run: cargo clippy --no-default-features --features system,cloud -- -D warnings
       - name: Test (Linux features)
@@ -323,7 +324,7 @@ jobs:
         run: cargo install cross --locked
       - name: Install native deps (Linux x86_64)
         if: matrix.target == 'x86_64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Download sherpa-onnx x86 prebuilt (32-bit Windows only)
         # sherpa-onnx-sys doesn't auto-detect win-x86, so download the
         # prebuilt static libs for the pinned crate version and point the
@@ -646,7 +647,7 @@ jobs:
     steps:
       - name: Install build deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake libopenblas-dev
+        run: scripts/ci/apt-install-resilient.sh cmake libopenblas-dev
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
         with:
