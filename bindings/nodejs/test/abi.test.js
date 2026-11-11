@@ -43,7 +43,14 @@ test("create / lifecycle / double close", () => {
 });
 
 test("create failure surfaces the global error", () => {
-  assert.throws(() => new TtsClient({ engineId: "no-such-engine" }), /tts_create/);
+  // GH #69: the failure carries the structured code; the message names
+  // the offending engine (was a generic "tts_create failed" wrapper).
+  try {
+    new TtsClient({ engineId: "no-such-engine" });
+    assert.fail("must throw");
+  } catch (err) {
+    assert.match(String(err.message), /no-such-engine/);
+  }
 });
 
 test("many clients live simultaneously", () => {
@@ -124,4 +131,83 @@ test("boundary / mark / viseme callback registration does not throw", () => {
 
 test("loadLibrary with explicit path rejects a bad path clearly", () => {
   assert.throws(() => loadLibrary("/nonexistent/lib.so"), /not found|Cannot open/);
+});
+
+// --- GH #68/#69 parity surface -------------------------------------------
+
+test("engine setups cover every listed engine", () => {
+  const setups = TtsClient.engineSetups();
+  const listed = new Set(TtsClient.listEngines().map((e) => e.id));
+  const schema = new Set(setups.map((s) => s.id));
+  assert.equal(listed.size, schema.size, "schema and engine list agree");
+  for (const id of listed) assert.ok(schema.has(id), `schema covers ${id}`);
+});
+
+test("azure setup renders key + region with typed kinds", () => {
+  const azure = TtsClient.engineSetup("azure");
+  assert.ok(azure, "azure compiled in under cloud");
+  const key = azure.fields.find((f) => f.key === "subscriptionKey");
+  assert.equal(key.kind, "secret");
+  assert.equal(key.required, true);
+  const region = azure.fields.find((f) => f.key === "region");
+  assert.equal(region.kind, "choice");
+  assert.ok(region.choices.length > 0);
+  assert.equal(azure.capabilities.supportsStreaming, true);
+});
+
+test("google either/or group is exposed", () => {
+  const google = TtsClient.engineSetup("google");
+  assert.ok(google, "google compiled in");
+  const group = google.requiredAny.find((g) => g.includes("apiKey") && g.includes("keyFilePath"));
+  assert.ok(group, "apiKey OR keyFilePath group present");
+});
+
+test("create failure throws TtsError with EngineNotAvailable", () => {
+  try {
+    new TtsClient({ engineId: "definitely-not-an-engine" });
+    assert.fail("must throw");
+  } catch (err) {
+    assert.equal(err.name, "TtsError");
+    assert.equal(err.code, 7); // EngineNotAvailable
+    assert.equal(err.codeName, "EngineNotAvailable"); // GH #73 review: mapped from native "name"
+    assert.match(String(err.message), /definitely-not-an-engine/);
+    assert.ok(err.displayMessage, "display hint present");
+  }
+});
+
+test("missing configuration carries the field key (checkCredentials)", () => {
+  const c = new TtsClient({ engineId: "azure", credentials: {} });
+  const result = c.checkCredentials();
+  assert.equal(result.status, "error");
+  assert.equal(result.error.code, 1); // MissingConfiguration
+  assert.equal(result.error.fieldKey, "subscriptionKey");
+  assert.equal(result.error.engineId, "azure");
+  c.close();
+});
+
+test("static catalog checks answer unverified (deterministic offline)", () => {
+  const c = makeClient(); // openai
+  assert.deepEqual(c.checkCredentials(), { status: "unverified" });
+  c.close();
+});
+
+test("synthesis failure yields a stable code and redacted detail", () => {
+  const c = new TtsClient({
+    engineId: "openai",
+    credentials: {
+      apiKey: "sk-abcdef1234567890abcdef",
+      synthUrl: "http://127.0.0.1:1/v1/audio/speech", // closed port: deterministic
+    },
+  });
+  try {
+    c.synthToBytes("probe");
+    assert.fail("must throw");
+  } catch (err) {
+    assert.equal(err.name, "TtsError");
+    assert.equal(err.code, 4); // NetworkError
+    assert.ok(!String(err.message).includes("abcdef1234567890"), "secret redacted");
+  }
+  assert.equal(c.lastErrorCode(), 4);
+  assert.ok(c.lastErrorDetail(), "detail readable after the failure");
+  c.close();
 });

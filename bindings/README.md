@@ -66,7 +66,7 @@ the device + simulator staticlibs with the C header; drag them into Xcode.
 | [`swift/`](swift/) | SwiftPM `RustTtsWrapper` | link-time (`TTS_WRAPPER_LIB_DIR`), module `CRustTtsWrapper` | `swift test` (XCTest) |
 | [`nodejs/`](nodejs/) | `@aactools/tts-wrapper` (npm) | koffi dlopen (`TTS_WRAPPER_LIB` or search path) | `npm test` (node:test) |
 
-All five suites assert the **same contract** (engine enumeration, lifecycle,
+All six suites assert the **same contract** (engine enumeration, lifecycle,
 setters, callback registration, deterministic failure with a dummy cloud
 key), so a regression in the ABI trips every suite, and the C harness
 additionally verifies the header compiles as clean C11.

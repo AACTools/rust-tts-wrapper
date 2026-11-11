@@ -48,3 +48,37 @@ let azure = try TtsClient(engineId: "azure",
 Credentials are `[String: String]` dictionaries serialised to the JSON
 the Rust factory parses (canonical keys — see the
 [engines doc](engines.md)).
+
+## Raw SSML, errors, credentials and the setup schema (GH #68/#69/#73)
+
+```swift
+// Raw SSML (prosody wrapping bypassed; no-SSML engines get their
+// model-matched dialect):
+try client.speakSsml("<speak version=\"1.0\" xml:lang=\"en-US\">…</speak>")
+
+// Structured errors: TtsError carries the stable code, the offending
+// field key and a display-ready hint (messages secret-redacted).
+do {
+    _ = try client.synthToBytes("hello")
+} catch let e as TtsError {
+    e.code            // TtsErrorCode.networkError.rawValue
+    e.fieldKey        // "subscriptionKey" for missing-config failures
+    e.displayMessage  // safe hint
+}
+client.getLastErrorCode()    // TtsErrorCode after any failure
+client.getLastErrorDetail()  // TtsErrorDetail?
+
+// Tri-state credential check: static catalogs answer .unverified.
+switch client.checkCredentials() {
+case .verified: break
+case .rejected: break
+case .unverified: break
+case .checkFailed(let detail): break   // e.g. MissingConfiguration + fieldKey
+}
+
+// Typed engine setup schema — render settings UIs without a provider
+// switch (kinds: secret / filePath / directoryPath / url / choice /
+// number / text; either/or groups; capabilities).
+let setups = try TtsClient.engineSetups()
+let azure = try TtsClient.engineSetup("azure")
+```

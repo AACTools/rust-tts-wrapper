@@ -28,7 +28,8 @@ with TTSClient("azure", {"subscriptionKey": os.environ["AZURE_KEY"], "region": "
 
     # Streaming audio + word boundaries
     client.on_audio(lambda chunk: print(f"got {len(chunk)} bytes", file=sys.stderr))
-    client.on_boundary(lambda word, start, end: print(f"[{start:.2f}-{end:.2f}] {word}"))
+    client.on_boundary(lambda w, off, ln, s, e, est:
+                        print(f'[{s:.2f}-{e:.2f}] {w}{chr(126) if est else chr(32)}'))
     client.speak_sync("The quick brown fox.")
 ```
 

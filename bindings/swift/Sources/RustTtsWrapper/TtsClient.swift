@@ -48,11 +48,129 @@ public struct TtsEngineInfo: Sendable, Hashable {
 }
 
 /// Error surfaced by the Rust backend. The message comes from
-/// `tts_get_last_error` on the owning context.
+/// `tts_get_last_error` on the owning context; when the native build
+/// provides structured detail (GH #69) the stable `code`, `fieldKey`,
+/// `engineId` and `displayMessage` are populated too.
 public struct TtsError: Error, CustomStringConvertible {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    /// Stable classification (`TtsErrorCode.rawValue`, 0 = unknown).
+    public let code: UInt32
+    public let fieldKey: String
+    public let engineId: String
+    /// Safe, display-ready hint (nil when unavailable).
+    public let displayMessage: String?
+
+    public init(_ message: String, detail: TtsErrorDetail? = nil) {
+        self.message = detail?.message.isEmpty == false ? detail!.message : message
+        self.code = detail?.code ?? 0
+        self.fieldKey = detail?.fieldKey ?? ""
+        self.engineId = detail?.engineId ?? ""
+        self.displayMessage = detail?.displayMessage.isEmpty == false ? detail!.displayMessage : nil
+    }
+
+    public init(_ message: String) {
+        self.init(message, detail: nil)
+    }
+
     public var description: String { message }
+}
+
+/// Stable error codes (GH #69) — append-only u32 from the C ABI.
+public enum TtsErrorCode: UInt32, Sendable {
+    case unknown = 0
+    case missingConfiguration = 1
+    case invalidConfiguration = 2
+    case credentialsRejected = 3
+    case networkError = 4
+    case modelNotFound = 5
+    case missingNativeDependency = 6
+    case engineNotAvailable = 7
+    case languageNotSupported = 8
+    case engineFailure = 9
+
+    /// Tolerant mapping: unknown values (newer native builds) degrade
+    /// to `.unknown` instead of failing.
+    public static func from(_ raw: UInt32) -> TtsErrorCode {
+        TtsErrorCode(rawValue: raw) ?? .unknown
+    }
+}
+
+/// Structured error detail (GH #69): the message is secret-redacted.
+public struct TtsErrorDetail: Sendable, Hashable {
+    public let code: UInt32
+    public let codeName: String
+    public let message: String
+    public let displayMessage: String
+    public let engineId: String
+    public let fieldKey: String
+}
+
+/// Tri-state credential check outcome (GH #69): static catalogs answer
+/// `unverified` — enumerating them proves nothing about the key.
+public enum CredentialStatus: String, Sendable {
+    case verified
+    case rejected
+    case unverified
+}
+
+/// Result of `TtsClient.checkCredentials()`.
+public enum CredentialCheckResult: Sendable {
+    case verified
+    case rejected
+    case unverified
+    /// The check itself failed (missing field, unreachable provider) —
+    /// carries the structured detail.
+    case checkFailed(TtsErrorDetail)
+}
+
+/// Control kind for a setup field (GH #68). Unknown kinds from newer
+/// native builds decode as `.text`.
+public enum TtsSetupFieldKind: String, Sendable {
+    case secret
+    case filePath
+    case directoryPath
+    case url
+    case choice
+    case number
+    case text
+}
+
+/// One typed setup/credential field (GH #68).
+public struct TtsSetupField: Sendable, Hashable {
+    public let key: String
+    public let label: String
+    public let kind: TtsSetupFieldKind
+    public let required: Bool
+    public let defaultValue: String?
+    public let choices: [String]
+    public let placeholder: String?
+    public let helpText: String?
+}
+
+/// Engine capability flags (GH #68).
+public struct TtsEngineCapabilities: Sendable, Hashable {
+    public let supportsRate: Bool
+    public let supportsPitch: Bool
+    public let supportsVolume: Bool
+    public let supportsWordTiming: Bool
+    public let supportsSsml: Bool
+    public let supportsStreaming: Bool
+    public let requiresInternet: Bool
+    /// Voice enumeration succeeds without authentication — listing
+    /// alone is not credential validation.
+    public let staticVoiceCatalog: Bool
+    public let notes: String?
+}
+
+/// Full setup schema for one engine (GH #68).
+public struct TtsEngineSetup: Sendable, Hashable {
+    public let id: String
+    public let name: String
+    public let needsCredentials: Bool
+    public let fields: [TtsSetupField]
+    public let capabilities: TtsEngineCapabilities
+    /// Either/or groups: at least one field in each group is required.
+    public let requiredAny: [[String]]
 }
 
 /// Strongly-typed closure aliases.
@@ -98,7 +216,11 @@ public final class TtsClient: @unchecked Sendable {
             }
         }
         if ctx == nil {
-            throw TtsError("Failed to create engine '\(engineId)': \(Self.getGlobalLastError() ?? "unknown")")
+            // GH #69: carry the structured create-time detail when the
+            // native build provides it.
+            let detail = Self.getGlobalLastErrorDetail()
+            let fallback = "Failed to create engine '\(engineId)': \(Self.getGlobalLastError() ?? "unknown")"
+            throw TtsError(fallback, detail: detail)
         }
     }
 
@@ -115,14 +237,23 @@ public final class TtsClient: @unchecked Sendable {
     public func speak(_ text: String) throws {
         guard let ctx else { throw TtsError("client closed") }
         let rc = text.withCString { tts_speak(ctx, $0) }
-        if rc != 0 { throw TtsError(getLastError() ?? "speak failed") }
+        if rc != 0 { throw structuredError("speak failed") }
+    }
+
+    /// Speak pre-built SSML (GH #73). Prosody wrapping is bypassed —
+    /// callers embed rate/pitch/volume themselves; engines that parse
+    /// no SSML get it translated to their model-matched dialect.
+    public func speakSsml(_ ssml: String) throws {
+        guard let ctx else { throw TtsError("client closed") }
+        let rc = ssml.withCString { tts_speak_ssml(ctx, $0) }
+        if rc != 0 { throw structuredError("speak_ssml failed") }
     }
 
     /// Speak synchronously (block until done).
     public func speakSync(_ text: String) throws {
         guard let ctx else { throw TtsError("client closed") }
         let rc = text.withCString { tts_speak_sync(ctx, $0) }
-        if rc != 0 { throw TtsError(getLastError() ?? "speak_sync failed") }
+        if rc != 0 { throw structuredError("speak_sync failed") }
     }
 
     /// Synthesise to a byte buffer.
@@ -133,7 +264,7 @@ public final class TtsClient: @unchecked Sendable {
         let rc = text.withCString { textPtr in
             tts_synth_to_bytes(ctx, textPtr, &bufPtr, &length)
         }
-        if rc != 0 { throw TtsError(getLastError() ?? "synth_to_bytes failed") }
+        if rc != 0 { throw structuredError("synth_to_bytes failed") }
         guard let buf = bufPtr, length > 0 else { return Data() }
         defer { tts_free_bytes(buf, length) }
         return Data(bytes: buf, count: Int(length))
@@ -344,7 +475,7 @@ public final class TtsClient: @unchecked Sendable {
         var arr: UnsafeMutablePointer<TtsVoiceC>?
         var count: Int32 = 0
         let rc = tts_get_voices(ctx, &arr, &count)
-        if rc != 0 { throw TtsError(getLastError() ?? "get_voices failed") }
+        if rc != 0 { throw structuredError("get_voices failed") }
         guard let arr, count > 0 else { return [] }
         defer { tts_free_voices(arr, count) }
 
@@ -404,14 +535,142 @@ public final class TtsClient: @unchecked Sendable {
         return String(cString: ptr)
     }
 
+    /// Stable classification of the last error (`.unknown` = none, GH #69).
+    public func getLastErrorCode() -> TtsErrorCode {
+        guard let ctx else { return .unknown }
+        return TtsErrorCode.from(tts_get_last_error_code(ctx))
+    }
+
+    /// Structured detail of the last error, or `nil` (GH #69). The
+    /// message is secret-redacted; `fieldKey` names the offending
+    /// settings row.
+    public func getLastErrorDetail() -> TtsErrorDetail? {
+        guard let ctx else { return nil }
+        guard let ptr = tts_get_last_error_detail_json(ctx) else { return nil }
+        defer { tts_free_string(ptr) }
+        return Self.decodeDetail(String(cString: ptr))
+    }
+
+    /// Tri-state credential check (GH #69). Static catalogs answer
+    /// `.unverified` — enumerating them proves nothing about the key.
+    public func checkCredentials() -> CredentialCheckResult {
+        guard let ctx else { return .checkFailed(TtsErrorDetail(
+            code: 0, codeName: "Unknown", message: "client closed",
+            displayMessage: "", engineId: "", fieldKey: "")) }
+        switch tts_check_credentials(ctx) {
+        case 1: return .verified
+        case 0: return .rejected
+        case 2: return .unverified
+        default: return .checkFailed(
+            getLastErrorDetail()
+                ?? TtsErrorDetail(code: 0, codeName: "Unknown", message: getLastError() ?? "",
+                                  displayMessage: "", engineId: "", fieldKey: ""))
+        }
+    }
+
     /// Global last error (used when no context exists, e.g. `tts_create`).
     public static func getGlobalLastError() -> String? {
         guard let ptr = tts_get_last_error(nil) else { return nil }
         return String(cString: ptr)
     }
 
+    /// Stable code of the global (create-time) error (GH #69).
+    public static func getGlobalLastErrorCode() -> TtsErrorCode {
+        TtsErrorCode.from(tts_get_last_error_code(nil))
+    }
+
+    /// Structured detail of the global error, or `nil` (GH #69).
+    public static func getGlobalLastErrorDetail() -> TtsErrorDetail? {
+        guard let ptr = tts_get_last_error_detail_json(nil) else { return nil }
+        defer { tts_free_string(ptr) }
+        return decodeDetail(String(cString: ptr))
+    }
+
+    // --- engine setup schema (GH #68) -----------------------------------
+
+    /// Typed setup schema for every engine compiled into this build:
+    /// fields with kinds (secret / filePath / directoryPath / url /
+    /// choice / number / text) plus capability flags, so a settings UI
+    /// renders engine rows without a provider switch. Unknown kinds
+    /// from newer native builds degrade to `.text`.
+    public static func engineSetups() throws -> [TtsEngineSetup] {
+        guard let ptr = tts_get_engine_setups_json() else {
+            throw TtsError("tts_get_engine_setups_json returned null")
+        }
+        defer { tts_free_string(ptr) }
+        let json = String(cString: ptr)
+        guard let data = json.data(using: .utf8),
+              let arr = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            throw TtsError("engine setup JSON failed to parse")
+        }
+        return arr.compactMap(Self.decodeSetup)
+    }
+
+    /// The setup schema for one engine id, or `nil` when unknown.
+    public static func engineSetup(_ engineId: String) throws -> TtsEngineSetup? {
+        try engineSetups().first { $0.id == engineId }
+    }
+
     // --- private helpers ----------------------------------------------
 
+    /// Build a `TtsError` carrying the structured detail (GH #69).
+    private func structuredError(_ fallback: String) -> TtsError {
+        TtsError(getLastError() ?? fallback, detail: getLastErrorDetail())
+    }
+
+    /// Decode the detail JSON defensively (nil on malformed input).
+    private static func decodeDetail(_ json: String) -> TtsErrorDetail? {
+        guard let data = json.data(using: .utf8),
+              let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return TtsErrorDetail(
+            code: (d["code"] as? NSNumber)?.uint32Value ?? 0,
+            codeName: d["name"] as? String ?? "Unknown",
+            message: d["message"] as? String ?? "",
+            displayMessage: d["displayMessage"] as? String ?? "",
+            engineId: d["engineId"] as? String ?? "",
+            fieldKey: d["fieldKey"] as? String ?? ""
+        )
+    }
+
+    /// Decode one engine-setup object tolerantly (unknown kinds → text,
+    /// missing properties → defaults).
+    private static func decodeSetup(_ s: [String: Any]) -> TtsEngineSetup? {
+        guard let id = s["id"] as? String else { return nil }
+        let caps = s["capabilities"] as? [String: Any] ?? [:]
+        let fields = (s["fields"] as? [[String: Any]] ?? []).map { f -> TtsSetupField in
+            TtsSetupField(
+                key: f["key"] as? String ?? "",
+                label: f["label"] as? String ?? "",
+                kind: TtsSetupFieldKind(rawValue: f["kind"] as? String ?? "") ?? .text,
+                required: f["required"] as? Bool ?? false,
+                defaultValue: f["defaultValue"] as? String,
+                choices: (f["choices"] as? [String]) ?? [],
+                placeholder: f["placeholder"] as? String,
+                helpText: f["helpText"] as? String
+            )
+        }
+        let requiredAny = (s["requiredAny"] as? [[String]]) ?? []
+        return TtsEngineSetup(
+            id: id,
+            name: s["name"] as? String ?? "",
+            needsCredentials: s["needsCredentials"] as? Bool ?? false,
+            fields: fields,
+            capabilities: TtsEngineCapabilities(
+                supportsRate: caps["supportsRate"] as? Bool ?? false,
+                supportsPitch: caps["supportsPitch"] as? Bool ?? false,
+                supportsVolume: caps["supportsVolume"] as? Bool ?? false,
+                supportsWordTiming: caps["supportsWordTiming"] as? Bool ?? false,
+                supportsSsml: caps["supportsSsml"] as? Bool ?? false,
+                supportsStreaming: caps["supportsStreaming"] as? Bool ?? false,
+                requiresInternet: caps["requiresInternet"] as? Bool ?? false,
+                staticVoiceCatalog: caps["staticVoiceCatalog"] as? Bool ?? false,
+                notes: caps["notes"] as? String
+            ),
+            requiredAny: requiredAny
+        )
+    }
 
 }
 

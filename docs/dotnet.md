@@ -40,6 +40,10 @@ client.SetOnBoundary((word, offset, len, start, end, estimated) =>
     Console.WriteLine($"{word}: {start:F3}-{end:F3} {(estimated ? "estimated" : "measured")}"));
 client.SetVoice("alloy");
 client.SpeakSync("Hello world");
+
+// Raw SSML (GH #73): prosody wrapping bypassed; no-SSML engines get
+// their model-matched dialect.
+client.SpeakSsml("<speak version=\"1.0\" xml:lang=\"en-US\">…</speak>");
 ```
 
 ## Drop-in AbstractTtsClient replacement

@@ -116,12 +116,32 @@ public sealed class BindingsExtrasTests : IDisposable
     }
 
     [Fact]
+    public void SpeakSsml_Fails_Fast_With_Stable_Code()
+    {
+        // GH #73: tts_speak_ssml was the one ABI symbol .NET never
+        // exposed. Raw SSML through the closed-port engine fails with
+        // the structured NetworkError (rate/pitch wrapping bypassed).
+        using var unreachable = new TtsClient("openai", new()
+        {
+            ["apiKey"] = "sk-dummy",
+            ["synthUrl"] = "http://127.0.0.1:1/v1/audio/speech",
+        });
+
+        var ex = Assert.Throws<TtsException>(() =>
+            unreachable.SpeakSsml("<speak version=\"1.0\" xml:lang=\"en-US\"><voice name=\"alloy\">Hello</voice></speak>"));
+        Assert.Equal(TtsErrorCode.NetworkError, ex.ErrorCode);
+    }
+
+    [Fact]
     public void Create_Failure_Throws_Structured_Exception()
     {
         var ex = Assert.Throws<TtsException>(() =>
             new TtsClient("definitely-not-an-engine"));
         Assert.Equal(TtsErrorCode.EngineNotAvailable, ex.ErrorCode);
         Assert.NotNull(ex.DisplayMessage);
+        var detail = TtsClient.GetGlobalLastErrorDetail();
+        Assert.NotNull(detail);
+        Assert.Equal("EngineNotAvailable", detail!.CodeName);
     }
 
     // ── GH #70: cancellable discovery + request-scoped speech ──────
