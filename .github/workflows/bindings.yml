@@ -31,7 +31,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: ABI conformance suites
         run: cargo test --no-default-features --features ${{ matrix.features }} --test ffi_conformance --test ffi_lifecycle --test ffi_safety
 
@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install native deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build + compile header with -Wall -Wextra -Werror + run
         run: make -C bindings/c test FEATURES=${{ runner.os == 'macOS' && 'avsynth,cloud' || 'system,cloud' }}
 
@@ -66,7 +66,7 @@ jobs:
           node-version: 22
       - name: Install native deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build library
         shell: bash
         run: cargo build --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
@@ -92,7 +92,7 @@ jobs:
           python-version: "3.12"
       - name: Install native deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build library (release)
         shell: bash
         run: cargo build --release --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
@@ -124,7 +124,7 @@ jobs:
           dotnet-version: "9.0.x"
       - name: Install native deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build library (release)
         shell: bash
         run: cargo build --release --no-default-features --features ${{ runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}

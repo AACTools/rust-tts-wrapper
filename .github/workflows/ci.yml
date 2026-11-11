@@ -15,7 +15,7 @@ jobs:
         with:
           components: clippy, rustfmt
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+        run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -87,7 +87,7 @@ jobs:
       - name: Build runtime library
         if: matrix.repo != 'none'
         run: |
-          sudo apt-get update && sudo apt-get install -y cmake libopenblas-dev
+          scripts/ci/apt-install-resilient.sh cmake libopenblas-dev
           git clone --depth 1 --recurse-submodules https://github.com/${{ matrix.repo }} ~/engine
           cd ~/engine
           # qwen3-tts.cpp expects ggml pre-built in ggml/build/ (it links

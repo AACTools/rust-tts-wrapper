@@ -21,7 +21,7 @@ jobs:
         components: rustfmt, clippy
 
     - name: Install system dependencies
-      run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
 
     - name: Run rustfmt check
       run: cargo fmt --all -- --check

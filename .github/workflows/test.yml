@@ -27,7 +27,7 @@ jobs:
 
     - name: Install Linux system dependencies
       if: matrix.os == 'ubuntu-latest'
-      run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
 
     - name: Select feature set per platform
       # `sapi` only builds on Windows; `avsynth` only on macOS; sherpa-onnx
@@ -62,7 +62,7 @@ jobs:
         toolchain: stable
 
     - name: Install Linux system dependencies
-      run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
 
     - name: Install tarpaulin
       run: cargo install cargo-tarpaulin
