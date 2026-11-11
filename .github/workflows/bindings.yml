@@ -108,6 +108,31 @@ jobs:
         working-directory: bindings/dotnet
         run: dotnet test tests/RustTtsWrapper.Bindings.Tests.csproj -p:SkipNativeLibCheck=true
 
+  # GH #71: prove the released NuGet package powers a clean Avalonia
+  # win-x64 publish — packaged native library, no manual DLL copy —
+  # and that the published app can enumerate/preview a SAPI voice.
+  dotnet-example:
+    name: .NET Avalonia example (NuGet, win-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Publish from the released NuGet package
+        working-directory: examples/dotnet/avalonia-nuget
+        run: dotnet publish -c Release -r win-x64 --self-contained false -o publish
+      - name: Packaged native library resolved (no manual DLL copy)
+        working-directory: examples/dotnet/avalonia-nuget
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse -Filter rust_tts_wrapper.dll publish | Select-Object -First 1
+          if (-not $dll) { throw "rust_tts_wrapper.dll missing from publish output" }
+          Write-Host "native library at $($dll.FullName)"
+      - name: Headless smoke (engine enumeration + SAPI voice discovery)
+        working-directory: examples/dotnet/avalonia-nuget
+        run: dotnet publish/AvaloniaNuGetDemo.dll --headless --engine sapi
+
   swift:
     name: Swift (macOS)
     runs-on: macos-latest

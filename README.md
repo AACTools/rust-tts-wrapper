@@ -484,7 +484,22 @@ client.SetOnBoundary((word, offset, len, start, end, estimated) =>
     Console.WriteLine($"{word}: {start:F3}-{end:F3} {(estimated ? "estimated" : "measured")}"));
 client.SetVoice("alloy");
 client.SpeakSync("Hello world");
+
+// Typed engine setup schema: render credential rows without a provider
+// switch (GH #68) — secret / file / directory / URL / choice / number.
+foreach (var field in TtsClient.GetEngineSetup("azure")!.Fields) { /* … */ }
+
+// Tri-state credential check: static catalogs answer Unverified (GH #69).
+var check = client.CheckCredentials(); // 1=Verified 0=Rejected 2=Unverified
 ```
+
+The `RustTtsClient` adapter (drop-in `AbstractTtsClient` replacement)
+adds cancellable voice discovery, request-scoped speech with
+queue/replace semantics and request ids, structured errors with stable
+codes + field keys, and schema-driven capabilities — see
+[bindings/dotnet/README.md](bindings/dotnet/README.md) and the runnable
+[Avalonia example](examples/dotnet/avalonia-nuget) (GH #71) for the
+`AbstractTtsClient` migration guide.
 
 **NuGet contents per RID**: `win-x64` and `win-x86` bundle one DLL with
 `sapi` + `cloud` + `sherpaonnx` (the sherpa builds carry lexicon/G2P

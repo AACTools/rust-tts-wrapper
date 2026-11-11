@@ -1,0 +1,9 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="AvaloniaNuGetDemo.App"
+             RequestedThemeVariant="Default">
+    <!-- "Default" ThemeVariant follows the System ThemeVariant, you can change this manually to "Dark" or "Light". -->
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
+</Application>

@@ -232,8 +232,8 @@ impl OmniVoiceLocalEngine {
             || self.params.language.clone(),
             std::string::ToString::to_string,
         );
-        let lang_c =
-            CString::new(lang_str).map_err(|_| OmniVoiceError("lang contains null byte".into()))?;
+        let lang_c = CString::new(lang_str.clone())
+            .map_err(|_| OmniVoiceError("lang contains null byte".into()))?;
         // Per-call instruct (from accent) overrides params.instruct;
         // an explicit params.instruct always wins over a derived accent.
         let effective_instruct = instruct_override
@@ -291,18 +291,55 @@ impl OmniVoiceLocalEngine {
         let status = unsafe { ov_synthesize(self.ctx, &raw const params, &raw mut audio) };
         if status != OV_STATUS_OK {
             let detail = Self::last_error();
+            // GH #64: a language the runtime rejects must not silence
+            // the whole utterance — fall back to auto-detection and
+            // warn. A wrong-language voice beats a silent no-speak for
+            // AAC users. (Single retry; auto-detect cannot itself fail
+            // with "unknown language".)
+            if !lang_str.is_empty() && detail.to_lowercase().contains("unknown language") {
+                eprintln!(
+                    "omnivoice-local: runtime rejected language '{lang_str}' \
+                     ({detail}); retrying with auto-detection (GH #64)"
+                );
+                unsafe {
+                    params.lang = std::ptr::null();
+                }
+                let retry_status =
+                    unsafe { ov_synthesize(self.ctx, &raw const params, &raw mut audio) };
+                if retry_status == OV_STATUS_OK {
+                    return Self::take_audio(audio);
+                }
+                let retry_detail = Self::last_error();
+                return Err(OmniVoiceError(format!(
+                    "ov_synthesize failed after language fallback (status {retry_status}): {retry_detail}"
+                )));
+            }
             return Err(OmniVoiceError(format!(
                 "ov_synthesize failed (status {status}): {detail}"
             )));
         }
 
+        Self::take_audio(audio)
+    }
+}
+
+impl OmniVoiceLocalEngine {
+    /// Copy out the synthesised samples and free the runtime buffer.
+    ///
+    /// # Errors
+    /// When the runtime produced no samples.
+    fn take_audio(mut audio: ov_audio) -> Result<Vec<f32>, OmniVoiceError> {
         let n = audio.n_samples as usize;
         if n == 0 || audio.samples.is_null() {
+            // SAFETY: audio is an owned out-param; freeing a zeroed
+            // buffer is a no-op in the runtime but keeps ownership clear.
             unsafe { ov_audio_free(&raw mut audio) };
             return Err(OmniVoiceError("empty audio output".into()));
         }
 
+        // SAFETY: samples points to n f32 values owned by the runtime.
         let samples = unsafe { std::slice::from_raw_parts(audio.samples, n) }.to_vec();
+        // SAFETY: audio is an owned out-param we have not freed yet.
         unsafe { ov_audio_free(&raw mut audio) };
         Ok(samples)
     }
@@ -422,6 +459,12 @@ impl TtsEngine for OmniVoiceLocalEngine {
         "omnivoice-local"
     }
 
+    /// Model + codec paths were validated by `ov_init` at construction
+    /// (GH #69): if the engine exists, the setup works — Verified.
+    fn check_credentials_status(&self) -> crate::types::TtsResult<crate::engine::CredentialCheck> {
+        Ok(crate::engine::CredentialCheck::Verified)
+    }
+
     fn stop(&self) -> TtsResult<()> {
         self.cancel_requested.store(true, Ordering::Relaxed);
         Ok(())
@@ -514,6 +557,52 @@ mod tests {
             (fast - normal / 2.0).abs() < 0.01,
             "fast {fast} vs {normal}"
         );
+    }
+}
+
+#[cfg(test)]
+mod gh64_language_fallback {
+    use super::*;
+    use crate::omnivoice_local_support::omnivoice_runtime_languages;
+
+    fn engine_with_language(lang: &str) -> TtsResult<OmniVoiceLocalEngine> {
+        OmniVoiceLocalEngine::new(OmniVoiceLocalParams {
+            model_path: "/dev/null".into(),
+            codec_path: "/dev/null".into(),
+            language: lang.into(),
+            ..Default::default()
+        })
+    }
+
+    /// GH #64: a language outside the runtime's accepted set must
+    /// fall back to auto-detection instead of failing the
+    /// utterance. ("ar" is unknown to the dev-stub runtime — the
+    /// same probe as the issue.)
+    #[test]
+    fn rejected_language_falls_back_to_auto_detect() {
+        let table = omnivoice_runtime_languages();
+        let unknown: Vec<&str> = vec!["ar", "xx"];
+        let probe = unknown
+            .into_iter()
+            .find(|l| !table.iter().any(|(id, _)| id == l))
+            .expect("stub runtime must exclude at least one probe language");
+        let engine = engine_with_language(probe).expect("engine constructs");
+        let result = engine.speak("hello", None, 1.0, 1.0, 1.0, None, None, None);
+        // The fallback makes the utterance succeed (wrong-language
+        // audio beats a silent no-speak for AAC users).
+        assert!(
+            result.is_ok(),
+            "auto-detect fallback must rescue an unknown language: {result:?}"
+        );
+    }
+
+    /// Accepted languages synthesize without the fallback path.
+    #[test]
+    fn accepted_language_synthesizes_directly() {
+        let engine = engine_with_language("en").expect("engine constructs");
+        assert!(engine
+            .speak("hello", None, 1.0, 1.0, 1.0, None, None, None)
+            .is_ok());
     }
 }
 

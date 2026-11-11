@@ -55,6 +55,26 @@ impl CloudEngine {
             .or_else(|| credentials.get("token"))
             .cloned()
             .unwrap_or_default();
+        // Google migration path (GH #68/#69): DotNetTtsWrapper's
+        // GoogleCredentials carries KeyFilePath. When no key is set
+        // directly, read the API key from the file's first non-empty
+        // line so a settings screen can offer a file picker.
+        let api_key = if api_key.is_empty() {
+            credentials
+                .get("keyFilePath")
+                .filter(|p| !p.is_empty())
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|content| {
+                    content
+                        .lines()
+                        .map(str::trim)
+                        .find(|l| !l.is_empty())
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or(api_key)
+        } else {
+            api_key
+        };
         Some(CloudEngine {
             config,
             api_key,
@@ -1245,6 +1265,32 @@ impl TtsEngine for CloudEngine {
         match req.send() {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
+        }
+    }
+
+    /// Tristate credential check (GH #69). Engines with a `voices_url`
+    /// verify against the provider: 2xx → Verified, any other response
+    /// → Rejected (the service answered and said no). A transport error
+    /// is `Err` — the credentials are *unknown*, not invalid; callers
+    /// should offer a retry, not a "fix your key" message. Engines
+    /// without an authenticated endpoint report Unverified — including
+    /// OpenAI-style static catalogs where `get_voices()` succeeds with
+    /// any (or no) key.
+    fn check_credentials_status(&self) -> TtsResult<CredentialCheck> {
+        let Some(ref voices_url) = self.config.voices_url else {
+            return Ok(CredentialCheck::Unverified);
+        };
+        let mut req = self.client.get(voices_url.as_str());
+        if self.config.provider_id == "polly" {
+            req = self.sigv4_request(req, "GET", voices_url, None, &[]);
+        } else if !self.config.auth_header.is_empty() {
+            let val = format!("{}{}", self.config.auth_prefix, self.api_key);
+            req = req.header(&self.config.auth_header, val);
+        }
+        match req.send() {
+            Ok(resp) if resp.status().is_success() => Ok(CredentialCheck::Verified),
+            Ok(_) => Ok(CredentialCheck::Rejected),
+            Err(e) => Err(TtsError(format!("credential check network failure: {e}"))),
         }
     }
 

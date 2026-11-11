@@ -36,12 +36,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}\n", description);
 
         match create_engine(engine_id, "") {
-            Some(engine) => {
+            Ok(engine) => {
                 if let Err(e) = demonstrate_word_boundaries(&*engine, test_text) {
                     println!("❌ {} failed: {}\n", engine_id, e);
                 }
             }
-            None => {
+            Err(e) => {
+                eprintln!("engine {engine_id}: {e}");
                 println!("⚠️  {} engine not available\n", engine_id);
             }
         }
@@ -59,7 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_key, region
         );
 
-        if let Some(azure_engine) = create_engine("azure", &credentials) {
+        if let Ok(azure_engine) = create_engine("azure", &credentials) {
             println!("🎵 Testing Azure with real word boundary timing...\n");
             if let Err(e) = demonstrate_word_boundaries(&*azure_engine, test_text) {
                 println!("❌ Azure failed: {}\n", e);

@@ -10,7 +10,9 @@
 #[cfg(feature = "cloud")]
 use crate::boundaries::{EstimateFirer, EstimatePlan};
 #[cfg(feature = "cloud")]
-use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
+use crate::engine::{
+    estimate_word_boundaries, preprocess_speech_markdown, CredentialCheck, TtsEngine,
+};
 #[cfg(feature = "cloud")]
 use crate::types::{
     normalize_gender, Gender, LanguageCode, TtsError, TtsResult, Voice, WordBoundary,

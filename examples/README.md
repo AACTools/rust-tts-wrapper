@@ -4,6 +4,16 @@ This directory contains comprehensive examples demonstrating the capabilities of
 
 ## Available Examples
 
+### .NET / Avalonia (NuGet consumer)
+**Directory:** `dotnet/avalonia-nuget/`
+
+A minimal Avalonia app using the **released `RustTtsWrapper.Bindings`
+NuGet package** — engine selection, credential entry, voice discovery,
+preview with word timings, stop — plus the `AbstractTtsClient`
+migration guide (credential key mapping, native assets per RID, clean
+`win-x64` publish). Verified in CI on windows-latest with a headless
+smoke run. See [dotnet/avalonia-nuget/README.md](dotnet/avalonia-nuget/README.md).
+
 ### 1. Word Boundary Events Demo
 **File:** `word-boundary-demo.rs`
 

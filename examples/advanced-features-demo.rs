@@ -31,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("🎙️  {} - {}", engine_id, description);
 
         match create_engine(engine_id, credentials) {
-            Some(engine) => {
+            Ok(engine) => {
                 match engine.get_voices() {
                     Ok(voices) => {
                         println!("   Available voices ({}):", voices.len());
@@ -73,7 +73,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            None => {
+            Err(e) => {
+                eprintln!("engine {engine_id}: {e}");
                 println!("   ⚠️  Engine not available");
             }
         }
@@ -89,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(target_os = "windows"))]
     let prosody_engine_id = "system";
 
-    if let Some(engine) = create_engine(prosody_engine_id, "") {
+    if let Ok(engine) = create_engine(prosody_engine_id, "") {
         let test_text = "This demonstrates prosody control in text-to-speech synthesis.";
 
         println!("🐢 Slow speech (0.7x rate):");
@@ -144,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("🌐 Testing {}...", provider_name);
 
-            if let Some(engine) = create_engine(provider_id, &credentials) {
+            if let Ok(engine) = create_engine(provider_id, &credentials) {
                 // Check credentials first
                 match engine.check_credentials() {
                     Ok(true) => {
@@ -208,7 +209,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             api_key, region
         );
 
-        if let Some(engine) = create_engine("azure", &credentials) {
+        if let Ok(engine) = create_engine("azure", &credentials) {
             println!("🎙️  Testing Azure SSML support...\n");
 
             let ssml_example = r#"

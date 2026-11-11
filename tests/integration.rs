@@ -85,7 +85,7 @@ fn test_sherpaonnx_no_credentials() {
 #[test]
 fn test_create_system_engine() {
     let engine = factory::create_engine("system", "");
-    assert!(engine.is_some(), "System engine must be creatable");
+    assert!(engine.is_ok(), "System engine must be creatable");
     assert_eq!(engine.unwrap().engine_id(), "system");
 }
 
@@ -93,15 +93,22 @@ fn test_create_system_engine() {
 fn test_create_cloud_engine() {
     let engine = factory::create_engine("openai", r#"{"apiKey":"test-key"}"#);
     assert!(
-        engine.is_some(),
+        engine.is_ok(),
         "OpenAI engine must be creatable with credentials"
     );
 }
 
 #[test]
 fn test_create_unknown_engine() {
-    let engine = factory::create_engine("nonexistent_engine", "");
-    assert!(engine.is_none(), "Unknown engines should return None");
+    // GH #69: unknown engines surface a structured EngineNotAvailable
+    // error instead of a bare None.
+    let err = factory::create_engine("nonexistent_engine", "")
+        .expect_err("Unknown engines should return Err");
+    assert_eq!(
+        err.code,
+        rust_tts_wrapper::error_codes::TtsErrorCode::EngineNotAvailable
+    );
+    assert_eq!(err.engine_id, "nonexistent_engine");
 }
 
 #[cfg(all(feature = "system", target_os = "linux"))]
@@ -140,7 +147,7 @@ fn test_create_all_cloud_engines() {
     ];
     for id in &cloud_ids {
         let engine = factory::create_engine(id, r#"{"apiKey":"test-key"}"#);
-        assert!(engine.is_some(), "Engine '{id}' should be creatable");
+        assert!(engine.is_ok(), "Engine '{id}' should be creatable");
     }
 }
 
@@ -150,7 +157,7 @@ fn test_create_azure_with_region() {
         "azure",
         r#"{"subscriptionKey":"test-key","region":"eastus"}"#,
     );
-    assert!(engine.is_some());
+    assert!(engine.is_ok());
 }
 
 #[test]
@@ -159,7 +166,7 @@ fn test_create_watson_with_all_creds() {
         "watson",
         r#"{"apiKey":"test-key","region":"us-east","instanceId":"test-id"}"#,
     );
-    assert!(engine.is_some());
+    assert!(engine.is_ok());
 }
 
 #[test]
@@ -170,7 +177,7 @@ fn test_create_polly_with_all_creds() {
         "polly",
         r#"{"accessKeyId":"test","secretAccessKey":"test","region":"us-east-1"}"#,
     );
-    assert!(engine.is_some());
+    assert!(engine.is_ok());
 }
 
 #[cfg(feature = "sherpaonnx")]

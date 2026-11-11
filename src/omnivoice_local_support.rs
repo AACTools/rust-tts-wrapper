@@ -17,6 +17,7 @@
 
 use std::ffi::{c_char, c_int, c_void};
 use std::fmt;
+use std::sync::OnceLock;
 
 /// omnivoice.h ABI version this binding targets (read at ov_init /
 /// ov_synthesize; fields beyond the caller's version are ignored).
@@ -216,99 +217,153 @@ pub fn load_wav_24k_mono(path: &str) -> Option<Vec<f32>> {
 
 // ── Language support ────────────────────────────────────────────────
 
-/// Curated BCP-47 codes for common OmniVoice languages (metadata for
-/// get_voices). The runtime resolves any ISO code or language name at
-/// synthesis time via its 600+ language table.
+/// The runtime's own accepted-language table, enumerated once via the
+/// omnivoice.cpp introspection API (`ov_n_languages` /
+/// `ov_language_id` / `ov_language_name`) and cached (GH #64).
+///
+/// The wrapper used to advertise a hand-curated BCP-47 list that
+/// drifted from what `ov_synthesize` actually accepts — e.g. `ar` was
+/// listed but the runtime answers "unknown language", so AAC users
+/// could select a voice that hard-fails at synthesis. Sourcing the
+/// list from the runtime means advertised == accepted by construction.
+///
+/// Entries are `(id, display_name)` as the runtime reports them. The
+/// table needs no context (it is static in the runtime), so this is
+/// safe to call before `ov_init`. Returns an empty table if the
+/// runtime reports none (a broken build); callers degrade gracefully.
 #[must_use]
-pub fn omnivoice_language_codes() -> Vec<crate::types::LanguageCode> {
-    [
-        ("en", "English"),
-        ("en-GB", "English (British)"),
-        ("en-US", "English (American)"),
-        ("fr", "French"),
-        ("de", "German"),
-        ("es", "Spanish"),
-        ("it", "Italian"),
-        ("pt", "Portuguese"),
-        ("ru", "Russian"),
-        ("zh", "Chinese"),
-        ("ja", "Japanese"),
-        ("ko", "Korean"),
-        ("hi", "Hindi"),
-        ("ar", "Arabic"),
-        ("tr", "Turkish"),
-        ("pl", "Polish"),
-        ("nl", "Dutch"),
-        ("sv", "Swedish"),
-        ("da", "Danish"),
-        ("no", "Norwegian"),
-        ("fi", "Finnish"),
-        ("cs", "Czech"),
-        ("el", "Greek"),
-        ("he", "Hebrew"),
-        ("th", "Thai"),
-        ("vi", "Vietnamese"),
-        ("id", "Indonesian"),
-        ("ms", "Malay"),
-        ("uk", "Ukrainian"),
-        ("ro", "Romanian"),
-        ("hu", "Hungarian"),
-        ("bg", "Bulgarian"),
-        ("hr", "Croatian"),
-        ("sk", "Slovak"),
-        ("sl", "Slovenian"),
-        ("sr", "Serbian"),
-        ("lt", "Lithuanian"),
-        ("lv", "Latvian"),
-        ("et", "Estonian"),
-        ("is", "Icelandic"),
-        ("ga", "Irish"),
-        ("cy", "Welsh"),
-        ("sw", "Swahili"),
-        ("af", "Afrikaans"),
-        ("bn", "Bengali"),
-        ("ta", "Tamil"),
-        ("te", "Telugu"),
-        ("kn", "Kannada"),
-        ("ml", "Malayalam"),
-        ("mr", "Marathi"),
-        ("gu", "Gujarati"),
-        ("pa", "Punjabi"),
-        ("ur", "Urdu"),
-        ("si", "Sinhala"),
-        ("my", "Burmese"),
-        ("km", "Khmer"),
-        ("lo", "Lao"),
-        ("ne", "Nepali"),
-        ("fa", "Persian"),
-        ("ps", "Pashto"),
-        ("az", "Azerbaijani"),
-        ("kk", "Kazakh"),
-        ("ky", "Kyrgyz"),
-        ("uz", "Uzbek"),
-    ]
-    .iter()
-    .map(|(code, name)| crate::types::LanguageCode {
-        bcp47: (*code).to_string(),
-        iso639_3: String::new(),
-        display: (*name).to_string(),
+pub fn omnivoice_runtime_languages() -> &'static Vec<(String, String)> {
+    static TABLE: OnceLock<Vec<(String, String)>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut out = Vec::new();
+        // SAFETY: the ov_* functions are plain C ABI calls; none of the
+        // outputs outlive the call (we copy immediately).
+        let n = unsafe { ov_n_languages() };
+        if n <= 0 {
+            eprintln!(
+                "omnivoice-local: runtime reported {} languages; \
+                 advertising an empty language list (GH #64)",
+                n
+            );
+            return out;
+        }
+        for i in 0..n {
+            // SAFETY: index < count returned by the runtime.
+            let id_ptr = unsafe { ov_language_id(i) };
+            if id_ptr.is_null() {
+                continue;
+            }
+            // SAFETY: the runtime returns a static C string.
+            let id = unsafe { std::ffi::CStr::from_ptr(id_ptr) }
+                .to_string_lossy()
+                .into_owned();
+            if id.is_empty() {
+                continue;
+            }
+            // SAFETY: id_ptr is a valid id from the table.
+            let name_ptr = unsafe { ov_language_name(id_ptr) };
+            let name = if name_ptr.is_null() {
+                String::new()
+            } else {
+                // SAFETY: the runtime returns a static C string.
+                unsafe { std::ffi::CStr::from_ptr(name_ptr) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            out.push((id, name));
+        }
+        out
     })
-    .collect()
 }
 
-/// Map a BCP-47 code to the OmniVoice language parameter. Returns ""
-/// (auto-detect) when no mapping is found — the runtime's 600+ table
-/// handles most names/ISO codes natively.
+/// Language codes for `get_voices`: exactly the languages the runtime
+/// accepts, as the runtime reports them (GH #64). The runtime's table
+/// mixes bare ISO codes (`en`), lowercase regional ids (`pt-br`,
+/// `zh-cn`) and full names (`english`) — every entry is one the
+/// runtime will synthesize, which is the contract `get_voices` makes.
+///
+/// Falls back to a small verified core (`en`/`fr`/`de`/`es`…) when the
+/// runtime reports an empty table, so a voice listing is never silently
+/// empty on a degraded build.
 #[must_use]
-/// Map a BCP-47 code to the OmniVoice language parameter (base ISO code).
-/// The runtime's 646-language table has no regional variants — only
-/// bare ISO 639-3 codes like "en", "fr", "de".
+pub fn omnivoice_language_codes() -> Vec<crate::types::LanguageCode> {
+    let table = omnivoice_runtime_languages();
+    let entries: Vec<(String, String)> = if table.is_empty() {
+        eprintln!(
+            "omnivoice-local: empty runtime language table, falling back to \
+             the verified core list (GH #64)"
+        );
+        CORE_VERIFIED_LANGUAGES
+            .iter()
+            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+            .collect()
+    } else {
+        table.clone()
+    };
+    entries
+        .into_iter()
+        .map(|(id, name)| crate::types::LanguageCode {
+            bcp47: id,
+            iso639_3: String::new(),
+            display: name,
+        })
+        .collect()
+}
+
+/// Languages verified against the runtime (probe matrix in GH #64 /
+/// PR #63). Only used when the runtime's own table is unavailable.
+const CORE_VERIFIED_LANGUAGES: &[(&str, &str)] = &[
+    ("en", "English"),
+    ("fr", "French"),
+    ("de", "German"),
+    ("es", "Spanish"),
+    ("pt-br", "Portuguese (Brazil)"),
+    ("zh", "Chinese"),
+    ("zh-cn", "Chinese (Mandarin)"),
+    ("nl", "Dutch"),
+    ("pl", "Polish"),
+    ("hi", "Hindi"),
+];
+
+/// Map a BCP-47 code to the OmniVoice language parameter (GH #63/#64).
+///
+/// Resolution order, all against the runtime's own accepted table:
+/// 1. Exact match on the full lowercased code (handles the runtime's
+///    regional entries like `pt-br` / `zh-cn` correctly).
+/// 2. Base ISO subtag match (`en-GB` → `en`) — the runtime's table has
+///    no en-XX entries (#63).
+/// 3. Bare base subtag passthrough when the table is unavailable —
+///    the runtime's 646-language table resolves most ISO codes and
+///    names natively; region subtags map to accent instructs
+///    separately (see [`bcp47_region_to_instruct`]).
+#[must_use]
 pub fn bcp47_to_omnivoice_lang(bcp47: &str) -> String {
-    bcp47
+    let table = omnivoice_runtime_languages();
+    let normalized = bcp47.trim().to_ascii_lowercase();
+    if table.is_empty() {
+        return normalized
+            .split(['-', '_'])
+            .next()
+            .unwrap_or("")
+            .to_string();
+    }
+    // Exact id match (covers pt-br, zh-cn, …).
+    if table.iter().any(|(id, _)| *id == normalized) {
+        return normalized;
+    }
+    // Base subtag match (en-GB → en, fr-CA → fr).
+    let base = normalized
         .split(['-', '_'])
         .next()
         .unwrap_or("")
-        .to_ascii_lowercase()
+        .to_string();
+    if table.iter().any(|(id, _)| *id == base) {
+        return base;
+    }
+    // Unknown to the table: pass the base through and let the runtime
+    // decide — synthesize_ov falls back to auto-detect if it rejects
+    // the language (GH #64).
+    base
 }
 
 /// Map a BCP-47 region code to an OmniVoice voice-design instruct
@@ -363,6 +418,52 @@ mod tests {
         assert_eq!(bcp47_to_omnivoice_lang("fr-FR"), "fr"); // ISO subtag passed through
                                                             // "en-custom" must NOT match "us" (the old substring bug)
         assert_eq!(bcp47_to_omnivoice_lang("en-custom"), "en");
+    }
+
+    #[test]
+    fn runtime_table_is_enumerated_not_curated() {
+        // GH #64: the advertised list must come from the runtime's own
+        // table (ov_n_languages/ov_language_id/ov_language_name), not a
+        // curated copy that can drift.
+        let table = omnivoice_runtime_languages();
+        assert!(!table.is_empty(), "runtime reported no languages");
+        for (id, name) in table {
+            assert!(!id.is_empty(), "empty id in runtime table");
+            assert!(!name.is_empty(), "display name missing for {id}");
+        }
+    }
+
+    #[test]
+    fn advertised_codes_match_runtime_table_exactly() {
+        // GH #64 core invariant: advertised == accepted. Whatever the
+        // runtime table says, the voice list says — nothing more. (The
+        // dev stub runtime deliberately omits "ar" while the old
+        // curated table included it — the exact bug from the issue.)
+        let codes = omnivoice_language_codes();
+        let table = omnivoice_runtime_languages();
+        let advertised: Vec<&str> = codes.iter().map(|c| c.bcp47.as_str()).collect();
+        let accepted: Vec<&str> = table.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(advertised, accepted);
+        // Sanity: the language the issue probed ("ar") must only be
+        // advertised when the runtime accepts it.
+        assert_eq!(accepted.contains(&"ar"), advertised.contains(&"ar"));
+    }
+
+    #[test]
+    fn bcp47_full_id_match_beats_base_subtag() {
+        // Runtime table contains "pt-br": a pt-BR voice must resolve to
+        // the exact accepted id, not the base "pt".
+        if omnivoice_runtime_languages()
+            .iter()
+            .any(|(id, _)| id == "pt-br")
+        {
+            assert_eq!(bcp47_to_omnivoice_lang("pt-BR"), "pt-br");
+            assert_eq!(bcp47_to_omnivoice_lang("zh-CN"), "zh-cn");
+        }
+        // Unknown codes degrade to the base subtag (the runtime gets
+        // the final say; synthesize falls back to auto-detect).
+        assert_eq!(bcp47_to_omnivoice_lang("xx-YY"), "xx");
+        assert_eq!(bcp47_to_omnivoice_lang("EN_us"), "en");
     }
 
     #[test]

@@ -84,6 +84,13 @@ public static class Native
     [DllImport(Lib)] public static extern void tts_free_engines(IntPtr engines, int count);
 
     [DllImport(Lib)] public static extern IntPtr tts_get_last_error(IntPtr ctx);
+
+    // GH #68/#69 additions (ABI-additive; existing symbols unchanged).
+    [DllImport(Lib)] public static extern uint tts_get_last_error_code(IntPtr ctx);
+    [DllImport(Lib)] public static extern IntPtr tts_get_last_error_detail_json(IntPtr ctx);
+    [DllImport(Lib)] public static extern void tts_free_string(IntPtr s);
+    [DllImport(Lib)] public static extern IntPtr tts_get_engine_setups_json();
+    [DllImport(Lib)] public static extern int tts_check_credentials(IntPtr ctx);
 }
 
 /// <summary>
@@ -194,11 +201,54 @@ public delegate void ErrorCallback(string error);
 
 /// <summary>
 /// Exception thrown when a TTS operation fails. The message comes from
-/// <c>tts_get_last_error</c> on the owning context.
+/// <c>tts_get_last_error</c> on the owning context. When the native
+/// build supports it (GH #69), carries the stable
+/// <see cref="TtsErrorCode"/>, the offending field key, and the engine
+/// id; otherwise <see cref="ErrorCode"/> is <c>Unknown</c>.
 /// </summary>
 public class TtsException : Exception
 {
-    public TtsException(string message) : base(message) { }
+    /// <summary>Stable classification (GH #69).</summary>
+    public TtsErrorCode ErrorCode { get; }
+
+    /// <summary>Offending credential/setup field, or empty.</summary>
+    public string FieldKey { get; }
+
+    /// <summary>Engine the failure belongs to, or empty.</summary>
+    public string EngineId { get; }
+
+    public TtsException(string message) : base(message)
+    {
+        ErrorCode = TtsErrorCode.Unknown;
+        FieldKey = "";
+        EngineId = "";
+    }
+
+    public TtsException(TtsErrorDetail detail)
+        : base(detail.Message.Length > 0 ? detail.Message : detail.CodeName)
+    {
+        ErrorCode = detail.Code;
+        FieldKey = detail.FieldKey;
+        EngineId = detail.EngineId;
+    }
+
+    /// <summary>Safe, display-ready hint (from the code, not the raw message).</summary>
+    public string? DisplayMessage =>
+        ErrorCode == TtsErrorCode.Unknown ? null : Describe(ErrorCode);
+
+    private static string Describe(TtsErrorCode code) => code switch
+    {
+        TtsErrorCode.MissingConfiguration => "A required setting is missing. Fill in the highlighted field.",
+        TtsErrorCode.InvalidConfiguration => "One of the settings has an invalid value.",
+        TtsErrorCode.CredentialsRejected => "The provider rejected these credentials. Check them and try again.",
+        TtsErrorCode.NetworkError => "Could not reach the service. Check the connection and retry.",
+        TtsErrorCode.ModelNotFound => "A required model or voice file is missing. Install or select it.",
+        TtsErrorCode.MissingNativeDependency => "A required native library is missing. Reinstall the app package.",
+        TtsErrorCode.EngineNotAvailable => "This engine is not available in the current build.",
+        TtsErrorCode.LanguageNotSupported => "This voice's language is not supported by the engine.",
+        TtsErrorCode.EngineFailure => "The speech engine failed. Try again.",
+        _ => "An unknown error occurred.",
+    };
 }
 
 /// <summary>
@@ -226,7 +276,7 @@ public class TtsClient : IDisposable
         var json = JsonSerializer.Serialize(credentials ?? new Dictionary<string, string>());
         _ctx = Native.tts_create(engineId, json);
         if (_ctx == IntPtr.Zero)
-            throw new TtsException($"Failed to create engine '{engineId}': {GetGlobalLastError()}");
+            throw CreateGlobalException(engineId);
     }
 
     // --- synthesis -----------------------------------------------------
@@ -236,7 +286,7 @@ public class TtsClient : IDisposable
     {
         ThrowIfDisposed();
         if (Native.tts_speak(_ctx, text) != 0)
-            throw new TtsException(GetLastError() ?? "unknown error");
+            throw CreateException();
     }
 
     /// <summary>Speak <paramref name="text"/> synchronously (block until done).</summary>
@@ -244,7 +294,7 @@ public class TtsClient : IDisposable
     {
         ThrowIfDisposed();
         if (Native.tts_speak_sync(_ctx, text) != 0)
-            throw new TtsException(GetLastError() ?? "unknown error");
+            throw CreateException();
     }
 
     /// <summary>Synthesise <paramref name="text"/> to a PCM/MP3 byte buffer.</summary>
@@ -254,7 +304,7 @@ public class TtsClient : IDisposable
         IntPtr bufPtr;
         UIntPtr len;
         if (Native.tts_synth_to_bytes(_ctx, text, out bufPtr, out len) != 0)
-            throw new TtsException(GetLastError() ?? "unknown error");
+            throw CreateException();
 
         // checked cast — UIntPtr → int can overflow on >2GiB buffers.
         long length = (long)len;
@@ -437,7 +487,7 @@ public class TtsClient : IDisposable
     {
         ThrowIfDisposed();
         if (Native.tts_get_voices(_ctx, out IntPtr arr, out int count) != 0)
-            throw new TtsException(GetLastError() ?? "unknown error");
+            throw CreateException();
         return MarshalVoiceArray(arr, count);
     }
 
@@ -445,7 +495,7 @@ public class TtsClient : IDisposable
     public static List<TtsEngineInfo> ListEngines()
     {
         if (Native.tts_get_engines(out IntPtr arr, out int count) != 0)
-            throw new TtsException(GetGlobalLastError() ?? "unknown error");
+            throw new TtsException(GetGlobalLastError() ?? "unknown error"); // static call: keep simple
         return MarshalEngineArray(arr, count);
     }
 
@@ -467,6 +517,121 @@ public class TtsClient : IDisposable
     {
         IntPtr ptr = Native.tts_get_last_error(IntPtr.Zero);
         return ptr == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(ptr);
+    }
+
+    /// <summary>
+    /// Structured detail for this context's last error, or null (GH #69).
+    /// On native builds without the detail API the fallback carries the
+    /// message with an <see cref="TtsErrorCode.Unknown"/> code.
+    /// </summary>
+    public TtsErrorDetail? GetLastErrorDetail()
+    {
+        if (_ctx == IntPtr.Zero) return null;
+        return ReadDetail(_ctx, static ctx => Native.tts_get_last_error_detail_json(ctx));
+    }
+
+    /// <summary>Structured detail for the global (create-time) error, or null.</summary>
+    public static TtsErrorDetail? GetGlobalLastErrorDetail() =>
+        ReadDetail(IntPtr.Zero, static ctx => Native.tts_get_last_error_detail_json(ctx));
+
+    /// <summary>Stable code for this context's last error (0 = none).</summary>
+    public TtsErrorCode LastErrorCode()
+    {
+        if (_ctx == IntPtr.Zero) return TtsErrorCode.Unknown;
+        return (TtsErrorCode)Native.tts_get_last_error_code(_ctx);
+    }
+
+    /// <summary>
+    /// Verify credentials with an explicit "unverified" state (GH #69).
+    /// Static-catalog engines (e.g. OpenAI) answer
+    /// <see cref="CredentialStatus.Unverified"/> — enumerating their
+    /// voices proves nothing about the key. A failed check (missing
+    /// field, network) returns <c>Status = null</c> with
+    /// <see cref="CredentialCheckResult.Error"/> carrying the stable
+    /// code and field key.
+    /// </summary>
+    public CredentialCheckResult CheckCredentials()
+    {
+        ThrowIfDisposed();
+        int rc = Native.tts_check_credentials(_ctx);
+        switch (rc)
+        {
+            case 1:
+                return new CredentialCheckResult { Status = CredentialStatus.Verified };
+            case 0:
+                return new CredentialCheckResult { Status = CredentialStatus.Rejected };
+            case 2:
+                return new CredentialCheckResult { Status = CredentialStatus.Unverified };
+            default:
+                return new CredentialCheckResult { Error = GetLastErrorDetail() };
+        }
+    }
+
+    /// <summary>
+    /// The typed setup schema for every engine compiled into this
+    /// native build (GH #68): fields with kinds (secret / file path /
+    /// directory / URL / choice / number / text) plus capability flags,
+    /// so a settings UI renders engine rows without a provider switch.
+    /// </summary>
+    public static List<TtsEngineSetup> GetEngineSetups()
+    {
+        IntPtr ptr = Native.tts_get_engine_setups_json();
+        if (ptr == IntPtr.Zero)
+            throw new TtsException("tts_get_engine_setups_json returned null");
+        string json = Marshal.PtrToStringAnsi(ptr) ?? "[]";
+        Native.tts_free_string(ptr);
+        return TtsEngineSetup.FromJsonArray(json)
+            ?? throw new TtsException($"Engine setup JSON failed to parse: {Truncate(json, 200)}");
+    }
+
+    /// <summary>The setup schema for one engine id, or null if unknown.</summary>
+    public static TtsEngineSetup? GetEngineSetup(string engineId) =>
+        GetEngineSetups().FirstOrDefault(s => s.Id == engineId);
+
+    private static string Truncate(string s, int max) =>
+        s.Length <= max ? s : s[..max] + "…";
+
+    private static TtsErrorDetail? ReadDetail(IntPtr ctx, Func<IntPtr, IntPtr> readJson)
+    {
+        IntPtr ptr = readJson(ctx);
+        if (ptr == IntPtr.Zero)
+        {
+            // Older native build (no detail API) — fall back to the
+            // message with an Unknown code.
+            string? msg = ctx == IntPtr.Zero ? GetGlobalLastError() : null;
+            return msg is null ? null : new TtsErrorDetail
+            {
+                Code = TtsErrorCode.Unknown,
+                CodeName = "Unknown",
+                Message = msg,
+                DisplayMessage = "",
+                EngineId = "",
+                FieldKey = "",
+            };
+        }
+        try
+        {
+            string json = Marshal.PtrToStringAnsi(ptr) ?? "";
+            return TtsErrorDetail.FromJson(json);
+        }
+        finally
+        {
+            Native.tts_free_string(ptr);
+        }
+    }
+
+    /// <summary>Build a TtsException from the context's structured error,
+    /// degrading to the plain message on older native builds.</summary>
+    private TtsException CreateException() =>
+        GetLastErrorDetail() is { } detail && detail.Code != TtsErrorCode.Unknown
+            ? new TtsException(detail)
+            : new TtsException(GetLastError() ?? "unknown error");
+
+    private static TtsException CreateGlobalException(string engineId)
+    {
+        if (GetGlobalLastErrorDetail() is { } detail && detail.Code != TtsErrorCode.Unknown)
+            return new TtsException(detail);
+        return new TtsException($"Failed to create engine '{engineId}': {GetGlobalLastError()}");
     }
 
     // --- lifecycle -----------------------------------------------------

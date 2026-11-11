@@ -64,6 +64,8 @@ pub mod cloud_core {
     };
 }
 pub mod engine;
+pub mod engine_schema;
+pub mod error_codes;
 pub mod factory;
 #[cfg(feature = "floravox")]
 pub mod floravox_engine;
@@ -105,6 +107,7 @@ pub use factory::create_engine;
 #[cfg(feature = "sherpaonnx")]
 pub use sherpaonnx_engine::SherpaOnnxEngine;
 
+use crate::error_codes::{ErrorDetail, TtsErrorCode};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -152,18 +155,19 @@ pub struct tts_ctx {
     // synthesis call, blocking concurrent tts_stop / tts_set_*. Removing
     // it lets those calls proceed while synthesis runs.
     engine: BoxedEngine,
+    // Credentials JSON as passed to tts_create — kept for
+    // tts_check_credentials' required-field validation (GH #69).
+    credentials_json: String,
     voice_id: Mutex<Option<String>>,
     rate: Mutex<f32>,
     pitch: Mutex<f32>,
     volume: Mutex<f32>,
-    // Cached CString of the last error message. We must return a *const c_char
-    // from tts_get_last_error whose backing allocation outlives the function
-    // call; the previous version constructed a fresh CString inside the
-    // getter and returned its as_ptr() while the CString was dropped at end
-    // of scope — use-after-free, surfaced as empty reads on Windows.
-    // Storing the CString here keeps the allocation alive until the next
-    // error replaces it.
-    last_error: Mutex<CString>,
+    // Cached error for this context (GH #69): the structured detail
+    // plus the cached CString we hand out from tts_get_last_error —
+    // the pointer must outlive the call, so the allocation is stored
+    // here until the next error replaces it (use-after-free guard).
+    last_error: Mutex<CtxLastError>,
+    last_error_detail: Mutex<ErrorDetail>,
     // Callback + userdata are bundled into a single Mutex each so a reader
     // can never observe a new callback paired with stale userdata (or vice
     // versa). The `Send` wrapper below lets us ship the raw pointer across
@@ -240,13 +244,26 @@ unsafe impl Sync for VisemeCallback {}
 // and callbacks run after the guards are snapshot and dropped); the
 // guarded fields are all wholesale-replaced values, so recovery cannot
 // expose a half-written state.
-static LAST_ERROR: Mutex<Option<CString>> = Mutex::new(None);
+
+/// Cached message for `tts_get_last_error` (the pointer must outlive
+/// the call).
+type CtxLastError = Option<CString>;
+
+/// Global last-error record (GH #69): structured detail + the cached
+/// message C string for `tts_get_last_error(null)`.
+static LAST_ERROR: Mutex<Option<(ErrorDetail, CString)>> = Mutex::new(None);
 
 fn set_error(msg: &str) {
+    let detail = ErrorDetail::from_engine_message(None, msg);
+    set_error_detail(detail);
+}
+
+fn set_error_detail(detail: ErrorDetail) {
+    let cs = safe_cstring(&detail.message);
     let mut guard = LAST_ERROR
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *guard = Some(safe_cstring(msg));
+    *guard = Some((detail, cs));
 }
 
 /// Helper macro to wrap FFI functions with panic catching
@@ -269,6 +286,19 @@ fn safe_cstring(s: impl AsRef<str>) -> CString {
     // Replace interior nulls and retry.
     let cleaned: String = s.chars().filter(|&c| c != '\0').collect();
     CString::new(cleaned).unwrap_or_default()
+}
+
+/// Record a classified error on a context (message cache + structured
+/// detail), for `tts_get_last_error` / `tts_get_last_error_code` /
+/// `tts_get_last_error_detail_json` (GH #69).
+fn set_ctx_error(ctx: &tts_ctx, detail: ErrorDetail) {
+    let cs = safe_cstring(&detail.message);
+    *ctx.last_error
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cs);
+    *ctx.last_error_detail
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = detail;
 }
 
 /// Create a new TTS engine instance.
@@ -312,47 +342,62 @@ fn tts_create_inner(engine_id: *const c_char, credentials_json: *const c_char) -
             .into_owned()
     };
 
-    if let Some(engine) = create_engine(&engine_id_str, &creds) {
-        let ctx = Box::new(tts_ctx {
-            engine,
-            voice_id: Mutex::new(None),
-            rate: Mutex::new(1.0),
-            pitch: Mutex::new(1.0),
-            volume: Mutex::new(1.0),
-            last_error: Mutex::new(CString::new("").unwrap()),
-            on_audio: Mutex::new(AudioCallback {
-                cb: None,
-                userdata: ptr::null_mut(),
-            }),
-            on_start: Mutex::new(VoidCallback {
-                cb: None,
-                userdata: ptr::null_mut(),
-            }),
-            on_end: Mutex::new(VoidCallback {
-                cb: None,
-                userdata: ptr::null_mut(),
-            }),
-            on_error: Mutex::new(ErrorCallback {
-                cb: None,
-                userdata: ptr::null_mut(),
-            }),
-            on_mark: Mutex::new(MarkCallback {
-                cb: None,
-                userdata: std::ptr::null_mut(),
-            }),
-            on_boundary: Mutex::new(BoundaryCallback {
-                cb: None,
-                userdata: ptr::null_mut(),
-            }),
-            on_viseme: Mutex::new(VisemeCallback {
-                cb: None,
-                userdata: ptr::null_mut(),
-            }),
-        });
-        Box::into_raw(ctx)
-    } else {
-        set_error(&format!("Unknown engine: {engine_id_str}"));
-        ptr::null_mut()
+    match create_engine(&engine_id_str, &creds) {
+        Ok(engine) => {
+            let ctx = Box::new(tts_ctx {
+                engine,
+                credentials_json: creds,
+                voice_id: Mutex::new(None),
+                rate: Mutex::new(1.0),
+                pitch: Mutex::new(1.0),
+                volume: Mutex::new(1.0),
+                last_error: Mutex::new(None),
+                last_error_detail: Mutex::new(ErrorDetail::new(
+                    TtsErrorCode::Unknown,
+                    None,
+                    None,
+                    "",
+                )),
+                on_audio: Mutex::new(AudioCallback {
+                    cb: None,
+                    userdata: ptr::null_mut(),
+                }),
+                on_start: Mutex::new(VoidCallback {
+                    cb: None,
+                    userdata: ptr::null_mut(),
+                }),
+                on_end: Mutex::new(VoidCallback {
+                    cb: None,
+                    userdata: ptr::null_mut(),
+                }),
+                on_error: Mutex::new(ErrorCallback {
+                    cb: None,
+                    userdata: ptr::null_mut(),
+                }),
+                on_mark: Mutex::new(MarkCallback {
+                    cb: None,
+                    userdata: std::ptr::null_mut(),
+                }),
+                on_boundary: Mutex::new(BoundaryCallback {
+                    cb: None,
+                    userdata: ptr::null_mut(),
+                }),
+                on_viseme: Mutex::new(VisemeCallback {
+                    cb: None,
+                    userdata: ptr::null_mut(),
+                }),
+            });
+            Box::into_raw(ctx)
+        }
+        Err(e) => {
+            set_error_detail(ErrorDetail::new(
+                e.code,
+                Some(&e.engine_id),
+                e.field_key.as_deref(),
+                e.message,
+            ));
+            ptr::null_mut()
+        }
     }
 }
 
@@ -588,13 +633,13 @@ fn tts_speak_impl_inner(ctx: *mut tts_ctx, text: *const c_char, raw_ssml: bool) 
                 0
             }
             Err(e) => {
-                let msg = e.to_string();
-                *ctx_ref
-                    .last_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = safe_cstring(msg.clone());
+                let detail = ErrorDetail::from_engine_message(
+                    Some(ctx_ref.engine.engine_id()),
+                    &e.to_string(),
+                );
+                set_ctx_error(ctx_ref, detail.clone());
                 if let Some(cb) = error_cb.cb {
-                    if let Ok(c_msg) = CString::new(msg) {
+                    if let Ok(c_msg) = CString::new(detail.message) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
                     }
                 }
@@ -771,13 +816,13 @@ pub extern "C" fn tts_speak_sync(ctx: *mut tts_ctx, text: *const c_char) -> i32 
                 0
             }
             Err(e) => {
-                let msg = e.to_string();
-                *ctx_ref
-                    .last_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = safe_cstring(msg.clone());
+                let detail = ErrorDetail::from_engine_message(
+                    Some(ctx_ref.engine.engine_id()),
+                    &e.to_string(),
+                );
+                set_ctx_error(ctx_ref, detail.clone());
                 if let Some(cb) = error_cb.cb {
-                    if let Ok(c_msg) = CString::new(msg) {
+                    if let Ok(c_msg) = CString::new(detail.message) {
                         cb(c_msg.as_ptr(), error_cb.userdata);
                     }
                 }
@@ -885,10 +930,10 @@ fn tts_get_voices_inner(
             0
         }
         Err(e) => {
-            *ctx_ref
-                .last_error
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = safe_cstring(e.to_string());
+            set_ctx_error(
+                ctx_ref,
+                ErrorDetail::from_engine_message(Some(engine.engine_id()), &e.to_string()),
+            );
             -1
         }
     }
@@ -1288,15 +1333,15 @@ pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         // If context provided and valid, return per-context error.
         //
-        // The CString is stored in the ctx (Mutex<CString>) so the returned
-        // pointer's backing allocation lives until the next error replaces it.
-        // The caller must copy if they need the string beyond the next
-        // synth/speak call on this ctx.
+        // The CString is stored in the ctx (Mutex<Option<CString>>) so the
+        // returned pointer's backing allocation lives until the next error
+        // replaces it. The caller must copy if they need the string beyond
+        // the next synth/speak call on this ctx.
         if !ctx.is_null() {
             let ctx_ref = unsafe { &*ctx };
             if let Ok(guard) = ctx_ref.last_error.lock() {
-                if !guard.is_empty() {
-                    return guard.as_ptr();
+                if let Some(cs) = guard.as_ref() {
+                    return cs.as_ptr();
                 }
             }
         }
@@ -1307,11 +1352,192 @@ pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match guard.as_ref() {
-            Some(cs) => cs.as_ptr(),
+            Some((_, cs)) => cs.as_ptr(),
             None => ptr::null(),
         }
     }))
     .unwrap_or(ptr::null())
+}
+
+/// Stable classification of the last error (GH #69).
+///
+/// Returns the [`TtsErrorCode`] value as a u32 (0 = no error recorded).
+/// Per-context when `ctx` is provided; the global record (create
+/// failures) when null. The mapping is part of the ABI: see
+/// `src/error_codes.rs` and the header docs.
+///
+/// # Safety
+///
+/// `ctx` may be null (global error) or a valid context pointer.
+#[no_mangle]
+pub extern "C" fn tts_get_last_error_code(ctx: *mut tts_ctx) -> u32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !ctx.is_null() {
+            let ctx_ref = unsafe { &*ctx };
+            if let Ok(guard) = ctx_ref.last_error_detail.lock() {
+                if guard.code != TtsErrorCode::Unknown || !guard.message.is_empty() {
+                    return guard.code as u32;
+                }
+            }
+        }
+        let guard = LAST_ERROR
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard
+            .as_ref()
+            .map_or(TtsErrorCode::Unknown as u32, |(d, _)| d.code as u32)
+    }))
+    .unwrap_or(TtsErrorCode::Unknown as u32)
+}
+
+/// Full structured error detail as a JSON string (GH #69):
+///
+/// `{"code":1,"name":"MissingConfiguration","message":"…",`
+/// `"displayMessage":"…","engineId":"azure","fieldKey":"subscriptionKey"}`
+///
+/// `message` is the engine message with obvious secrets redacted;
+/// `displayMessage` is a safe, display-ready hint (never contains
+/// message content). `engineId`/`fieldKey` are empty strings when not
+/// applicable. Caller must free with [`tts_free_string`]. Returns null
+/// when no error is recorded.
+///
+/// # Safety
+///
+/// `ctx` may be null (global error) or a valid context pointer.
+#[no_mangle]
+pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let detail = if !ctx.is_null() {
+            let ctx_ref = unsafe { &*ctx };
+            let guard = ctx_ref
+                .last_error_detail
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !guard.message.is_empty() {
+                Some(guard.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let detail = match detail {
+            Some(d) => Some(d),
+            None => {
+                let guard = LAST_ERROR
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard.as_ref().map(|(d, _)| d.clone())
+            }
+        };
+        match detail {
+            Some(d) => d
+                .into_c_string()
+                .map(CString::into_raw)
+                .unwrap_or(ptr::null_mut()),
+            None => ptr::null_mut(),
+        }
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Free a string returned by [`tts_get_last_error_detail_json`] or
+/// [`tts_get_engine_setups_json`].
+///
+/// # Safety
+///
+/// `s` must be null or a pointer from those functions, freed once.
+#[no_mangle]
+pub extern "C" fn tts_free_string(s: *mut c_char) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !s.is_null() {
+            drop(unsafe { CString::from_raw(s) });
+        }
+    }));
+}
+
+/// The typed engine setup schema for every engine compiled into this
+/// build, as a JSON array (GH #68). See `src/engine_schema.rs` for the
+/// shape: per-engine `fields` (canonical key, label, kind, required,
+/// default, choices) and `capabilities` (rate/pitch/volume/timing/
+/// ssml/streaming/internet/static-catalog + notes).
+///
+/// Caller must free with [`tts_free_string`]. Never returns null on
+/// success; returns `"[]"` when no engines are compiled in.
+#[no_mangle]
+pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let json = crate::engine_schema::engine_setups_json();
+        CString::new(json)
+            .map(CString::into_raw)
+            .unwrap_or(ptr::null_mut())
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Verify the context's credentials with an explicit "unverified"
+/// state (GH #69).
+///
+/// Returns:
+/// - `1` — **Verified**: an authenticated check (or validated local
+///   setup) succeeded.
+/// - `0` — **Rejected**: the provider refused the credentials.
+/// - `2` — **Unverified**: no authenticated check is possible (static
+///   voice catalog, zero-credential engine, offline engine).
+///   Enumerating voices alone never turns this into Verified.
+/// - `-1` — the check itself failed (e.g. required field missing,
+///   network unreachable); the detail is available from
+///   [`tts_get_last_error_detail_json`] with a stable code —
+///   `MissingConfiguration` carries the offending `fieldKey`.
+///
+/// # Safety
+///
+/// `ctx` must be a valid pointer from [`tts_create`].
+#[no_mangle]
+pub extern "C" fn tts_check_credentials(ctx: *mut tts_ctx) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tts_check_credentials_inner(ctx)
+    }))
+    .unwrap_or(-1)
+}
+
+fn tts_check_credentials_inner(ctx: *mut tts_ctx) -> i32 {
+    use crate::engine::CredentialCheck;
+    if ctx.is_null() {
+        set_error("tts_check_credentials: ctx is null");
+        return -1;
+    }
+    let ctx_ref = unsafe { &*ctx };
+    let engine_id = ctx_ref.engine.engine_id();
+
+    // Required-field pre-validation: report the exact missing field
+    // before touching the network (GH #69 acceptance: "missing input").
+    let creds = factory::parse_credentials(&ctx_ref.credentials_json);
+    if let Some(field) = crate::engine_schema::first_missing_required_field(engine_id, &creds) {
+        set_ctx_error(
+            ctx_ref,
+            ErrorDetail::new(
+                TtsErrorCode::MissingConfiguration,
+                Some(engine_id),
+                Some(&field),
+                format!("{engine_id}: required setting '{field}' is missing"),
+            ),
+        );
+        return -1;
+    }
+
+    match ctx_ref.engine.check_credentials_status() {
+        Ok(CredentialCheck::Verified) => 1,
+        Ok(CredentialCheck::Rejected) => 0,
+        Ok(CredentialCheck::Unverified) => 2,
+        Err(e) => {
+            set_ctx_error(
+                ctx_ref,
+                ErrorDetail::from_engine_message(Some(engine_id), &e.to_string()),
+            );
+            -1
+        }
+    }
 }
 /// Pause in-progress speech.
 ///
@@ -1407,11 +1633,10 @@ pub extern "C" fn tts_synth_to_bytes(
                 0
             }
             Err(e) => {
-                *ctx_ref
-                    .last_error
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    safe_cstring(e.to_string());
+                set_ctx_error(
+                    ctx_ref,
+                    ErrorDetail::from_engine_message(Some(engine.engine_id()), &e.to_string()),
+                );
                 -1
             }
         }
