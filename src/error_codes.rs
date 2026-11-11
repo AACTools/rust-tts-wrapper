@@ -306,7 +306,7 @@ fn redact_json_secret_values(s: &str) -> String {
             break;
         };
         // Copy up to and including the opening quote.
-        out.push_str(&rest[..quote + 1]);
+        out.push_str(&rest[..=quote]);
         let after_quote = &rest[quote + 1..];
         let Some(close_rel) = after_quote.find('"') else {
             out.push_str(after_quote);
@@ -452,10 +452,14 @@ impl ErrorDetail {
     pub fn display_message(&self) -> String {
         let mut s = self.code.display_hint().to_string();
         if let Some(field) = &self.field_key {
-            s.push_str(&format!(" (field: {field})"));
+            s.push_str(" (field: ");
+            s.push_str(field);
+            s.push(')');
         }
         if let Some(engine) = &self.engine_id {
-            s.push_str(&format!(" [engine: {engine}]"));
+            s.push_str(" [engine: ");
+            s.push_str(engine);
+            s.push(']');
         }
         s
     }
@@ -499,7 +503,10 @@ fn json_escape(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }

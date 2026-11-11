@@ -142,6 +142,10 @@ internal sealed class SpeechRequestScheduler : IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _sync = new();
     private readonly List<Request> _queued = new();
+    /// <summary>Requests superseded while speaking: their native call
+    /// is still unwinding (stopped, but the runner hasn't finalized
+    /// yet) — Dispose drains these too (GH #70 loop-4).</summary>
+    private readonly List<Request> _unwinding = new();
     private Request? _active;
     private bool _disposed;
 
@@ -183,6 +187,9 @@ internal sealed class SpeechRequestScheduler : IDisposable
                 {
                     active.State = SpeechRequestStatus.Superseded;
                     supersededInFlight = true;
+                    // Still unwinding inside its native call — Dispose
+                    // must drain it even though it is no longer _active.
+                    _unwinding.Add(active);
                 }
                 foreach (var q in _queued)
                 {
@@ -363,6 +370,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
                 {
                     _active = null;
                 }
+                _unwinding.Remove(request);
                 request.Tcs.TrySetResult(MakeResult(request));
             }
         }
@@ -382,6 +390,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
                     }
                 }
                 _queued.Remove(request);
+                _unwinding.Remove(request);
                 request.Tcs.TrySetResult(MakeResult(request));
             }
         }
@@ -426,6 +435,11 @@ internal sealed class SpeechRequestScheduler : IDisposable
                 stoppedInFlight.Add(_active.Tcs.Task);
             }
             _active = null;
+            // Replace-superseded speaks still unwinding natively.
+            foreach (var u in _unwinding)
+            {
+                stoppedInFlight.Add(u.Tcs.Task);
+            }
         }
         // Stop the in-flight native synthesis outside the lock; the
         // speak thread then unwinds and finalizes the record.

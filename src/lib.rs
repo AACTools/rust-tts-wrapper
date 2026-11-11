@@ -1411,28 +1411,21 @@ pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_ch
         // Per-context when ctx is provided (no stale-global fallback —
         // an unrelated create failure must not leak into a healthy
         // ctx's detail); the global record only for null ctx.
-        let detail = if !ctx.is_null() {
+        let detail = if ctx.is_null() {
+            let guard = LAST_ERROR
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.as_ref().map(|(d, _)| d.clone())
+        } else {
             let ctx_ref = unsafe { &*ctx };
             let guard = ctx_ref
                 .last_error_detail
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !guard.message.is_empty() {
-                Some(guard.clone())
-            } else {
-                None
-            }
-        } else {
-            let guard = LAST_ERROR
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.as_ref().map(|(d, _)| d.clone())
+            (!guard.message.is_empty()).then(|| guard.clone())
         };
         match detail {
-            Some(d) => d
-                .into_c_string()
-                .map(CString::into_raw)
-                .unwrap_or(ptr::null_mut()),
+            Some(d) => d.into_c_string().map_or(ptr::null_mut(), CString::into_raw),
             None => ptr::null_mut(),
         }
     }))
@@ -1466,9 +1459,7 @@ pub extern "C" fn tts_free_string(s: *mut c_char) {
 pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let json = crate::engine_schema::engine_setups_json();
-        CString::new(json)
-            .map(CString::into_raw)
-            .unwrap_or(ptr::null_mut())
+        CString::new(json).map_or(ptr::null_mut(), CString::into_raw)
     }))
     .unwrap_or(ptr::null_mut())
 }

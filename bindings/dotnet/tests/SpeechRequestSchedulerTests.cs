@@ -24,6 +24,7 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
 
         public ManualResetEventSlim Speaking = new(false);
         public volatile bool StopRequested;
+        public volatile bool LastSpeakFullyReturned;
         public int StopCalls;
         public List<string> Spoken { get; } = new();
         public int SpeakMillis { get; set; } = 200;
@@ -37,15 +38,29 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
             StopRequested = false;
             lock (Spoken) Spoken.Add(text);
             Speaking.Set();
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            // Emit words while "synthesizing", honouring stop.
-            foreach (var w in Words)
+            try
             {
-                if (StopRequested) return;
-                _handler?.Invoke(w, -1, -1, 0.1f, 0.2f, true);
-                Thread.Sleep(Math.Max(1, SpeakMillis / Words.Length / 2));
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                // Emit words while "synthesizing", honouring stop —
+                // sleeps are polled so stop lands within ~5 ms.
+                foreach (var w in Words)
+                {
+                    if (StopRequested) return;
+                    _handler?.Invoke(w, -1, -1, 0.1f, 0.2f, true);
+                    PollUnstopped(Math.Max(1, SpeakMillis / Words.Length / 2));
+                }
+                PollUnstopped(SpeakMillis);
             }
-            while (!StopRequested && sw.ElapsedMilliseconds < SpeakMillis)
+            finally
+            {
+                LastSpeakFullyReturned = true;
+            }
+        }
+
+        private void PollUnstopped(int totalMillis)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (!StopRequested && sw.ElapsedMilliseconds < totalMillis)
             {
                 Thread.Sleep(5);
             }
@@ -193,6 +208,41 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
         scheduler.Dispose();
         var result = await task;
         Assert.Equal(SpeechRequestStatus.Stopped, result.Status);
+    }
+
+    [Fact]
+    public async Task Dispose_Drains_A_Replace_Superseded_InFlight_Speak()
+    {
+        // GH #70 loop-4: a Replace-superseded speak is no longer
+        // _active, but its native call is still unwinding — Dispose
+        // must drain it before returning (owners free the native
+        // engine right after), never mind that StopAll's snapshot
+        // wouldn't see it.
+        var scheduler = Scheduler;
+        _backend.SpeakMillis = 60_000;
+        _backend.LastSpeakFullyReturned = false;
+
+        var old = scheduler.SubmitAsync("old", null, null, null, CancellationToken.None);
+        Assert.True(_backend.Speaking.Wait(5000), "first request must be speaking");
+
+        var replacement = scheduler.SubmitAsync(
+            "new", null, null,
+            new SpeechRequestOptions { Dispatch = SpeechRequestDispatch.Replace },
+            CancellationToken.None);
+
+        // 'old' is superseded and unwinding; Dispose immediately.
+        scheduler.Dispose();
+
+        // The in-flight native speak fully unwound before Dispose
+        // returned — the drain held even for the superseded request.
+        Assert.True(_backend.LastSpeakFullyReturned,
+            "superseded speak must unwind before Dispose returns");
+
+        var oldResult = await old;
+        Assert.Equal(SpeechRequestStatus.Superseded, oldResult.Status);
+        // The replacement was queued when Dispose ran → cancelled.
+        var newResult = await replacement;
+        Assert.Equal(SpeechRequestStatus.Cancelled, newResult.Status);
     }
 
     [Fact]

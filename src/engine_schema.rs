@@ -200,6 +200,9 @@ impl SetupField {
 }
 
 /// What an engine can do — drives UI affordances and capability gates.
+// A capability table: eight flags IS the data; a builder would obscure
+// the per-engine rows.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EngineCapabilityInfo {
@@ -229,7 +232,9 @@ pub struct EngineCapabilityInfo {
 }
 
 impl EngineCapabilityInfo {
-    /// Offline engine with the given affordances.
+    /// Engine with the given affordances (flags in the documented
+    /// order — the catalogue table reads better positionally).
+    #[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         rate: bool,
@@ -286,6 +291,9 @@ pub struct EngineSetup {
 
 /// Fields + capabilities per engine id (the catalogue; feature gating is
 /// applied by [`engine_setup_schemas`] via `engine_list()`).
+// One flat per-engine table: splitting it would hurt the very
+// readability the schema exists for.
+#[allow(clippy::too_many_lines, clippy::match_same_arms)]
 fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> {
     let azure_regions: &[&str] = &[
         "australiaeast",
@@ -474,7 +482,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                     .default("qwencloud")
                     .help("Regional endpoint; wsUrl overrides"),
                 SetupField::text("instruction", "Instruction"),
-                SetupField::url("wsUrl", "WebSocket URL").default("wss://dashscope.aliyuncs.com"),
+                SetupField::url("wsUrl", "WebSocket URL")
+                    .help("Optional override; empty routes by region"),
                 SetupField::url("customizationUrl", "Customization URL"),
             ],
             EngineCapabilityInfo::new(true, false, true, true, false, true, true, true)
@@ -499,7 +508,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             EngineCapabilityInfo::new(true, true, true, true, false, false, true, false)
                 .note("Alignment-based measured word timings"),
         )),
-        "deepgram" => Some((
+        "deepgram" | "fishaudio" | "murf" | "resemble" | "unrealspeech" | "upliftai"
+        | "modelslab" => Some((
             vec![SetupField::secret("apiKey", "API key").required()],
             EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
         )),
@@ -508,10 +518,6 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                 SetupField::secret("apiKey", "API key").required(),
                 SetupField::text("userId", "User id").required(),
             ],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
-        )),
-        "fishaudio" => Some((
-            vec![SetupField::secret("apiKey", "API key").required()],
             EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
         )),
         "hume" => Some((
@@ -523,22 +529,6 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             vec![SetupField::secret("apiKey", "API key").required()],
             EngineCapabilityInfo::new(true, false, true, false, false, false, true, true)
                 .note("Static voice catalog: voice listing does not verify the key"),
-        )),
-        "murf" => Some((
-            vec![SetupField::secret("apiKey", "API key").required()],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
-        )),
-        "resemble" => Some((
-            vec![SetupField::secret("apiKey", "API key").required()],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
-        )),
-        "unrealspeech" => Some((
-            vec![SetupField::secret("apiKey", "API key").required()],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
-        )),
-        "upliftai" => Some((
-            vec![SetupField::secret("apiKey", "API key").required()],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
         )),
         "watson" => Some((
             vec![
@@ -561,10 +551,6 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             vec![SetupField::secret("apiKey", "API key").required()],
             EngineCapabilityInfo::new(true, false, true, false, false, false, true, true)
                 .note("Static voice catalog: voice listing does not verify the key"),
-        )),
-        "modelslab" => Some((
-            vec![SetupField::secret("apiKey", "API key").required()],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, true, false),
         )),
         _ => None,
     }
@@ -628,15 +614,17 @@ fn required_any_groups(engine_id: &str) -> Vec<Vec<String>> {
 /// Covers both field-level `required` flags and the either/or
 /// `required_any` groups (reports the first member of an unsatisfied
 /// group).
+#[allow(clippy::implicit_hasher)] // the parse_credentials pipeline is std-hashmap end to end
 #[must_use]
 pub fn first_missing_required_field(
     engine_id: &str,
     credentials: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     let (fields, _) = catalogue_entry(engine_id)?;
+    let missing = |v: Option<&String>| v.is_none_or(String::is_empty);
     if let Some(field) = fields
         .iter()
-        .find(|f| f.required && credentials.get(&f.key).map_or(true, String::is_empty))
+        .find(|f| f.required && missing(credentials.get(&f.key)))
     {
         return Some(field.key.clone());
     }
