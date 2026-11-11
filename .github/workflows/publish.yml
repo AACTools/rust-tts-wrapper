@@ -332,13 +332,16 @@ jobs:
         # KEEP IN SYNC with the exact `sherpa-onnx` pin in Cargo.toml:
         # builds resolve fresh (Cargo.lock is gitignored and the version
         # job rewrites Cargo.toml), so a version mismatch means either a
-        # compile error (crate/sys pair drift) or LNK2019 (crate newer
-        # than the lib, e.g. 1.13.5's SherpaOnnxGetOnnxruntimeVersionStr
-        # missing from the 1.13.4 lib).
+        # compile error (crate/sys pair drift — sys 2.0.1 links
+        # utf8proc + ssentencepiece_core, which the older 1.13.x
+        # archives don't ship) or LNK2019 (crate newer than the lib).
+        # Since sherpa-onnx 2.x the crate and the k2-fsa C-API release
+        # share version numbers: v1.6.6 pinned crate 1.13.8 and paired
+        # it with the v1.13.5 archive; crate =2.0.1 pairs with v2.0.1.
         if: matrix.target == 'i686-pc-windows-msvc'
         shell: pwsh
         run: |
-          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.5/sherpa-onnx-v1.13.5-win-x86-static-MD-Release-lib.tar.bz2"
+          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x86-static-MD-Release-lib.tar.bz2"
           Invoke-WebRequest -Uri $url -OutFile sherpa-x86.tar.bz2
           mkdir sherpa-x86-libs | Out-Null
           tar -xjf sherpa-x86.tar.bz2 -C sherpa-x86-libs --strip-components=1
