@@ -111,6 +111,8 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
     }
 }
 
+/// Fallback without the `speechmarkdown` feature: text passes through
+/// unchanged, never reported as SSML.
 #[cfg(not(feature = "speechmarkdown"))]
 #[must_use]
 pub fn preprocess_speech_markdown(text: &str, _platform: &str) -> (String, bool) {

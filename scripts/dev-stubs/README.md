@@ -2,7 +2,9 @@
 
 Minimal C stubs of the optional external runtime libraries, for local
 development and testing of engine features without building (or
-downloading) the real C++ libraries.
+downloading) the real C++ libraries. CI's `offline-engines` jobs build
+the **real** runtimes — the stubs exist for quick local iteration
+(clippy/test without a cmake build).
 
 ## omnivoice_stub.c — omnivoice.cpp (ABI v4)
 
@@ -31,7 +33,19 @@ OMNIVOICE_LIB=$PWD/scripts/dev-stubs cargo test --no-default-features \
   --features omnivoice-local,cloud --lib gh64
 ```
 
-For integration tests against the **real** runtime, build omnivoice.cpp
-(`-DOMNIVOICE_SHARED=ON`) and point `OMNIVOICE_LIB` (and the
-`OMNIVOICE_TEST_MODEL`/`OMNIVOICE_TEST_CODEC` GGUFs) at it — see
-`VOICE_CLONING_PLAN.md`.
+## qwen3tts_stub.c — qwen3-tts.cpp (`libqwen3tts`)
+
+Link-only stub: every `qwen3_tts_*` symbol exists, all calls fail
+softly (enables `cargo check`/`clippy`/`--lib` tests under the
+`qwen3-local` feature without the GGML build).
+
+```bash
+gcc -shared -fPIC -o build/libqwen3tts.so qwen3tts_stub.c
+QWEN3_TTS_LIB=$PWD/scripts/dev-stubs cargo check --features qwen3-local
+```
+
+For integration tests against the **real** runtimes, build them
+(omnivoice.cpp: `-DOMNIVOICE_SHARED=ON`; qwen3-tts.cpp:
+`scripts/build-qwen3-local.sh`) and point `OMNIVOICE_LIB` /
+`QWEN3_TTS_LIB` (and `OMNIVOICE_TEST_MODEL`/`OMNIVOICE_TEST_CODEC`
+GGUFs for the fallback tests) at them — see `VOICE_CLONING_PLAN.md`.

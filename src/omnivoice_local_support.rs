@@ -24,6 +24,8 @@ use std::sync::OnceLock;
 pub(crate) const OV_ABI_VERSION: c_int = 4;
 
 // ── Opaque handle ────────────────────────────────────────────────────
+/// Opaque omnivoice.cpp runtime context (created by `ov_init`, freed
+/// by `ov_free`).
 #[repr(C)]
 pub struct ov_context {
     _private: [u8; 0],
@@ -32,73 +34,125 @@ pub struct ov_context {
 // ── Status: the C side returns NEGATIVE codes on error; a fieldless
 // repr(C) enum with only non-negative variants would be UB. Use c_int
 // constants matching the header exactly. ─────────────────────────────
+/// C status code returned by `ov_synthesize` (0 = OK, negative = error).
 pub type ov_status = c_int;
+/// Synthesis succeeded.
 pub(crate) const OV_STATUS_OK: c_int = 0;
+/// Generic error (also `OV_STATUS_INVALID_PARAMS`).
 pub(crate) const OV_STATUS_ERROR: c_int = -1;
+/// Alias of [`OV_STATUS_ERROR`] in the header.
 pub(crate) const OV_STATUS_INVALID_PARAMS: c_int = -1;
+/// Voice-design instruct string outside the token vocabulary.
 pub(crate) const OV_STATUS_INSTRUCT_INVALID: c_int = -2;
+/// MaskGIT generation failed.
 pub(crate) const OV_STATUS_GENERATE_FAILED: c_int = -3;
+/// Allocation failure inside the runtime.
 pub(crate) const OV_STATUS_OUT_OF_MEMORY: c_int = -4;
+/// The cancel callback aborted synthesis.
 pub(crate) const OV_STATUS_CANCELLED: c_int = -5;
 
 // ── Callbacks ────────────────────────────────────────────────────────
+/// Cancellation poll: return true to abort in-flight synthesis.
 pub type ov_cancel_cb = Option<unsafe extern "C" fn(user_data: *mut c_void) -> bool>;
+/// Streaming chunk callback: return false to abort.
 pub type ov_audio_chunk_cb =
     Option<unsafe extern "C" fn(samples: *const f32, n: c_int, user_data: *mut c_void) -> bool>;
 
 // ── Structs (exact v4 layouts from omnivoice.h) ─────────────────────
+/// Synthesis output buffer (owned by the runtime; free with
+/// `ov_audio_free`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ov_audio {
+    /// Interleaved f32 samples (24 kHz mono).
     pub samples: *const f32,
+    /// Number of samples in `samples`.
     pub n_samples: c_int,
+    /// Sample rate in Hz.
     pub sample_rate: c_int,
+    /// Channel count (always 1).
     pub channels: c_int,
 }
 
 /// omnivoice.h v4: 40 bytes on x86-64. `use_fa` / `clamp_fp16` are
 /// packed bools at offsets 24/25; `device` selects the ggml backend.
+/// `ov_init` parameters (start from `ov_init_default_params`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ov_init_params {
+    /// ABI version the caller was built against (this binding: 4).
     pub abi_version: c_int,
+    /// Path to the base model GGUF.
     pub model_path: *const c_char,
+    /// Path to the codec GGUF.
     pub codec_path: *const c_char,
+    /// Enable the fast-attention path where the model supports it.
     pub use_fa: bool,
+    /// Clamp fp16 activations (stability over speed).
     pub clamp_fp16: bool,
+    /// ggml backend device (null = default).
     pub device: *const c_char,
 }
 
 /// omnivoice.h v4: 27 fields. Order matters — verified field-for-field.
+/// `ov_synthesize` parameters (start from `ov_tts_default_params`).
+/// Exact v4 field order — layout asserts below.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct ov_tts_params {
+    /// ABI version the caller was built against.
     pub abi_version: c_int,
+    /// Text to speak (UTF-8).
     pub text: *const c_char,
+    /// Language id/name; null or empty = auto-detect.
     pub lang: *const c_char,
+    /// Voice-design tokens ("female, british accent"); null = none.
     pub instruct: *const c_char,
+    /// Output length override in codec frames (−1 = derive).
     pub T_override: c_int,
+    /// Streaming chunk target (seconds).
     pub chunk_duration_sec: f32,
+    /// Streaming flush threshold (seconds).
     pub chunk_threshold_sec: f32,
+    /// Enable the runtime denoiser.
     pub denoise: bool,
+    /// Preprocess text before phonemization.
     pub preprocess_prompt: bool,
+    /// MaskGIT sampling steps (16 fast … 32 default).
     pub mg_num_step: c_int,
+    /// MaskGIT classifier-free guidance.
     pub mg_guidance_scale: f32,
+    /// MaskGIT time shift.
     pub mg_t_shift: f32,
+    /// MaskGIT layer penalty.
     pub mg_layer_penalty_factor: f32,
+    /// MaskGIT position temperature.
     pub mg_position_temperature: f32,
+    /// MaskGIT class temperature.
     pub mg_class_temperature: f32,
+    /// Sampling seed.
     pub mg_seed: u64,
+    /// Cloning: tokenized reference audio.
     pub ref_audio_tokens: *const i32,
+    /// Cloning: reference length in frames.
     pub ref_T: c_int,
+    /// Cloning: 24 kHz mono f32 reference samples.
     pub ref_audio_24k: *const f32,
+    /// Cloning: sample count of `ref_audio_24k`.
     pub ref_n_samples: c_int,
+    /// Cloning: reference transcript.
     pub ref_text: *const c_char,
+    /// Debug dump directory (null = none).
     pub dump_dir: *const c_char,
+    /// Cancellation poll callback (null = none).
     pub cancel: ov_cancel_cb,
+    /// Userdata for `cancel`.
     pub cancel_user_data: *mut c_void,
+    /// Streaming chunk callback (null = buffered).
     pub on_chunk: ov_audio_chunk_cb,
+    /// Userdata for `on_chunk`.
     pub on_chunk_user_data: *mut c_void,
+    /// Enable runtime post-processing.
     pub postproc: bool,
 }
 
@@ -108,25 +162,40 @@ pub struct ov_tts_params {
 macro_rules! omnivoice_ffi {
     () => {
         extern "C" {
+            /// Fill `p` with the runtime's default init parameters.
             pub fn ov_init_default_params(p: *mut ov_init_params);
+            /// Create a runtime context (null = failure; see
+            /// `ov_last_error`).
             pub fn ov_init(params: *const ov_init_params) -> *mut ov_context;
+            /// Destroy a context created by `ov_init`.
             pub fn ov_free(ctx: *mut ov_context);
+            /// Thread-local last-error message (never null after a
+            /// failure).
             pub fn ov_last_error() -> *const c_char;
+            /// Fill `p` with the runtime's default synthesis parameters.
             pub fn ov_tts_default_params(p: *mut ov_tts_params);
+            /// Synthesize; writes PCM f32 output into `out` (owned by
+            /// the runtime until `ov_audio_free`).
             pub fn ov_synthesize(
                 ctx: *mut ov_context,
                 params: *const ov_tts_params,
                 out: *mut ov_audio,
             ) -> ov_status;
+            /// Free a buffer returned by `ov_synthesize`.
             pub fn ov_audio_free(audio: *mut ov_audio);
+            /// Number of languages in the runtime's accepted table
+            /// (GH #64: the wrapper advertises exactly these).
             pub fn ov_n_languages() -> c_int;
+            /// Table id at `index` (null when out of range).
             pub fn ov_language_id(index: c_int) -> *const c_char;
             // NOTE: the runtime's ov_language_name takes the same INDEX
             // as ov_language_id (name/id are two views of one table) —
             // verified against omnivoice.cpp src/omnivoice.h (ABI v4).
             // An earlier revision declared (id: *const c_char); the
             // mismatched ABI truncates the pointer into an index (UB).
+            /// Display name for the table entry at `index`.
             pub fn ov_language_name(index: c_int) -> *const c_char;
+            /// Convert a duration in seconds to codec frames.
             pub fn ov_duration_sec_to_tokens(ctx: *const ov_context, seconds: f32) -> c_int;
         }
     };
@@ -149,6 +218,7 @@ mod layout_asserts {
 
 // ── Safe wrappers ────────────────────────────────────────────────────
 
+/// omnivoice.cpp failure (runtime status + last-error detail).
 #[derive(Debug)]
 pub struct OmniVoiceError(pub String);
 

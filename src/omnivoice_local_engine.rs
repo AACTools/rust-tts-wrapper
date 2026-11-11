@@ -53,6 +53,10 @@ fn ov_lock() -> &'static Mutex<()> {
     OV_LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Offline OmniVoice engine over the omnivoice.cpp C ABI: 646
+/// languages, voice-design instructs, zero-shot cloning from a
+/// reference WAV. One `ov_context`; calls serialized by a global lock
+/// (the runtime is not thread-safe).
 pub struct OmniVoiceLocalEngine {
     ctx: *mut ov_context,
     params: OmniVoiceLocalParams,
@@ -63,6 +67,8 @@ pub struct OmniVoiceLocalEngine {
     cancel_requested: AtomicBool,
 }
 
+/// Construction and per-engine parameters for
+/// [`OmniVoiceLocalEngine::new`].
 #[derive(Clone, Debug)]
 pub struct OmniVoiceLocalParams {
     /// Path to the base model GGUF (omnivoice-base-Q8_0.gguf)
