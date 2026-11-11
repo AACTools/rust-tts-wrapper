@@ -702,6 +702,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn azure_renders_key_and_region() {
         let azure = engine_setup_schemas()
             .into_iter()
@@ -727,6 +728,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn google_either_key_or_key_file() {
         let google = engine_setup_schemas()
             .into_iter()
@@ -756,6 +758,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn google_has_credential_file_picker() {
         let google = engine_setup_schemas()
             .into_iter()
@@ -825,6 +828,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn schema_defaults_match_engine_defaults() {
         // The registry must not silently downgrade users to deprecated
         // models: defaults mirror cloud_engine's own choices.
@@ -917,6 +921,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn json_round_trip_shape() {
         let json = engine_setups_json();
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
@@ -935,6 +940,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "cloud")]
     fn openai_is_flagged_static() {
         // GH #69: enumerating a static catalog must not read as
         // "credentials verified".

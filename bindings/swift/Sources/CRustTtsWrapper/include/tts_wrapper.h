@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/**
+ * Opaque engine context returned by [`tts_create`] and consumed by
+ * every other `tts_*` function. Destroy with [`tts_destroy`].
+ */
 typedef struct tts_ctx tts_ctx;
 
 /**
@@ -63,10 +67,20 @@ typedef void (*CBoundaryCb)(const char*, int32_t, int32_t, float, float, int32_t
  */
 typedef void (*CMarkCb)(const char*, int32_t, float, float, void*);
 
+/**
+ * Viseme callback: cb(viseme_id, audio_offset_sec, userdata).
+ */
 typedef void (*CVisemeCb)(int32_t, float, void*);
 
+/**
+ * Payload-free lifecycle callback (start/end): cb(userdata).
+ */
 typedef void (*CVoidCb)(void*);
 
+/**
+ * Error callback: cb(message_cstr, userdata). The message pointer is
+ * valid only for the duration of the call.
+ */
 typedef void (*CErrorCb)(const char*, void*);
 
 /**
