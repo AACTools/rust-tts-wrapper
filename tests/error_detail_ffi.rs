@@ -101,6 +101,79 @@ fn openai_reports_unverified_without_network() {
 }
 
 #[test]
+fn rejected_credentials_report_deterministically() {
+    // GH #69 acceptance: "rejected credentials" covered end-to-end and
+    // deterministically — a voicesUrl override pointing at a local
+    // server that answers 401 (no DNS, no timeouts, works offline).
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            use std::io::{Read, Write};
+            let mut s = stream;
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf); // drain the request line/headers
+            let _ = s.write_all(
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let ctx = ctx_for(
+        "elevenlabs",
+        &format!(r#"{{"apiKey":"dummy-key","voicesUrl":"http://127.0.0.1:{port}/voices"}}"#),
+    );
+    assert_eq!(tts_check_credentials(ctx), 0, "401 → Rejected");
+    tts_destroy(ctx);
+    let _ = server.join();
+}
+
+#[test]
+fn service_outage_is_not_a_rejection() {
+    // 5xx must NOT tell the user to fix their credentials: the check
+    // errors (retry) instead of returning Rejected.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            use std::io::{Read, Write};
+            let mut s = stream;
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let ctx = ctx_for(
+        "elevenlabs",
+        &format!(r#"{{"apiKey":"dummy-key","voicesUrl":"http://127.0.0.1:{port}/voices"}}"#),
+    );
+    let rc = tts_check_credentials(ctx);
+    assert_eq!(rc, -1, "503 → check failed (retryable), not Rejected");
+    // And the classified detail names a service error, not a rejection.
+    let json = detail_json(ctx).unwrap_or_default();
+    assert!(
+        json.contains("service error"),
+        "expected service-error detail: {json}"
+    );
+    tts_destroy(ctx);
+    let _ = server.join();
+}
+
+#[test]
+fn malformed_credentials_json_is_invalid_configuration() {
+    // GH #69: broken JSON must not masquerade as a missing field (the
+    // user did fill the fields in).
+    let ctx = ctx_for("azure", r#"{"subscriptionKey": "k", "region": tru}"#);
+    let rc = tts_check_credentials(ctx);
+    assert_eq!(rc, -1);
+    assert_eq!(last_code(ctx), 2, "InvalidConfiguration");
+    let json = detail_json(ctx).unwrap_or_default();
+    assert!(json.contains("not valid JSON"), "{json}");
+    tts_destroy(ctx);
+}
+
+#[test]
 fn check_credentials_null_ctx_is_error() {
     assert_eq!(tts_check_credentials(std::ptr::null_mut()), -1);
 }

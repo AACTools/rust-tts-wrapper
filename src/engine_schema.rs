@@ -136,6 +136,33 @@ impl SetupField {
         }
     }
 
+    /// Numeric field (spinner/slider).
+    #[must_use]
+    pub fn number(key: &str, label: &str) -> Self {
+        Self {
+            kind: SetupFieldKind::Number,
+            ..Self::text(key, label)
+        }
+    }
+
+    /// Choice field (combo box; free text still accepted).
+    #[must_use]
+    pub fn choice(key: &str, label: &str) -> Self {
+        Self {
+            kind: SetupFieldKind::Choice,
+            ..Self::text(key, label)
+        }
+    }
+
+    /// URL field.
+    #[must_use]
+    pub fn url(key: &str, label: &str) -> Self {
+        Self {
+            kind: SetupFieldKind::Url,
+            ..Self::text(key, label)
+        }
+    }
+
     /// Mark required.
     #[must_use]
     pub fn required(mut self) -> Self {
@@ -249,6 +276,12 @@ pub struct EngineSetup {
     pub fields: Vec<SetupField>,
     /// Capability flags.
     pub capabilities: EngineCapabilityInfo,
+    /// Either/or requirement groups: at least ONE field in each group
+    /// must be non-empty (e.g. google: `apiKey` OR `keyFilePath`).
+    /// Empty when all requirements are expressed by field-level
+    /// `required` flags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_any: Vec<Vec<String>>,
 }
 
 /// Fields + capabilities per engine id (the catalogue; feature gating is
@@ -270,7 +303,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         "northcentralus",
         "northeurope",
         "norwayeast",
-        "southafricanouth",
+        "southafricanorth",
         "southcentralus",
         "southeastasia",
         "southindia",
@@ -290,8 +323,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         // ── Zero-config system engines ───────────────────────────────
         "system" => Some((
             vec![],
-            EngineCapabilityInfo::new(true, false, true, false, false, false, false, true)
-                .note("Linux Speech Dispatcher; word timings are proportional estimates"),
+            EngineCapabilityInfo::new(true, false, true, true, false, false, false, true)
+                .note("Linux Speech Dispatcher; word timings are proportional estimates; pitch is not applied"),
         )),
         "avsynth" => Some((
             vec![],
@@ -319,18 +352,18 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                     .help("WAV used as the zero-shot cloning reference"),
                 SetupField::text("referenceText", "Reference transcript"),
             ],
-            EngineCapabilityInfo::new(true, false, true, true, false, false, false, true)
-                .note("Word timings are estimates; pitch is not applied"),
+            EngineCapabilityInfo::new(true, true, true, true, false, false, false, true)
+                .note("Word timings are estimates; pitch is a crude resampling shift"),
         )),
         "qwen3-local" => Some((
             vec![
                 SetupField::directory("modelsDir", "Models directory")
                     .required()
                     .help("Directory with qwen3-tts-0.6b-f16.gguf and the tokenizer GGUF"),
-                SetupField::text("threads", "Threads").default("4"),
-                SetupField::text("temperature", "Temperature").default("0.9"),
-                SetupField::text("topK", "Top-K").default("50"),
-                SetupField::text("maxTokens", "Max audio tokens").default("4096"),
+                SetupField::number("threads", "Threads").default("4"),
+                SetupField::number("temperature", "Temperature").default("0.9"),
+                SetupField::number("topK", "Top-K").default("50"),
+                SetupField::number("maxTokens", "Max audio tokens").default("4096"),
             ],
             EngineCapabilityInfo::new(true, false, true, true, false, false, false, true)
                 .note("Word timings are estimates; pitch is ignored"),
@@ -343,8 +376,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                 SetupField::file("codecPath", "Codec GGUF")
                     .required()
                     .help("omnivoice-tokenizer-*.gguf from OmniVoice-GGUF"),
-                SetupField::text("numSteps", "MaskGIT steps").default("32"),
-                SetupField::text("seed", "Seed").default("42"),
+                SetupField::number("numSteps", "MaskGIT steps").default("32"),
+                SetupField::number("seed", "Seed").default("42"),
                 SetupField::text("instruct", "Voice design")
                     .help("Voice-design attributes, e.g. \"female, child, british accent\""),
                 SetupField::text("language", "Language")
@@ -372,7 +405,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                 SetupField::file("reference", "Reference WAV (cloning)"),
             ],
             EngineCapabilityInfo::new(true, false, true, true, false, false, false, true)
-                .note("Attention-aligned (measured) word timings"),
+                .note("Attention-aligned (measured) word timings. Factory creation (tts_create) not yet wired — construct PocketEngine directly; see GH follow-up"),
         )),
 
         // ── Cloud providers ──────────────────────────────────────────
@@ -386,7 +419,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         "elevenlabs" => Some((
             vec![
                 SetupField::secret("apiKey", "API key").required(),
-                SetupField::text("modelId", "Model").default("eleven_multilingual_v2"),
+                SetupField::text("modelId", "Model").default("eleven_v4"),
                 SetupField::text("voiceId", "Voice id"),
                 SetupField::text("language", "Language code"),
             ],
@@ -395,7 +428,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         "azure" => Some((
             vec![
                 SetupField::secret("subscriptionKey", "Subscription key").required(),
-                SetupField::text("region", "Region")
+                SetupField::choice("region", "Region")
                     .required()
                     .choices(azure_regions)
                     .placeholder("eastus"),
@@ -404,21 +437,22 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
         )),
         "edge" => Some((
             vec![],
-            EngineCapabilityInfo::new(true, true, true, true, true, true, true, false)
-                .note("Unauthenticated Microsoft Edge Read Aloud endpoint"),
+            EngineCapabilityInfo::new(true, true, true, true, true, true, true, true)
+                .note("Unauthenticated Microsoft Edge Read Aloud endpoint — voice listing needs no credentials"),
         )),
         "google" => Some((
             vec![
-                SetupField::secret("apiKey", "API key").required(),
+                SetupField::secret("apiKey", "API key")
+                    .help("Either apiKey or keyFilePath is required"),
                 SetupField::file("keyFilePath", "API key file")
-                    .help("File containing the API key on its first line; used when no key is set"),
+                    .help("File whose first non-empty line is the API key; used when apiKey is not set"),
             ],
             EngineCapabilityInfo::new(true, true, true, true, true, false, true, false),
         )),
         "gemini" => Some((
             vec![
                 SetupField::secret("apiKey", "API key").required(),
-                SetupField::text("modelId", "Model").default("gemini-3.1-flash-tts-preview"),
+                SetupField::text("modelId", "Model").default("gemini-3.8-flash-tts"),
                 SetupField::text("voice", "Voice"),
                 SetupField::text("style", "Style instruction"),
             ],
@@ -430,8 +464,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                 SetupField::text("modelId", "Model"),
                 SetupField::text("region", "Region"),
                 SetupField::text("instruction", "Instruction"),
-                SetupField::text("wsUrl", "WebSocket URL").default("wss://dashscope.aliyuncs.com"),
-                SetupField::text("customizationUrl", "Customization URL"),
+                SetupField::url("wsUrl", "WebSocket URL").default("wss://dashscope.aliyuncs.com"),
+                SetupField::url("customizationUrl", "Customization URL"),
             ],
             EngineCapabilityInfo::new(true, false, true, true, false, true, true, true)
                 .note("Static voice catalog: voice listing does not verify the key"),
@@ -440,7 +474,7 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
             vec![
                 SetupField::secret("accessKeyId", "Access key id").required(),
                 SetupField::secret("secretAccessKey", "Secret access key").required(),
-                SetupField::text("region", "Region").default("us-east-1"),
+                SetupField::choice("region", "Region").default("us-east-1"),
             ],
             EngineCapabilityInfo::new(true, true, true, false, true, false, true, false),
         )),
@@ -543,6 +577,7 @@ pub fn engine_setup_schemas() -> Vec<EngineSetup> {
                 )
             });
             EngineSetup {
+                required_any: required_any_groups(&desc.id),
                 id: desc.id,
                 name: desc.name,
                 needs_credentials: desc.needs_credentials,
@@ -560,19 +595,44 @@ pub fn engine_setups_json() -> String {
     serde_json::to_string(&engine_setup_schemas()).unwrap_or_else(|_| "[]".into())
 }
 
-/// First missing required field for `engine_id` given the parsed
+/// Either/or requirement groups per engine (at least one field in each
+/// group must be non-empty). Keyed by engine id.
+fn required_any_groups(engine_id: &str) -> Vec<Vec<String>> {
+    match engine_id {
+        // GH #68: a Google setup is complete with EITHER an inline key
+        // or a key file (DotNetTtsWrapper GoogleCredentials migration).
+        "google" => vec![vec!["apiKey".into(), "keyFilePath".into()]],
+        _ => Vec::new(),
+    }
+}
+
+/// First missing required setting for `engine_id` given the parsed
 /// credentials — used by `tts_check_credentials` to report
 /// `MissingConfiguration` with the offending field key (GH #69).
+/// Covers both field-level `required` flags and the either/or
+/// `required_any` groups (reports the first member of an unsatisfied
+/// group).
 #[must_use]
 pub fn first_missing_required_field(
     engine_id: &str,
     credentials: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
     let (fields, _) = catalogue_entry(engine_id)?;
-    fields
+    if let Some(field) = fields
         .iter()
         .find(|f| f.required && credentials.get(&f.key).map_or(true, String::is_empty))
-        .map(|f| f.key.clone())
+    {
+        return Some(field.key.clone());
+    }
+    for group in required_any_groups(engine_id) {
+        let satisfied = group
+            .iter()
+            .any(|key| credentials.get(key).is_some_and(|v| !v.is_empty()));
+        if !satisfied {
+            return Some(group[0].clone());
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -648,9 +708,39 @@ mod tests {
             .find(|f| f.key == "region")
             .expect("region field");
         assert!(region.required);
+        assert_eq!(region.kind, SetupFieldKind::Choice);
         assert!(!region.choices.is_empty());
         assert!(azure.capabilities.supports_streaming);
         assert!(!azure.capabilities.static_voice_catalog);
+    }
+
+    #[test]
+    fn google_either_key_or_key_file() {
+        let google = engine_setup_schemas()
+            .into_iter()
+            .find(|s| s.id == "google")
+            .expect("google in schema");
+        let file = google
+            .fields
+            .iter()
+            .find(|f| f.key == "keyFilePath")
+            .expect("keyFilePath field");
+        assert_eq!(file.kind, SetupFieldKind::FilePath);
+        assert!(!file.required);
+        // Either/or is expressed as a required_any group, not a
+        // required flag on apiKey (a keyFile-only setup is valid).
+        assert!(google
+            .required_any
+            .contains(&vec!["apiKey".to_string(), "keyFilePath".to_string()]));
+        // Validation honours both halves.
+        let mut creds = std::collections::HashMap::new();
+        creds.insert("keyFilePath".to_string(), "/keys/g.txt".to_string());
+        assert_eq!(first_missing_required_field("google", &creds), None);
+        creds.clear();
+        assert_eq!(
+            first_missing_required_field("google", &creds),
+            Some("apiKey".to_string())
+        );
     }
 
     #[test]
@@ -672,6 +762,81 @@ mod tests {
             .find(|f| f.key == "apiKey")
             .expect("apiKey field");
         assert_eq!(key.kind, SetupFieldKind::Secret);
+    }
+
+    #[test]
+    fn offline_model_directories_are_directory_pickers() {
+        // GH #68 acceptance: "an offline model directory picker".
+        #[cfg(feature = "qwen3-local")]
+        {
+            let qwen = engine_setup_schemas()
+                .into_iter()
+                .find(|s| s.id == "qwen3-local")
+                .expect("qwen3-local in schema");
+            let dir = qwen
+                .fields
+                .iter()
+                .find(|f| f.key == "modelsDir")
+                .expect("modelsDir field");
+            assert_eq!(dir.kind, SetupFieldKind::DirectoryPath);
+            assert!(dir.required);
+        }
+        #[cfg(feature = "sherpaonnx")]
+        {
+            let sherpa = engine_setup_schemas()
+                .into_iter()
+                .find(|s| s.id == "sherpaonnx")
+                .expect("sherpaonnx in schema");
+            let dir = sherpa
+                .fields
+                .iter()
+                .find(|f| f.key == "modelPath")
+                .expect("modelPath field");
+            assert_eq!(dir.kind, SetupFieldKind::DirectoryPath);
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "omnivoice-local")]
+    fn numeric_fields_use_the_number_kind() {
+        // Kind-driven UIs render spinners for these, not free text.
+        let omni = engine_setup_schemas()
+            .into_iter()
+            .find(|s| s.id == "omnivoice-local")
+            .expect("omnivoice-local in schema");
+        let steps = omni
+            .fields
+            .iter()
+            .find(|f| f.key == "numSteps")
+            .expect("numSteps field");
+        assert_eq!(steps.kind, SetupFieldKind::Number);
+    }
+
+    #[test]
+    fn schema_defaults_match_engine_defaults() {
+        // The registry must not silently downgrade users to deprecated
+        // models: defaults mirror cloud_engine's own choices.
+        let setups = engine_setup_schemas();
+        let find = |engine: &str, key: &str| -> Option<String> {
+            setups
+                .iter()
+                .find(|s| s.id == engine)?
+                .fields
+                .iter()
+                .find(|f| f.key == key)?
+                .default_value
+                .clone()
+        };
+        assert_eq!(
+            find("elevenlabs", "modelId").as_deref(),
+            Some("eleven_v4"),
+            "must match config.rs elevenlabs default"
+        );
+        assert_eq!(
+            find("gemini", "modelId").as_deref(),
+            Some("gemini-3.8-flash-tts"),
+            "must match config.rs gemini default"
+        );
     }
 
     #[test]

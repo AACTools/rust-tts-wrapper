@@ -138,33 +138,32 @@ public sealed class BindingsExtrasTests : IDisposable
     }
 
     [Fact]
-    public async Task GetVoicesAsync_Cancellation_Prevents_Result_Delivery()
+    public async Task GetVoicesAsync_Cancellation_Mid_Flight_Never_Delivers_Results()
     {
-        // Engine switch during discovery (GH #70): the token fires
-        // after enumeration completes but before delivery — the older
-        // engine's list must not come back.
-        using var rust = new RustTtsClient("openai", new() { ["apiKey"] = "dummy" });
+        // Engine switch during discovery (GH #70): cancel while a SLOW
+        // engine enumerates (system/sapi enumerate through the OS, tens
+        // to hundreds of ms — the cancel lands mid-flight). The
+        // contract: the task throws OCE; the older engine's list is
+        // never returned to the caller.
+        var engines = TtsClient.ListEngines().Select(e => e.Id).ToList();
+        string engineId = engines.Contains("system")
+            ? "system"
+            : engines.Contains("sapi") ? "sapi" : "";
+        if (engineId == "")
+        {
+            // No slow enumerator in this build; the pre-cancelled test
+            // covers the deterministic half of the contract.
+            return;
+        }
+
+        using var rust = new RustTtsClient(engineId);
         using var cts = new CancellationTokenSource();
 
-        // Enumerate once to prove the engine can answer, then race a
-        // late cancellation: cancel right after the call is dispatched.
-        var enumerate = Task.Run(() => rust.GetVoicesAsync(cts.Token));
+        var enumerate = rust.GetVoicesAsync(cts.Token);
+        await Task.Delay(5); // inside the native enumeration window
         cts.Cancel();
 
-        try
-        {
-            var voices = await enumerate;
-            // If the call observed cancellation before the native
-            // return, it throws; if the token won the race afterwards
-            // it also throws. Only a token that never got observed
-            // returns — either outcome is correct as long as a
-            // cancelled token never delivers *stale* results silently.
-            _ = voices;
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected in the common interleaving.
-        }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => enumerate);
     }
 
     [Fact]
@@ -199,7 +198,7 @@ public sealed class BindingsExtrasTests : IDisposable
     }
 
     [Fact]
-    public async Task SpeakRequest_Failure_Is_Reported_As_Failed_Result()
+    public async Task SpeakRequest_Failure_Preserves_Structured_Exception()
     {
         using var rust = new RustTtsClient("openai", new()
         {
@@ -211,7 +210,22 @@ public sealed class BindingsExtrasTests : IDisposable
         Assert.Equal(SpeechRequestStatus.Failed, result.Status);
         Assert.False(string.IsNullOrEmpty(result.Error));
         Assert.False(string.IsNullOrEmpty(result.RequestId));
+        // The original engine exception survives for rethrow (legacy
+        // wrappers keep the structured #69 detail).
+        Assert.NotNull(result.ErrorException);
+
+        // And the legacy SpeakStreamedAsync path rethrows it with the
+        // stable code intact.
+        var ex = await Assert.ThrowsAsync<TtsException>(() =>
+            rust.SpeakStreamedAsync("preview text"));
+        Assert.Equal(TtsErrorCode.NetworkError, ex.ErrorCode);
     }
+
+    // Preview → Preview → Stop with a real slow engine is exercised
+    // against the fake backend in SpeechRequestSchedulerTests
+    // (Replace_Supersedes_Active_Request, Stop_Cancels_Active_And_Queued,
+    // Late_Events_After_StopAll_Are_Dropped); offline native engines
+    // cannot stretch the interleaving deterministically.
 
     [Fact]
     public void RustTtsClient_Capabilities_Come_From_The_Schema()
@@ -242,25 +256,21 @@ public sealed class BindingsExtrasTests : IDisposable
     }
 
     [Fact]
-    public async Task Preview_Then_Stop_Completes_As_Stopped()
+    public async Task Legacy_SpeakStreamed_Preview_Fails_Fast_Through_Scheduler()
     {
-        // Offline engine whose synthesis fails fast (closed port):
-        // Preview → Stop still exercises the scheduler path; the
-        // request must terminate (here: Failed, since the engine
-        // errors before stop matters). The structural contract: Stop()
-        // never leaves a request pending forever.
+        // The offline preview path (closed port → instant failure) must
+        // surface the structured error through the legacy wrapper.
         using var rust = new RustTtsClient("openai", new()
         {
             ["apiKey"] = "dummy",
             ["synthUrl"] = "http://127.0.0.1:1/v1/audio/speech",
         });
 
-        var request = rust.SpeakRequestAsync("preview");
-        rust.Stop();
-        var result = await request;
+        var ex = await Assert.ThrowsAsync<TtsException>(() =>
+            rust.SpeakStreamedAsync("preview"));
+        Assert.Equal(TtsErrorCode.NetworkError, ex.ErrorCode);
 
-        Assert.True(result.Status is SpeechRequestStatus.Failed
-            or SpeechRequestStatus.Stopped
-            or SpeechRequestStatus.Cancelled);
+        // Stop after a completed/failed request is a safe no-op.
+        rust.Stop();
     }
 }

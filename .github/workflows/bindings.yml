@@ -118,7 +118,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: |
+            8.0.x
+            9.0.x
+      - name: Compile the local-bindings mode (unreleased-API paths)
+        working-directory: examples/dotnet/avalonia-nuget
+        run: dotnet build -p:UseLocalBindings=true -p:SkipNativeLibCheck=true
       - name: Publish from the released NuGet package
         working-directory: examples/dotnet/avalonia-nuget
         run: dotnet publish -c Release -r win-x64 --self-contained false -o publish
@@ -129,7 +134,7 @@ jobs:
           $dll = Get-ChildItem -Recurse -Filter rust_tts_wrapper.dll publish | Select-Object -First 1
           if (-not $dll) { throw "rust_tts_wrapper.dll missing from publish output" }
           Write-Host "native library at $($dll.FullName)"
-      - name: Headless smoke (engine enumeration + SAPI voice discovery)
+      - name: Headless smoke (engine enumeration + SAPI voice discovery + preview)
         working-directory: examples/dotnet/avalonia-nuget
         run: dotnet publish/AvaloniaNuGetDemo.dll --headless --engine sapi
 

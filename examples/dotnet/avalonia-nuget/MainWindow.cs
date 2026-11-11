@@ -59,12 +59,7 @@ public partial class MainWindow : Window
         });
         root.Children.Add(new TextBlock { Text = "Credentials / setup" });
         root.Children.Add(_credentialPanel);
-        root.Children.Add(new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Children = { refreshButton, new Button { Content = "Load voices (silent fallback)", IsVisible = false } },
-        });
+        root.Children.Add(refreshButton);
         root.Children.Add(_voiceList);
         root.Children.Add(_text);
         root.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { previewButton, stopButton } });
@@ -102,8 +97,12 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>Engines that need no credentials at all (a model-free
+    /// start): the demo selects one of these by default. Model-based
+    /// local engines (sherpaonnx, qwen3-local, omnivoice-local, pocket)
+    /// still need paths filled in before a client can be created.</summary>
     private static bool IsOffline(string id) =>
-        id is "sapi" or "system" or "avsynth" or "sherpaonnx" or "qwen3-local" or "omnivoice-local" or "floravox" or "pocket";
+        id is "sapi" or "system" or "avsynth";
 
     private async Task SelectEngineAsync()
     {
@@ -122,7 +121,19 @@ public partial class MainWindow : Window
         _client = null;
         _timings.Clear();
         BuildCredentialFields(engineId);
-        await ReloadVoicesAsync(_discoveryCts.Token);
+
+        // Create the client immediately (offline engines work with no
+        // credentials) and discover voices under the fresh token.
+        try
+        {
+            _client = new RustTtsClient(engineId, _credentials);
+            await ReloadVoicesAsync(_discoveryCts.Token);
+        }
+        catch (TtsException ex)
+        {
+            _client = null;
+            SetStatus($"Client creation failed: {Describe(ex)} — fill in the fields and press Reload voices.");
+        }
     }
 
     /// <summary>

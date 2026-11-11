@@ -193,7 +193,7 @@ pub fn create_engine(
                 let creds = parse_credentials(credentials_json);
                 return match Qwen3LocalEngine::new(&creds) {
                     Ok(engine) => Ok(Arc::new(engine)),
-                    Err(e) => Err(fielded_setup_error(engine_id, &creds, e.0, "modelsDir")),
+                    Err(e) => Err(fielded_setup_error(engine_id, &creds, e.0)),
                 };
             }
             #[cfg(not(feature = "qwen3-local"))]
@@ -235,7 +235,7 @@ pub fn create_engine(
                 };
                 return match OmniVoiceLocalEngine::new(params) {
                     Ok(engine) => Ok(Arc::new(engine)),
-                    Err(e) => Err(fielded_setup_error(engine_id, &creds, e.0, "modelPath")),
+                    Err(e) => Err(fielded_setup_error(engine_id, &creds, e.0)),
                 };
             }
             #[cfg(not(feature = "omnivoice-local"))]
@@ -307,15 +307,15 @@ pub fn create_engine(
 
 /// Build a setup error for a local-engine load failure, attaching the
 /// first missing required field when the credentials make the cause
-/// unambiguous (GH #69).
+/// unambiguous (GH #69). When nothing is missing — e.g. a corrupt model
+/// file — no field key is claimed (the user's paths are filled in;
+/// pointing at them would be misleading).
 fn fielded_setup_error(
     engine_id: &str,
     creds: &std::collections::HashMap<String, String>,
     raw_message: String,
-    primary_field: &str,
 ) -> EngineSetupError {
-    let missing = crate::engine_schema::first_missing_required_field(engine_id, creds);
-    let field = missing.or_else(|| Some(primary_field.to_string()));
+    let field = crate::engine_schema::first_missing_required_field(engine_id, creds);
     let code = crate::error_codes::classify_error_message(&raw_message);
     EngineSetupError::new(code, engine_id, field.as_deref(), raw_message)
 }

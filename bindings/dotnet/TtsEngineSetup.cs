@@ -189,22 +189,151 @@ public sealed class TtsEngineSetup
     public IReadOnlyList<TtsSetupField> Fields { get; init; } = Array.Empty<TtsSetupField>();
     /// <summary>Capability flags.</summary>
     public TtsEngineCapabilities Capabilities { get; init; } = new();
+    /// <summary>Either/or requirement groups: at least one field in
+    /// each group must be non-empty (e.g. google: apiKey OR
+    /// keyFilePath). Empty when field-level Required flags say it all.</summary>
+    public IReadOnlyList<IReadOnlyList<string>> RequiredAny { get; init; } =
+        Array.Empty<IReadOnlyList<string>>();
 
-    internal static readonly JsonSerializerOptions Options = new()
-    {
-        PropertyNameCaseInsensitive = true,
-        Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
-    };
-
+    /// <summary>
+    /// Tolerant manual parse (forward compatible): an unknown field
+    /// <c>kind</c> from a newer native build degrades to
+    /// <see cref="TtsSetupFieldKind.Text"/> and unknown properties are
+    /// ignored, instead of failing the whole
+    /// <see cref="TtsClient.GetEngineSetups"/> call.
+    /// </summary>
     internal static List<TtsEngineSetup>? FromJsonArray(string json)
     {
         try
         {
-            return JsonSerializer.Deserialize<List<TtsEngineSetup>>(json, Options);
+            using var doc = JsonDocument.Parse(json);
+            var arr = doc.RootElement;
+            if (arr.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+            var result = new List<TtsEngineSetup>();
+            foreach (var e in arr.EnumerateArray())
+            {
+                result.Add(new TtsEngineSetup
+                {
+                    Id = Str(e, "id"),
+                    Name = Str(e, "name"),
+                    NeedsCredentials = Bool(e, "needsCredentials"),
+                    Fields = ParseFields(e),
+                    Capabilities = Caps(e),
+                    RequiredAny = RequiredAnyGroups(e),
+                });
+            }
+            return result;
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+
+    private static IReadOnlyList<TtsSetupField> ParseFields(JsonElement engine)
+    {
+        if (!engine.TryGetProperty("fields", out var arr) || arr.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<TtsSetupField>();
+        }
+        var list = new List<TtsSetupField>();
+        foreach (var f in arr.EnumerateArray())
+        {
+            list.Add(new TtsSetupField
+            {
+                Key = Str(f, "key"),
+                Label = Str(f, "label"),
+                Kind = Str(f, "kind") switch
+                {
+                    "secret" => TtsSetupFieldKind.Secret,
+                    "filePath" => TtsSetupFieldKind.FilePath,
+                    "directoryPath" => TtsSetupFieldKind.DirectoryPath,
+                    "url" => TtsSetupFieldKind.Url,
+                    "choice" => TtsSetupFieldKind.Choice,
+                    "number" => TtsSetupFieldKind.Number,
+                    // Known + unknown alike fall back safely:
+                    "text" or _ => TtsSetupFieldKind.Text,
+                },
+                Required = Bool(f, "required"),
+                DefaultValue = OptStr(f, "defaultValue"),
+                Choices = StrArr(f, "choices"),
+                Placeholder = OptStr(f, "placeholder"),
+                HelpText = OptStr(f, "helpText"),
+            });
+        }
+        return list;
+    }
+
+    private static TtsEngineCapabilities Caps(JsonElement engine)
+    {
+        engine.TryGetProperty("capabilities", out var c);
+        return new TtsEngineCapabilities
+        {
+            SupportsRate = Bool(c, "supportsRate"),
+            SupportsPitch = Bool(c, "supportsPitch"),
+            SupportsVolume = Bool(c, "supportsVolume"),
+            SupportsWordTiming = Bool(c, "supportsWordTiming"),
+            SupportsSsml = Bool(c, "supportsSsml"),
+            SupportsStreaming = Bool(c, "supportsStreaming"),
+            RequiresInternet = Bool(c, "requiresInternet"),
+            StaticVoiceCatalog = Bool(c, "staticVoiceCatalog"),
+            Notes = OptStr(c, "notes"),
+        };
+    }
+
+    private static IReadOnlyList<IReadOnlyList<string>> RequiredAnyGroups(JsonElement engine)
+    {
+        if (!engine.TryGetProperty("requiredAny", out var arr) || arr.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<IReadOnlyList<string>>();
+        }
+        var groups = new List<IReadOnlyList<string>>();
+        foreach (var g in arr.EnumerateArray())
+        {
+            groups.Add(StrArr(g, null));
+        }
+        return groups;
+    }
+
+    private static string Str(JsonElement e, string prop) =>
+        e.ValueKind == JsonValueKind.Object
+            && e.TryGetProperty(prop, out var v)
+            && v.ValueKind == JsonValueKind.String
+            ? v.GetString() ?? ""
+            : "";
+
+    private static string? OptStr(JsonElement e, string prop) =>
+        e.ValueKind == JsonValueKind.Object && e.TryGetProperty(prop, out var v)
+            ? v.GetString()
+            : null;
+
+    private static bool Bool(JsonElement e, string prop) =>
+        e.ValueKind == JsonValueKind.Object
+            && e.TryGetProperty(prop, out var v)
+            && v.ValueKind == JsonValueKind.True;
+
+    private static IReadOnlyList<string> StrArr(JsonElement e, string? prop)
+    {
+        var arr = prop is null
+            ? e
+            : e.ValueKind == JsonValueKind.Object && e.TryGetProperty(prop, out var v)
+                ? v
+                : default;
+        if (arr.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<string>();
+        }
+        var list = new List<string>();
+        foreach (var item in arr.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                list.Add(item.GetString() ?? "");
+            }
+        }
+        return list;
     }
 }

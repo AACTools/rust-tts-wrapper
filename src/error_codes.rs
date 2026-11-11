@@ -156,10 +156,11 @@ pub fn classify_error_message(msg: &str) -> TtsErrorCode {
         return TtsErrorCode::LanguageNotSupported;
     }
 
-    // Authentication: explicit rejections by the provider.
-    if m.contains("401")
-        || m.contains("403")
-        || m.contains("unauthorized")
+    // Authentication: explicit rejections by the provider. Bare digit
+    // substrings are NOT matched ("loaded chunk 4012" is not an auth
+    // failure) — the digits must appear as standalone tokens AND in an
+    // HTTP/auth context.
+    if m.contains("unauthorized")
         || m.contains("forbidden")
         || m.contains("invalid api key")
         || m.contains("invalid_api_key")
@@ -167,6 +168,7 @@ pub fn classify_error_message(msg: &str) -> TtsErrorCode {
         || m.contains("authentication")
         || m.contains("credentials rejected")
         || m.contains("incorrect api key")
+        || http_status_in(&m, &["401", "403", "407"])
     {
         return TtsErrorCode::CredentialsRejected;
     }
@@ -227,8 +229,9 @@ pub fn classify_error_message(msg: &str) -> TtsErrorCode {
 /// display or log (GH #69: "with secret values redacted").
 ///
 /// Handles the shapes that realistically leak into error strings: OpenAI
-///-style `sk-…` keys, `Bearer` headers, long hex/base64 runs, and JSON
-/// `"apiKey":"…"` fragments.
+///-style `sk-…` keys (at word boundaries), `Bearer` headers, and JSON
+/// `"apiKey":"…"` fragments (camelCase, snake_case and kebab-case key
+/// spellings).
 #[must_use]
 pub fn redact_message(msg: &str) -> String {
     let redacted = replace_prefixed_tokens(msg, &["sk-", "rk-", "gsk_"], "«redacted»");
@@ -238,15 +241,24 @@ pub fn redact_message(msg: &str) -> String {
 
 /// Replace `<prefix><token>` runs with `replacement`, left to right.
 /// A prefix with no following token run is left untouched (and skipped),
-/// so the function always terminates even on bare prefixes.
+/// so the function always terminates even on bare prefixes. Prefixes
+/// must start at a word boundary (not preceded by alnum/`-`/`_`), so
+/// "task-risk" never triggers the `sk-` scanner.
 fn replace_prefixed_tokens(s: &str, prefixes: &[&str], replacement: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     loop {
-        // Earliest prefix occurrence in what is left.
+        // Earliest boundary-valid prefix occurrence in what is left.
         let found = prefixes
             .iter()
             .filter_map(|p| rest.find(p).map(|i| (i, *p)))
+            .filter(|(i, _)| {
+                *i == 0
+                    || !rest
+                        .as_bytes()
+                        .get(i.wrapping_sub(1))
+                        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+            })
             .min_by_key(|(i, _)| *i);
         let Some((pos, prefix)) = found else { break };
         let start = pos + prefix.len();
@@ -269,11 +281,17 @@ fn replace_prefixed_tokens(s: &str, prefixes: &[&str], replacement: &str) -> Str
 /// Redact the string values of secret-looking JSON members
 /// (`"apiKey":"…"`, `"token": "…"`, …). Non-secret members pass through.
 fn redact_json_secret_values(s: &str) -> String {
-    const SECRET_KEYS: [&str; 7] = [
+    const SECRET_KEYS: [&str; 13] = [
         "apikey",
         "api_key",
+        "api-key",
         "subscriptionkey",
+        "subscription-key",
         "secretaccesskey",
+        "secret-key",
+        "access-token",
+        "authorization",
+        "client-secret",
         "token",
         "password",
         "secret",
@@ -332,6 +350,36 @@ fn token_len(s: &str, pos: usize) -> usize {
         }
     }
     end - pos
+}
+
+/// True when `status` (e.g. "401") appears as a standalone token AND
+/// the message carries an HTTP/auth context word — so "loaded chunk
+/// 4012 at offset 401" never classifies as an auth failure, while
+/// "HTTP status client error (401 Unauthorized)" does.
+fn http_status_in(lower_msg: &str, statuses: &[&str]) -> bool {
+    let has_context = lower_msg.contains("http")
+        || lower_msg.contains("status")
+        || lower_msg.contains("response")
+        || lower_msg.contains("request");
+    if !has_context {
+        return false;
+    }
+    for status in statuses {
+        let mut search = 0;
+        while let Some(rel) = lower_msg[search..].find(status) {
+            let start = search + rel;
+            let end = start + status.len();
+            let boundary_before =
+                start == 0 || !lower_msg[..start].ends_with(|c: char| c.is_ascii_digit());
+            let boundary_after = end == lower_msg.len()
+                || !lower_msg[end..].starts_with(|c: char| c.is_ascii_digit());
+            if boundary_before && boundary_after {
+                return true;
+            }
+            search = end;
+        }
+    }
+    false
 }
 
 /// The structured error record surfaced by the ABI (GH #69).
@@ -475,6 +523,24 @@ mod tests {
             classify_error_message("request failed with 403 Forbidden"),
             TtsErrorCode::CredentialsRejected
         );
+        assert_eq!(
+            classify_error_message("HTTP status client error (401 Unauthorized) for url (…)"),
+            TtsErrorCode::CredentialsRejected
+        );
+    }
+
+    #[test]
+    fn classification_bare_status_digits_do_not_match() {
+        // Digit substrings without HTTP/auth context are not auth
+        // failures (GH #69 review: byte counts, offsets, chunk ids).
+        assert_ne!(
+            classify_error_message("failed to load model chunk 4012 at offset 401"),
+            TtsErrorCode::CredentialsRejected
+        );
+        assert_ne!(
+            classify_error_message("decoded 403 frames"),
+            TtsErrorCode::CredentialsRejected
+        );
     }
 
     #[test]
@@ -567,6 +633,20 @@ mod tests {
     fn redact_preserves_plain_text() {
         let msg = "connection refused while reaching api.openai.com";
         assert_eq!(redact_message(msg), msg);
+    }
+
+    #[test]
+    fn redact_does_not_trigger_mid_word() {
+        // "task-risk" contains "sk-" but is not a key.
+        let out = redact_message("task-risk assessment desk-lookup");
+        assert_eq!(out, "task-risk assessment desk-lookup");
+    }
+
+    #[test]
+    fn redact_kebab_case_secret_keys() {
+        let out = redact_message(r#"sent {"api-key":"supersecret1","region":"us"}"#);
+        assert!(!out.contains("supersecret1"), "secret leaked: {out}");
+        assert!(out.contains("us"), "over-redacted: {out}");
     }
 
     #[test]

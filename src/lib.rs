@@ -1373,12 +1373,13 @@ pub extern "C" fn tts_get_last_error(ctx: *mut tts_ctx) -> *const c_char {
 pub extern "C" fn tts_get_last_error_code(ctx: *mut tts_ctx) -> u32 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if !ctx.is_null() {
+            // Per-context only: an empty ctx record must NOT fall back
+            // to a stale global error from an unrelated create failure.
             let ctx_ref = unsafe { &*ctx };
             if let Ok(guard) = ctx_ref.last_error_detail.lock() {
-                if guard.code != TtsErrorCode::Unknown || !guard.message.is_empty() {
-                    return guard.code as u32;
-                }
+                return guard.code as u32;
             }
+            return TtsErrorCode::Unknown as u32;
         }
         let guard = LAST_ERROR
             .lock()
@@ -1407,6 +1408,9 @@ pub extern "C" fn tts_get_last_error_code(ctx: *mut tts_ctx) -> u32 {
 #[no_mangle]
 pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Per-context when ctx is provided (no stale-global fallback —
+        // an unrelated create failure must not leak into a healthy
+        // ctx's detail); the global record only for null ctx.
         let detail = if !ctx.is_null() {
             let ctx_ref = unsafe { &*ctx };
             let guard = ctx_ref
@@ -1419,16 +1423,10 @@ pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_ch
                 None
             }
         } else {
-            None
-        };
-        let detail = match detail {
-            Some(d) => Some(d),
-            None => {
-                let guard = LAST_ERROR
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard.as_ref().map(|(d, _)| d.clone())
-            }
+            let guard = LAST_ERROR
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.as_ref().map(|(d, _)| d.clone())
         };
         match detail {
             Some(d) => d
@@ -1509,6 +1507,23 @@ fn tts_check_credentials_inner(ctx: *mut tts_ctx) -> i32 {
     }
     let ctx_ref = unsafe { &*ctx };
     let engine_id = ctx_ref.engine.engine_id();
+
+    // Malformed credentials JSON is a configuration error, not a
+    // missing field (GH #69): a user who pasted broken JSON containing
+    // subscriptionKey must not be told to "fill in subscriptionKey".
+    let raw = ctx_ref.credentials_json.trim();
+    if !raw.is_empty() && serde_json::from_str::<serde_json::Value>(raw).is_err() {
+        set_ctx_error(
+            ctx_ref,
+            ErrorDetail::new(
+                TtsErrorCode::InvalidConfiguration,
+                Some(engine_id),
+                None,
+                format!("{engine_id}: credentials are not valid JSON"),
+            ),
+        );
+        return -1;
+    }
 
     // Required-field pre-validation: report the exact missing field
     // before touching the network (GH #69 acceptance: "missing input").

@@ -4,7 +4,7 @@ This directory contains comprehensive examples demonstrating the capabilities of
 
 ## Available Examples
 
-### .NET / Avalonia (NuGet consumer)
+## .NET / Avalonia (NuGet consumer)
 **Directory:** `dotnet/avalonia-nuget/`
 
 A minimal Avalonia app using the **released `RustTtsWrapper.Bindings`

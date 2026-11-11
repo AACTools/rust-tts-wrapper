@@ -578,7 +578,8 @@ public class TtsClient : IDisposable
         IntPtr ptr = Native.tts_get_engine_setups_json();
         if (ptr == IntPtr.Zero)
             throw new TtsException("tts_get_engine_setups_json returned null");
-        string json = Marshal.PtrToStringAnsi(ptr) ?? "[]";
+        // The Rust side emits UTF-8 (labels/placeholders may be non-ASCII).
+        string json = Marshal.PtrToStringUTF8(ptr) ?? "[]";
         Native.tts_free_string(ptr);
         return TtsEngineSetup.FromJsonArray(json)
             ?? throw new TtsException($"Engine setup JSON failed to parse: {Truncate(json, 200)}");
@@ -611,7 +612,9 @@ public class TtsClient : IDisposable
         }
         try
         {
-            string json = Marshal.PtrToStringAnsi(ptr) ?? "";
+            // UTF-8: the Rust side emits UTF-8, and display messages can
+            // carry non-ASCII (field labels, engine names).
+            string json = Marshal.PtrToStringUTF8(ptr) ?? "";
             return TtsErrorDetail.FromJson(json);
         }
         finally

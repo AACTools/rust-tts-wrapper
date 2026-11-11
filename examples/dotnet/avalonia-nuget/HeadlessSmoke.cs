@@ -53,20 +53,18 @@ internal static class HeadlessSmoke
         }
 
         // Preview: synthesize a short utterance (no audio device
-        // needed — bytes only).
+        // needed — bytes only). With a voice installed the voice IS the
+        // asset, so a preview failure here is a real regression — fail
+        // the smoke run rather than silently passing (GH #71).
         client.SetVoice(voices[0].Id);
-        try
+        var audio = await client.SynthToBytesAsync("Avalonia preview");
+        if (audio.AudioData.Length == 0)
         {
-            var audio = await client.SynthToBytesAsync("Avalonia preview");
-            Console.WriteLine($"[headless] preview synthesized: {audio.AudioData.Length} bytes");
+            Console.WriteLine("[headless] FAIL: preview synthesized 0 bytes " +
+                "with a voice installed");
+            return 1;
         }
-        catch (TtsException ex)
-        {
-            // Non-fatal on CI: synthesis can require engine assets the
-            // runner lacks; enumeration already proved the ABI works.
-            Console.WriteLine($"[headless] preview synthesis failed: {ex.Message}");
-        }
-
+        Console.WriteLine($"[headless] preview synthesized: {audio.AudioData.Length} bytes");
         return 0;
     }
 

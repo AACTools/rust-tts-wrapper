@@ -96,6 +96,11 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
         var old = scheduler.SubmitAsync("old", null, null, null, CancellationToken.None);
         Assert.True(_backend.Speaking.Wait(5000), "first request must start speaking");
 
+        // Stop unwinds the fake quickly; set the fast duration BEFORE
+        // the replacement starts so the test isn't timing-coupled.
+        _backend.StopRequested = true; // first unwinds via Replace's stop
+        _backend.SpeakMillis = 20;
+
         var replacement = scheduler.SubmitAsync(
             "new", null, null,
             new SpeechRequestOptions { Dispatch = SpeechRequestDispatch.Replace },
@@ -104,14 +109,55 @@ public sealed class SpeechRequestSchedulerTests : IDisposable
         var oldResult = await old;
         Assert.Equal(SpeechRequestStatus.Superseded, oldResult.Status);
 
-        // The fake unwinds on Stop; give the replacement the floor.
-        _backend.SpeakMillis = 20;
         var newResult = await replacement;
         Assert.Equal(SpeechRequestStatus.Completed, newResult.Status);
         lock (_backend.Spoken)
         {
             Assert.Equal(new[] { "old", "new" }, _backend.Spoken);
         }
+    }
+
+    [Fact]
+    public async Task Cancelled_While_Queued_Returns_Result_Not_Exception()
+    {
+        // Contract: "the returned task completes with the request's
+        // final status" — a token firing while queued behind an active
+        // request must yield Status=Cancelled, not a faulted task
+        // (three different cancellation shapes would otherwise exist).
+        using var scheduler = Scheduler;
+        using var cts = new CancellationTokenSource();
+        _backend.SpeakMillis = 60_000;
+
+        var active = scheduler.SubmitAsync("active", null, null, null, CancellationToken.None);
+        Assert.True(_backend.Speaking.Wait(5000), "active must be speaking");
+
+        var queued = scheduler.SubmitAsync("queued", null, null, null, cts.Token);
+        cts.Cancel(); // fires while the queued request waits on the gate
+
+        var queuedResult = await queued;
+        Assert.Equal(SpeechRequestStatus.Cancelled, queuedResult.Status);
+
+        // Cleanup through the scheduler's own stop path (also asserts
+        // Stop() maps the active request to Stopped).
+        scheduler.StopAll();
+        var activeResult = await active;
+        Assert.Equal(SpeechRequestStatus.Stopped, activeResult.Status);
+    }
+
+    [Fact]
+    public async Task Dispose_During_InFlight_Speech_Does_Not_Fault_The_Callers_Task()
+    {
+        // Contract: Dispose stops everything but never converts an
+        // already-computed result into an ObjectDisposedException.
+        using var scheduler = Scheduler;
+        _backend.SpeakMillis = 60_000;
+
+        var task = scheduler.SubmitAsync("long", null, null, null, CancellationToken.None);
+        Assert.True(_backend.Speaking.Wait(5000), "request must be speaking");
+
+        scheduler.Dispose();
+        var result = await task;
+        Assert.Equal(SpeechRequestStatus.Stopped, result.Status);
     }
 
     [Fact]

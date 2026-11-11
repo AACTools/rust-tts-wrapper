@@ -73,6 +73,10 @@ public sealed class SpeechRequestResult
     public required SpeechRequestStatus Status { get; init; }
     /// <summary>Error message when <see cref="SpeechRequestStatus.Failed"/>.</summary>
     public string? Error { get; init; }
+    /// <summary>The engine exception for a Failed request, so legacy
+    /// wrappers (and callers wanting the structured
+    /// <see cref="TtsException"/> detail) can rethrow the original.</summary>
+    public Exception? ErrorException { get; init; }
 }
 
 /// <summary>
@@ -128,7 +132,10 @@ internal sealed class SpeechRequestScheduler : IDisposable
         public Action<SpeechTimingEventArgs>? Timing { get; init; }
         public TaskCompletionSource<SpeechRequestResult> Tcs { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-        public string? Error { get; set; }
+        /// <summary>The engine exception for a Failed request (kept so
+        /// legacy wrappers can rethrow the original structured error).</summary>
+        public Exception? ErrorException { get; set; }
+        public string? Error => ErrorException?.Message;
     }
 
     private readonly ISpeechBackend _backend;
@@ -213,24 +220,104 @@ internal sealed class SpeechRequestScheduler : IDisposable
         Action? prepare,
         CancellationToken ct)
     {
-        await _gate.WaitAsync(ct).ConfigureAwait(false);
+        // Cancelled while waiting for the gate: complete as Cancelled
+        // with a result object — never fault the caller's task (the
+        // "returned task completes with the request's final status"
+        // contract holds for every cancellation interleaving).
         try
+        {
+            await _gate.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
         {
             lock (_sync)
             {
-                if (request.State == SpeechRequestStatus.Superseded ||
-                    request.State == SpeechRequestStatus.Cancelled)
+                request.State = SpeechRequestStatus.Cancelled;
+                _queued.Remove(request);
+                request.Tcs.TrySetResult(MakeResult(request));
+                return request.Tcs.Task.Result;
+            }
+        }
+        try
+        {
+            // FIFO head-of-queue check: SemaphoreSlim does not guarantee
+            // FIFO wakeups under contention, so after acquiring the gate
+            // verify this request is the oldest queued one; otherwise
+            // yield the gate and re-wait (rapid-preview bursts are the
+            // exact scenario this guards).
+            while (true)
+            {
+                lock (_sync)
                 {
-                    // Stopped/removed while queued.
+                    if (request.State == SpeechRequestStatus.Superseded ||
+                        request.State == SpeechRequestStatus.Cancelled)
+                    {
+                        // Stopped/removed while queued.
+                        _queued.Remove(request);
+                        request.Tcs.TrySetResult(MakeResult(request));
+                        return request.Tcs.Task.Result;
+                    }
+                    if (_queued.Count == 0 || ReferenceEquals(_queued[0], request))
+                    {
+                        _queued.Remove(request);
+                        request.State = SpeechRequestStatus.Speaking;
+                        _active = request;
+                        break;
+                    }
+                }
+                _gate.Release();
+                try
+                {
+                    await _gate.WaitAsync(ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    lock (_sync)
+                    {
+                        request.State = SpeechRequestStatus.Cancelled;
+                        _queued.Remove(request);
+                        request.Tcs.TrySetResult(MakeResult(request));
+                        return request.Tcs.Task.Result;
+                    }
+                }
+            }
+
+            // Prepare (apply options) under the gate; a failure here is
+            // a Failed request, not a faulted task.
+            try
+            {
+                prepare?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                lock (_sync)
+                {
+                    request.ErrorException = ex;
+                    request.State = SpeechRequestStatus.Failed;
+                    if (ReferenceEquals(_active, request))
+                    {
+                        _active = null;
+                    }
                     request.Tcs.TrySetResult(MakeResult(request));
                     return request.Tcs.Task.Result;
                 }
-                _queued.Remove(request);
-                request.State = SpeechRequestStatus.Speaking;
-                _active = request;
             }
 
-            prepare?.Invoke();
+            // Final pre-flight check: a Stop/supersede that landed between
+            // the state transition and the native call is honoured
+            // without speaking at all.
+            lock (_sync)
+            {
+                if (request.State != SpeechRequestStatus.Speaking)
+                {
+                    if (ReferenceEquals(_active, request))
+                    {
+                        _active = null;
+                    }
+                    request.Tcs.TrySetResult(MakeResult(request));
+                    return request.Tcs.Task.Result;
+                }
+            }
 
             // Cancellation while speaking: ask the engine to stop
             // cooperatively; backends that cannot abort an in-flight
@@ -252,7 +339,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
                 {
                     if (request.State == SpeechRequestStatus.Speaking)
                     {
-                        request.Error = ex.Message;
+                        request.ErrorException = ex;
                         request.State = ct.IsCancellationRequested
                             ? SpeechRequestStatus.Cancelled
                             : SpeechRequestStatus.Failed;
@@ -327,21 +414,36 @@ internal sealed class SpeechRequestScheduler : IDisposable
             // Drop late events: once a request is stopped/superseded it
             // is removed from _active, so its trailing events find no
             // target and a newer request can never receive them.
+            //
+            // ASSUMPTION: backends deliver boundary events synchronously
+            // within their SpeakSync call (true for every native engine:
+            // callbacks fire from inside speak()). An engine emitting
+            // from another thread AFTER its SpeakSync returned could in
+            // principle race a newer request's window — native
+            // request-id tagging is the long-term fix.
             if (target is null || target.State != SpeechRequestStatus.Speaking)
             {
                 return;
             }
         }
-        target.Timing?.Invoke(new SpeechTimingEventArgs
+        try
         {
-            RequestId = target.Id,
-            Word = word,
-            CharOffset = charOffset,
-            CharLen = charLen,
-            StartTime = start,
-            EndTime = end,
-            Estimated = estimated,
-        });
+            target.Timing?.Invoke(new SpeechTimingEventArgs
+            {
+                RequestId = target.Id,
+                Word = word,
+                CharOffset = charOffset,
+                CharLen = charLen,
+                StartTime = start,
+                EndTime = end,
+                Estimated = estimated,
+            });
+        }
+        catch
+        {
+            // User callback exceptions must not propagate through the
+            // reverse P/Invoke boundary (process-fatal in .NET).
+        }
     }
 
     private static SpeechRequestResult MakeResult(Request r) => new()
@@ -349,6 +451,7 @@ internal sealed class SpeechRequestScheduler : IDisposable
         RequestId = r.Id,
         Status = r.State,
         Error = r.Error,
+        ErrorException = r.ErrorException,
     };
 
     public void Dispose()
@@ -360,7 +463,11 @@ internal sealed class SpeechRequestScheduler : IDisposable
         }
         StopAll();
         _backend.SetBoundaryHandler(null);
-        _gate.Dispose();
+        // NOTE: the gate is deliberately NOT disposed — an in-flight
+        // speak still holds it and its finally-block would throw
+        // ObjectDisposedException after the result was already
+        // delivered (faulting the caller's task). The semaphore is
+        // GC-owned; nothing leaks.
     }
 }
 

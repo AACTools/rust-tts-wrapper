@@ -296,14 +296,20 @@ impl OmniVoiceLocalEngine {
             // warn. A wrong-language voice beats a silent no-speak for
             // AAC users. (Single retry; auto-detect cannot itself fail
             // with "unknown language".)
+            //
+            // NOTE: detection is coupled to the runtime's error string
+            // ("unknown language" — omnivoice.cpp formats it as
+            // "ov_synthesize: unknown language '%s'"); the ABI exposes
+            // no dedicated status code. If an omnivoice.cpp update
+            // rewords it, this fallback silently stops firing — recheck
+            // this match when bumping OV_ABI_VERSION.
             if !lang_str.is_empty() && detail.to_lowercase().contains("unknown language") {
                 eprintln!(
                     "omnivoice-local: runtime rejected language '{lang_str}' \
                      ({detail}); retrying with auto-detection (GH #64)"
                 );
-                unsafe {
-                    params.lang = std::ptr::null();
-                }
+                // lang = null → auto-detect (documented ABI default).
+                params.lang = std::ptr::null();
                 let retry_status =
                     unsafe { ov_synthesize(self.ctx, &raw const params, &raw mut audio) };
                 if retry_status == OV_STATUS_OK {
@@ -563,30 +569,36 @@ mod tests {
 #[cfg(test)]
 mod gh64_language_fallback {
     use super::*;
-    use crate::omnivoice_local_support::omnivoice_runtime_languages;
 
-    fn engine_with_language(lang: &str) -> TtsResult<OmniVoiceLocalEngine> {
+    /// Engine-level tests need `ov_init` to succeed, which requires
+    /// loadable model files. Against the REAL runtime only real
+    /// GGUFs work; against the dev stub (scripts/dev-stubs) any
+    /// path does. Set both env vars to run:
+    ///   OMNIVOICE_TEST_MODEL=/path/model.gguf
+    ///   OMNIVOICE_TEST_CODEC=/path/codec.gguf
+    /// (stub: point both at /dev/null). Skipped otherwise — the
+    /// pure-logic GH #64 tests run unconditionally.
+    fn maybe_engine_with_language(lang: &str) -> Option<OmniVoiceLocalEngine> {
+        let model = std::env::var("OMNIVOICE_TEST_MODEL").ok()?;
+        let codec = std::env::var("OMNIVOICE_TEST_CODEC").ok()?;
         OmniVoiceLocalEngine::new(OmniVoiceLocalParams {
-            model_path: "/dev/null".into(),
-            codec_path: "/dev/null".into(),
+            model_path: model,
+            codec_path: codec,
             language: lang.into(),
             ..Default::default()
         })
+        .ok()
     }
 
     /// GH #64: a language outside the runtime's accepted set must
-    /// fall back to auto-detection instead of failing the
-    /// utterance. ("ar" is unknown to the dev-stub runtime — the
-    /// same probe as the issue.)
+    /// fall back to auto-detection instead of failing the whole
+    /// utterance ("xx" is outside every table).
     #[test]
     fn rejected_language_falls_back_to_auto_detect() {
-        let table = omnivoice_runtime_languages();
-        let unknown: Vec<&str> = vec!["ar", "xx"];
-        let probe = unknown
-            .into_iter()
-            .find(|l| !table.iter().any(|(id, _)| id == l))
-            .expect("stub runtime must exclude at least one probe language");
-        let engine = engine_with_language(probe).expect("engine constructs");
+        let Some(engine) = maybe_engine_with_language("xx") else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
         let result = engine.speak("hello", None, 1.0, 1.0, 1.0, None, None, None);
         // The fallback makes the utterance succeed (wrong-language
         // audio beats a silent no-speak for AAC users).
@@ -599,7 +611,10 @@ mod gh64_language_fallback {
     /// Accepted languages synthesize without the fallback path.
     #[test]
     fn accepted_language_synthesizes_directly() {
-        let engine = engine_with_language("en").expect("engine constructs");
+        let Some(engine) = maybe_engine_with_language("en") else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
         assert!(engine
             .speak("hello", None, 1.0, 1.0, 1.0, None, None, None)
             .is_ok());

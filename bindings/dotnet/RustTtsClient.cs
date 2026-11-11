@@ -277,6 +277,13 @@ public class RustTtsClient : AbstractTtsClient
             CancellationToken.None).ConfigureAwait(false);
         if (result.Status == SpeechRequestStatus.Failed)
         {
+            // Rethrow the original engine exception so callers keep the
+            // structured TtsException detail (GH #69).
+            if (result.ErrorException is TtsException or OperationCanceledException)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                    .Capture(result.ErrorException).Throw();
+            }
             throw new TtsException(result.Error ?? "speech failed");
         }
     }
@@ -328,6 +335,13 @@ public class RustTtsClient : AbstractTtsClient
             CancellationToken.None).ConfigureAwait(false);
         if (result.Status == SpeechRequestStatus.Failed)
         {
+            // Rethrow the original engine exception (structured detail,
+            // GH #69) — the pre-scheduler behaviour.
+            if (result.ErrorException is TtsException or OperationCanceledException)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo
+                    .Capture(result.ErrorException).Throw();
+            }
             throw new TtsException(result.Error ?? "speech failed");
         }
     }

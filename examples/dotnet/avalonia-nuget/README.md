@@ -29,7 +29,7 @@ dotnet run -c Release -- --headless --engine sapi
 cargo build --release --no-default-features --features system,cloud   # or sapi,cloud on Windows
 dotnet run -p:UseLocalBindings=true
 # Linux/macOS: point the loader at the local library
-TTS_WRAPPER_LIB=../../target/release/librust_tts_wrapper.so dotnet run -p:UseLocalBindings=true
+TTS_WRAPPER_LIB=../../../target/release/librust_tts_wrapper.so dotnet run -p:UseLocalBindings=true
 ```
 
 ## Clean `win-x64` publish (no manual DLL copy)
@@ -44,10 +44,10 @@ dotnet publish -c Release -r win-x64 --self-contained false
 
 Verify in the output folder:
 
-- `runtimes/win-x64/native/rust_tts_wrapper.dll` is present and loads
-  with **no manual DLL placement** (MSBuild's RID-agnostic resolution
-  copies it beside the app);
-- `dotnet AvaloniaNuGetDemo.dll -- --headless --engine sapi` prints the
+- `rust_tts_wrapper.dll` sits **flat beside the app** (a framework-
+  dependent `publish -r win-x64` copies the RID-native content into the
+  app root) — no manual DLL placement anywhere in the flow;
+- `dotnet AvaloniaNuGetDemo.dll --headless --engine sapi` prints the
   engine list, creates a SAPI client, and enumerates installed voices.
 
 ### Expected behaviour with no voice installed

@@ -578,7 +578,9 @@ impl TtsEngine for Qwen3LocalEngine {
     }
 
     /// The GGUFs were loaded at construction (GH #69) — a live engine
-    /// means a working setup, so report Verified.
+    /// means a working setup, so report Verified. (A live engine whose
+    /// models somehow unloaded reads Unverified — "setup state unknown"
+    /// — rather than a rejection.)
     fn check_credentials_status(&self) -> TtsResult<crate::engine::CredentialCheck> {
         use crate::engine::CredentialCheck;
         if self.check_credentials()? {
