@@ -48,3 +48,35 @@ const azure = new TtsClient({
 
 Credentials are plain objects serialised to the JSON the Rust factory
 parses (canonical keys — see the [engines doc](engines.md)).
+
+## Errors, credentials and the setup schema (GH #68/#69/#73)
+
+```js
+// 1) Structured errors: TtsError carries the stable code, the
+//    offending field key and a display-ready hint (messages are
+//    secret-redacted by the native layer).
+try {
+  client.synthToBytes("hello");
+} catch (err) {
+  err.code;            // 4 (NetworkError)
+  err.fieldKey;        // "subscriptionKey" for missing-config failures
+  err.displayMessage;  // safe hint
+}
+client.lastErrorCode();    // stable u32 after any failure
+client.lastErrorDetail();  // {code, codeName, message, displayMessage, engineId, fieldKey}
+                           // (codeName is mapped from the native "name" key)
+
+// 2) Tri-state credential check: static catalogs answer "unverified".
+const check = client.checkCredentials();
+// { status: "verified" | "rejected" | "unverified" }
+// { status: "error", error: TtsErrorDetail }  — e.g. missing field
+
+// 3) Typed engine setup schema — render settings UIs without a
+//    provider switch (kinds: secret / filePath / directoryPath / url /
+//    choice / number / text; either/or groups; capabilities).
+const setups = TtsClient.engineSetups();
+const azure = TtsClient.engineSetup("azure");
+// azure.fields: subscriptionKey (secret, required), region (choice, choices[…])
+```
+
+Unknown field kinds from newer native builds degrade to `"text"`.

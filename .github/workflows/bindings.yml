@@ -76,6 +76,39 @@ jobs:
           npm install --no-fund --no-audit
           npm test
 
+  # GH #73: Python now has a CI suite (it was the one binding without one).
+  python:
+    name: Python (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install native deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libclang-dev
+      - name: Build library
+        shell: bash
+        run: cargo build --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+      - name: unittest (ABI conformance + GH #68/#69/#73 parity)
+        shell: bash
+        working-directory: bindings/python
+        run: |
+          if [ "${{ runner.os }}" = Windows ]; then
+            LIB=$(cygpath -w "$GITHUB_WORKSPACE/target/release/rust_tts_wrapper.dll")
+          elif [ "${{ runner.os }}" = macOS ]; then
+            LIB="$GITHUB_WORKSPACE/target/release/librust_tts_wrapper.dylib"
+          else
+            LIB="$GITHUB_WORKSPACE/target/release/librust_tts_wrapper.so"
+          fi
+          RUST_TTS_WRAPPER_LIB="$LIB" python -m unittest test_tts_wrapper -v
+
   dotnet:
     name: .NET (${{ matrix.os }})
     strategy:

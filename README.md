@@ -69,10 +69,11 @@ a complete [Avalonia app on the released NuGet package](examples/dotnet/avalonia
 | .NET | [`RustTtsWrapper.Bindings`](https://www.nuget.org/packages/RustTtsWrapper.Bindings/) (NuGet, native assets included) | CI-tested on Windows + Linux |
 | Node | [`@aactools/tts-wrapper`](https://www.npmjs.com/package/@aactools/tts-wrapper) (npm) | CI-tested on 3 OSes |
 | Swift | `RustTtsWrapper` (SwiftPM, in-repo) | CI-tested on macOS |
-| Python | [`bindings/python/`](bindings/python/) (single file, vendor it) | ABI conformance-tested |
+| Python | [`bindings/python/`](bindings/python/) (single file, vendor it) | CI-tested on 3 OSes |
 | C | [`bindings/c/`](bindings/c/) reference harness | compiled `-Wall -Wextra -Werror` |
 
-All five suites run in CI on every push (`.github/workflows/bindings.yml`).
+All six suites (including Python) run in CI on every push
+(`.github/workflows/bindings.yml`).
 
 ## Feature flags
 

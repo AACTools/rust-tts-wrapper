@@ -49,6 +49,12 @@ MARK_CB = ctypes.CFUNCTYPE(
     ctypes.c_float,    # end_s
     ctypes.c_void_p,   # userdata
 )
+VISEME_CB = ctypes.CFUNCTYPE(
+    None,
+    ctypes.c_int32,    # viseme_id
+    ctypes.c_float,    # offset_s
+    ctypes.c_void_p,   # userdata
+)
 VOID_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
 ERROR_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
 
@@ -152,9 +158,52 @@ def _load_lib():
     ]
     _lib.tts_free_engines.restype = None
     _lib.tts_free_engines.argtypes = [ctypes.POINTER(_TtsEngineInfoC), ctypes.c_int32]
-    _lib.tts_get_last_error.restype = ctypes.c_char_p
-    _lib.tts_get_last_error.argtypes = [ctypes.c_void_p]
+    _lib.tts_set_on_mark.restype = None
+    _lib.tts_set_on_mark.argtypes = [ctypes.c_void_p, MARK_CB, ctypes.c_void_p]
+    _lib.tts_set_on_viseme.restype = None
+    _lib.tts_set_on_viseme.argtypes = [ctypes.c_void_p, VISEME_CB, ctypes.c_void_p]
+    _lib.tts_speak_ssml.restype = ctypes.c_int32
+    _lib.tts_speak_ssml.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    # GH #68/#69 additions (ABI-additive).
+    _lib.tts_get_last_error_code.restype = ctypes.c_uint32
+    _lib.tts_get_last_error_code.argtypes = [ctypes.c_void_p]
+    _lib.tts_get_last_error_detail_json.restype = ctypes.c_void_p  # owned char*
+    _lib.tts_get_last_error_detail_json.argtypes = [ctypes.c_void_p]
+    _lib.tts_free_string.restype = None
+    _lib.tts_free_string.argtypes = [ctypes.c_void_p]
+    _lib.tts_get_engine_setups_json.restype = ctypes.c_void_p  # owned char*
+    _lib.tts_get_engine_setups_json.argtypes = []
+    _lib.tts_check_credentials.restype = ctypes.c_int32
+    _lib.tts_check_credentials.argtypes = [ctypes.c_void_p]
+
+    # The GH #68/#69 symbols are additive: an older native build (pre
+    # PR #72) does not export them. Probe and give callers a clear
+    # error instead of a cryptic AttributeError later (GH #73 review).
+    global _parity_available
+    _parity_available = all(
+        hasattr(_lib, sym)
+        for sym in (
+            "tts_get_last_error_code",
+            "tts_get_last_error_detail_json",
+            "tts_free_string",
+            "tts_get_engine_setups_json",
+            "tts_check_credentials",
+        )
+    )
     return _lib
+
+
+_parity_available: Optional[bool] = None
+
+_PARITY_PRECEDES = (
+    "native rust_tts_wrapper predates the GH #68/#69 ABI (PR #72); "
+    "rebuild the library"
+)
+
+
+def _require_parity() -> None:
+    if _load_lib() and not _parity_available:
+        raise TTSError(_PARITY_PRECEDES)
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +239,130 @@ class EngineInfo:
 
 
 class TTSError(RuntimeError):
-    """Raised when a TTS operation fails. Message comes from tts_get_last_error."""
+    """Raised when a TTS operation fails.
+
+    Message comes from ``tts_get_last_error`` (secret-redacted when the
+    structured detail is available). GH #69 attributes:
+
+    * ``code`` — stable numeric :class:`TtsErrorCode` (0 = Unknown)
+    * ``code_name`` — e.g. ``"MissingConfiguration"``
+    * ``field_key`` — offending settings row ("" when n/a)
+    * ``engine_id`` — engine the failure belongs to ("" when unknown)
+    * ``display_message`` — safe, display-ready hint (None when n/a)
+    """
+
+    def __init__(self, message: str, detail: Optional["ErrorDetail"] = None):
+        super().__init__(message)
+        self.code = detail.code if detail else TtsErrorCode.UNKNOWN
+        self.code_name = detail.code_name if detail else "Unknown"
+        self.field_key = detail.field_key if detail else ""
+        self.engine_id = detail.engine_id if detail else ""
+        self.display_message = detail.display_message if detail else None
+
+
+class TtsErrorCode:
+    """Stable error codes (GH #69) — append-only u32 from the C ABI."""
+
+    UNKNOWN = 0
+    MISSING_CONFIGURATION = 1
+    INVALID_CONFIGURATION = 2
+    CREDENTIALS_REJECTED = 3
+    NETWORK_ERROR = 4
+    MODEL_NOT_FOUND = 5
+    MISSING_NATIVE_DEPENDENCY = 6
+    ENGINE_NOT_AVAILABLE = 7
+    LANGUAGE_NOT_SUPPORTED = 8
+    ENGINE_FAILURE = 9
+
+
+class CredentialStatus:
+    """Tri-state credential check outcomes (GH #69)."""
+
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    UNVERIFIED = "unverified"
+
+
+@dataclass
+class ErrorDetail:
+    """Structured error detail (GH #69): message is secret-redacted."""
+
+    code: int
+    code_name: str
+    message: str
+    display_message: str = ""
+    engine_id: str = ""
+    field_key: str = ""
+
+    @classmethod
+    def _from_json(cls, raw: str) -> "ErrorDetail":
+        d = json.loads(raw)
+        return cls(
+            code=int(d.get("code", 0)),
+            code_name=str(d.get("name", "Unknown")),
+            message=str(d.get("message", "")),
+            display_message=str(d.get("displayMessage", "")),
+            engine_id=str(d.get("engineId", "")),
+            field_key=str(d.get("fieldKey", "")),
+        )
+
+
+@dataclass
+class CredentialCheckResult:
+    """Outcome of :meth:`TTSClient.check_credentials` (GH #69).
+
+    ``status`` is one of :class:`CredentialStatus`; when the check
+    itself failed, ``status`` is ``"error"`` and :attr:`error` carries
+    the structured detail (e.g. MissingConfiguration with field_key).
+    """
+
+    status: str
+    error: Optional[ErrorDetail] = None
+
+    @property
+    def verified(self) -> bool:
+        return self.status == CredentialStatus.VERIFIED
+
+
+@dataclass
+class SetupField:
+    """One typed setup/credential field (GH #68)."""
+
+    key: str
+    label: str
+    kind: str  # secret | filePath | directoryPath | url | choice | number | text
+    required: bool = False
+    default_value: Optional[str] = None
+    choices: List[str] = field(default_factory=list)
+    placeholder: Optional[str] = None
+    help_text: Optional[str] = None
+
+
+@dataclass
+class EngineCapabilities:
+    """Engine capability flags (GH #68)."""
+
+    supports_rate: bool = False
+    supports_pitch: bool = False
+    supports_volume: bool = False
+    supports_word_timing: bool = False
+    supports_ssml: bool = False
+    supports_streaming: bool = False
+    requires_internet: bool = False
+    static_voice_catalog: bool = False
+    notes: Optional[str] = None
+
+
+@dataclass
+class EngineSetup:
+    """Full setup schema for one engine (GH #68)."""
+
+    id: str
+    name: str
+    needs_credentials: bool = False
+    fields: List[SetupField] = field(default_factory=list)
+    capabilities: EngineCapabilities = field(default_factory=EngineCapabilities)
+    required_any: List[List[str]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +378,13 @@ class TTSClient:
         creds_json = json.dumps(credentials or {})
         self._ctx = self._lib.tts_create(engine_id.encode(), creds_json.encode())
         if not self._ctx:
-            raise TTSError(f"Failed to create engine '{engine_id}': {self.get_last_error()}")
+            # GH #69: carry the structured detail (stable code, engine
+            # id) from the global create-time error when available.
+            detail = self.get_global_last_error_detail()
+            message = (detail.message if detail and detail.message else None) or (
+                f"Failed to create engine '{engine_id}': {self.get_global_last_error()}"
+            )
+            raise TTSError(message, detail)
         # Keep strong refs to the ctypes callback wrappers so the GC doesn't
         # collect the function pointer while native code still holds it.
         self._audio_cb_ref: Optional[AUDIO_CB] = None
@@ -214,6 +392,8 @@ class TTSClient:
         self._start_cb_ref: Optional[VOID_CB] = None
         self._end_cb_ref: Optional[VOID_CB] = None
         self._error_cb_ref: Optional[ERROR_CB] = None
+        self._mark_cb_ref: Optional[MARK_CB] = None
+        self._viseme_cb_ref: Optional[VISEME_CB] = None
 
     # --- context manager -----------------------------------------------
 
@@ -239,11 +419,18 @@ class TTSClient:
 
     def speak(self, text: str) -> None:
         if self._lib.tts_speak(self._ctx, text.encode()) != 0:
-            raise TTSError(self.get_last_error() or "speak failed")
+            raise self._error("speak failed")
+
+    def speak_ssml(self, ssml: str) -> None:
+        """Speak pre-built SSML (GH #73). Prosody wrapping is bypassed —
+        callers embed rate/pitch/volume themselves; engines that parse
+        no SSML get it translated to their model-matched dialect."""
+        if self._lib.tts_speak_ssml(self._ctx, ssml.encode()) != 0:
+            raise self._error("speak_ssml failed")
 
     def speak_sync(self, text: str) -> None:
         if self._lib.tts_speak_sync(self._ctx, text.encode()) != 0:
-            raise TTSError(self.get_last_error() or "speak_sync failed")
+            raise self._error("speak_sync failed")
 
     def synth_to_bytes(self, text: str) -> bytes:
         buf = ctypes.POINTER(ctypes.c_uint8)()
@@ -251,7 +438,7 @@ class TTSClient:
         if self._lib.tts_synth_to_bytes(
             self._ctx, text.encode(), ctypes.byref(buf), ctypes.byref(length)
         ) != 0:
-            raise TTSError(self.get_last_error() or "synth_to_bytes failed")
+            raise self._error("synth_to_bytes failed")
         data = ctypes.string_at(buf, length.value) if buf and length.value > 0 else b""
         if buf:
             self._lib.tts_free_bytes(buf, length.value)
@@ -299,8 +486,16 @@ class TTSClient:
         self._audio_cb_ref = _cb  # keep alive
         self._lib.tts_set_on_audio(self._ctx, _cb, None)
 
-    def on_boundary(self, callback: Optional[Callable[[str, float, float], None]]) -> None:
-        """Register a word-boundary callback. Pass None to clear."""
+    def on_boundary(
+        self,
+        callback: Optional[Callable[[str, int, int, float, float, bool], None]],
+    ) -> None:
+        """Register a word-boundary callback. Pass None to clear.
+
+        The callback receives ``(word, char_offset, char_len, start_s,
+        end_s, estimated)`` — offsets are UTF-8 bytes into the spoken
+        text (-1 when unknown; SAPI reports UTF-16 units).
+        """
 
         if callback is None:
             self._boundary_cb_ref = None
@@ -320,6 +515,48 @@ class TTSClient:
 
         self._boundary_cb_ref = _cb
         self._lib.tts_set_on_boundary(self._ctx, _cb, None)
+
+    def on_mark(
+        self, callback: Optional[Callable[[str, int, float, float], None]]
+    ) -> None:
+        """Register a mark/bookmark callback (SSML ``<mark>``), GH #73.
+
+        Receives ``(name, char_offset, start_s, end_s)``; char_offset
+        is -1 when unknown. Pass None to clear.
+        """
+        if callback is None:
+            self._mark_cb_ref = None
+            self._lib.tts_set_on_mark(self._ctx, MARK_CB(0), None)
+            return
+
+        @MARK_CB
+        def _cb(name, char_offset, start, end, _userdata):
+            callback(
+                name.decode() if name else "",
+                char_offset,
+                start,
+                end,
+            )
+
+        self._mark_cb_ref = _cb
+        self._lib.tts_set_on_mark(self._ctx, _cb, None)
+
+    def on_viseme(self, callback: Optional[Callable[[int, float], None]]) -> None:
+        """Register a viseme callback for lip-sync (GH #73).
+
+        Receives ``(viseme_id, offset_s)``. Pass None to clear.
+        """
+        if callback is None:
+            self._viseme_cb_ref = None
+            self._lib.tts_set_on_viseme(self._ctx, VISEME_CB(0), None)
+            return
+
+        @VISEME_CB
+        def _cb(viseme_id, offset_s, _userdata):
+            callback(viseme_id, offset_s)
+
+        self._viseme_cb_ref = _cb
+        self._lib.tts_set_on_viseme(self._ctx, _cb, None)
 
     def on_start(self, callback: Optional[Callable[[], None]]) -> None:
         """Register a speech-started callback. Pass None to clear."""
@@ -369,7 +606,7 @@ class TTSClient:
         arr = ctypes.POINTER(_TtsVoiceC)()
         count = ctypes.c_int32()
         if self._lib.tts_get_voices(self._ctx, ctypes.byref(arr), ctypes.byref(count)) != 0:
-            raise TTSError(self.get_last_error() or "get_voices failed")
+            raise self._error("get_voices failed")
 
         voices: List[Voice] = []
         for i in range(count.value):
@@ -431,11 +668,186 @@ class TTSClient:
         ptr = self._lib.tts_get_last_error(self._ctx)
         return ptr.decode() if ptr else None
 
+    def get_last_error_code(self) -> int:
+        """Stable classification of the last error (0 = none, GH #69).
+
+        Values are :class:`TtsErrorCode` constants. Returns 0 after
+        close (the per-context slot is gone — never the global one).
+        """
+        _require_parity()
+        if not self._ctx:
+            return 0
+        return int(self._lib.tts_get_last_error_code(self._ctx))
+
+    def get_last_error_detail(self) -> Optional[ErrorDetail]:
+        """Structured detail of the last error, or None (GH #69).
+
+        The message is secret-redacted; ``display_message`` is safe to
+        show; ``field_key`` names the offending settings row.
+        """
+        _require_parity()
+        if not self._ctx:
+            return None
+        ptr = self._lib.tts_get_last_error_detail_json(self._ctx)
+        if not ptr:
+            return None
+        try:
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            if not raw:
+                return None
+            return ErrorDetail._from_json(raw.decode("utf-8", "replace"))
+        except (ValueError, json.JSONDecodeError):
+            return None
+        finally:
+            self._lib.tts_free_string(ptr)
+
+    def check_credentials(self) -> CredentialCheckResult:
+        """Tri-state credential check (GH #69).
+
+        Static voice catalogs answer ``unverified`` — enumerating them
+        proves nothing about the key. A failed check (missing field,
+        unreachable provider) returns ``status="error"`` with the
+        structured :attr:`CredentialCheckResult.error`.
+        """
+        _require_parity()
+        if not self._ctx:
+            return CredentialCheckResult(
+                status="error",
+                error=ErrorDetail(
+                    code=0, code_name="Unknown", message="client closed",
+                    display_message="", engine_id="", field_key="",
+                ),
+            )
+        rc = int(self._lib.tts_check_credentials(self._ctx))
+        if rc == 1:
+            return CredentialCheckResult(status=CredentialStatus.VERIFIED)
+        if rc == 0:
+            return CredentialCheckResult(status=CredentialStatus.REJECTED)
+        if rc == 2:
+            return CredentialCheckResult(status=CredentialStatus.UNVERIFIED)
+        return CredentialCheckResult(
+            status="error", error=self.get_last_error_detail()
+        )
+
+    # --- engine setup schema (GH #68) -----------------------------------
+
+    @classmethod
+    def engine_setups(cls) -> List[EngineSetup]:
+        """Typed setup schema for every engine compiled into this build.
+
+        Fields carry kinds (secret / filePath / directoryPath / url /
+        choice / number / text), required flags, defaults and choices —
+        render settings UIs without a provider switch. Unknown kinds
+        from newer native builds degrade to ``"text"``.
+        """
+        _require_parity()
+        lib = _load_lib()
+        ptr = lib.tts_get_engine_setups_json()
+        if not ptr:
+            raise TTSError("tts_get_engine_setups_json returned null")
+        try:
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            parsed = json.loads(raw.decode("utf-8", "replace")) if raw else None
+        except json.JSONDecodeError as e:
+            raise TTSError(f"engine setup JSON failed to parse: {e}") from e
+        finally:
+            lib.tts_free_string(ptr)
+        if not isinstance(parsed, list):
+            raise TTSError("tts_get_engine_setups_json returned unparseable JSON")
+
+        known_kinds = {
+            "secret",
+            "filePath",
+            "directoryPath",
+            "url",
+            "choice",
+            "number",
+            "text",
+        }
+        setups: List[EngineSetup] = []
+        for s in parsed or []:
+            caps = s.get("capabilities") or {}
+            setups.append(
+                EngineSetup(
+                    id=str(s.get("id", "")),
+                    name=str(s.get("name", "")),
+                    needs_credentials=bool(s.get("needsCredentials", False)),
+                    fields=[
+                        SetupField(
+                            key=str(f.get("key", "")),
+                            label=str(f.get("label", "")),
+                            kind=f.get("kind") if f.get("kind") in known_kinds else "text",
+                            required=bool(f.get("required", False)),
+                            default_value=f.get("defaultValue"),
+                            choices=[str(c) for c in (f.get("choices") or [])],
+                            placeholder=f.get("placeholder"),
+                            help_text=f.get("helpText"),
+                        )
+                        for f in (s.get("fields") or [])
+                    ],
+                    capabilities=EngineCapabilities(
+                        supports_rate=bool(caps.get("supportsRate", False)),
+                        supports_pitch=bool(caps.get("supportsPitch", False)),
+                        supports_volume=bool(caps.get("supportsVolume", False)),
+                        supports_word_timing=bool(caps.get("supportsWordTiming", False)),
+                        supports_ssml=bool(caps.get("supportsSsml", False)),
+                        supports_streaming=bool(caps.get("supportsStreaming", False)),
+                        requires_internet=bool(caps.get("requiresInternet", False)),
+                        static_voice_catalog=bool(caps.get("staticVoiceCatalog", False)),
+                        notes=caps.get("notes"),
+                    ),
+                    required_any=[
+                        [str(k) for k in group] for group in (s.get("requiredAny") or [])
+                    ],
+                )
+            )
+        return setups
+
+    @classmethod
+    def engine_setup(cls, engine_id: str) -> Optional[EngineSetup]:
+        """The setup schema for one engine id, or None when unknown."""
+        for setup in cls.engine_setups():
+            if setup.id == engine_id:
+                return setup
+        return None
+
+    # --- internal --------------------------------------------------------
+
+    def _error(self, fallback: str) -> TTSError:
+        """Build a TTSError carrying the structured detail (GH #69)."""
+        detail = self.get_last_error_detail()
+        message = (detail.message if detail and detail.message else None) or (
+            self.get_last_error() or fallback
+        )
+        return TTSError(message, detail)
+
     @classmethod
     def get_global_last_error(cls) -> Optional[str]:
         """Global last error (used when no context exists, e.g. tts_create)."""
         ptr = _load_lib().tts_get_last_error(None)
         return ptr.decode() if ptr else None
+
+    @classmethod
+    def get_global_last_error_code(cls) -> int:
+        """Stable code of the global (create-time) error (GH #69)."""
+        return int(_load_lib().tts_get_last_error_code(None))
+
+    @classmethod
+    def get_global_last_error_detail(cls) -> Optional[ErrorDetail]:
+        """Structured detail of the global error, or None (GH #69)."""
+        lib = _load_lib()
+        ptr = lib.tts_get_last_error_detail_json(None)
+        if not ptr:
+            return None
+        try:
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            if not raw:
+                return None
+            return ErrorDetail._from_json(raw.decode("utf-8", "replace"))
+        except (ValueError, json.JSONDecodeError):
+            return None
+        finally:
+            lib.tts_free_string(ptr)
 
 
 # ---------------------------------------------------------------------------

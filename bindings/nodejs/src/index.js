@@ -25,6 +25,35 @@ const PLATFORM_NAMES = {
   win32: "rust_tts_wrapper.dll",
 };
 
+/**
+ * Stable error codes (GH #69) — append-only u32 values from the C ABI.
+ * Frozen object (not a const enum) so `isolatedModules` consumers and
+ * plain JS both work.
+ */
+const TtsErrorCode = Object.freeze({
+  Unknown: 0,
+  MissingConfiguration: 1,
+  InvalidConfiguration: 2,
+  CredentialsRejected: 3,
+  NetworkError: 4,
+  ModelNotFound: 5,
+  MissingNativeDependency: 6,
+  EngineNotAvailable: 7,
+  LanguageNotSupported: 8,
+  EngineFailure: 9,
+});
+
+/** Known setup-field kinds (GH #68); anything else degrades to "text". */
+const KINDS = new Set([
+  "secret",
+  "filePath",
+  "directoryPath",
+  "url",
+  "choice",
+  "number",
+  "text",
+]);
+
 /** Resolve the shared library path for this platform. */
 function resolveLibraryPath(explicit) {
   const candidates = [];
@@ -135,13 +164,139 @@ function loadLibrary(explicitPath) {
     error: lib.func("void tts_set_on_error(void *ctx, error_cb *cb, void *userdata)"),
   };
 
-  return { lib, libPath, protos, cbProtos, setters, TtsVoice, TtsEngineInfo };
+  // The GH #68/#69 symbols are additive: an older native build (pre
+  // PR #72) does not export them. Probe instead of letting the first
+  // koffi lookup fail cryptically, and give the methods a clear error.
+  const PARITY_PRECEDES = "native rust_tts_wrapper predates the GH #68/#69 ABI (PR #72); rebuild the library";
+  const optional = (decl) => {
+    try {
+      return lib.func(decl);
+    } catch {
+      return null;
+    }
+  };
+  const parity = {
+    tts_get_last_error_code: optional("uint32_t tts_get_last_error_code(void *ctx)"),
+    tts_get_last_error_detail_json: optional(
+      "void *tts_get_last_error_detail_json(void *ctx)",
+    ),
+    tts_free_string: optional("void tts_free_string(void *s)"),
+    tts_get_engine_setups_json: optional("void *tts_get_engine_setups_json()"),
+    tts_check_credentials: optional("int32_t tts_check_credentials(void *ctx)"),
+  };
+  const needParity = (name) => {
+    if (!parity[name]) throw new Error(PARITY_PRECEDES);
+    return parity[name];
+  };
+
+  return {
+    lib,
+    libPath,
+    protos,
+    cbProtos,
+    setters,
+    parity: { fns: parity, needParity },
+    TtsVoice,
+    TtsEngineInfo,
+  };
 }
 
 // koffi auto-converts `const char *` return values and struct fields to
 // JS strings (null when the pointer is null).
 function cstr(s) {
   return s ?? "";
+}
+
+/**
+ * Structured error with a stable code (GH #69). `code` mirrors the
+ * C ABI's append-only u32; `fieldKey` names the offending settings row
+ * for MissingConfiguration; `displayMessage` is safe to show (the raw
+ * message is secret-redacted by the native layer).
+ */
+class TtsError extends Error {
+  /**
+   * @param {string} message fallback message (used when no structured
+   *   detail is available)
+   * @param {import("./index.d.ts").TtsErrorDetail|null} detail
+   */
+  constructor(message, detail) {
+    super(detail && detail.message ? detail.message : message);
+    this.name = "TtsError";
+    this.code = detail ? detail.code : 0;
+    this.codeName = detail ? detail.codeName : "Unknown";
+    this.fieldKey = detail ? detail.fieldKey : "";
+    this.engineId = detail ? detail.engineId : "";
+    this.displayMessage =
+      detail && detail.displayMessage && detail.displayMessage.length > 0
+        ? detail.displayMessage
+        : null;
+  }
+}
+
+/**
+ * Read an OWNED NUL-terminated C string from the ABI and free the
+ * native allocation. `ptr` must come from a void*-declared proto (see
+ * loadLibrary) so koffi hands us the raw pointer instead of a detached
+ * JS string. koffi 2.16's decode(ptr, 'const char *') segfaults on
+ * runtime pointers, so the string is assembled from byte chunks.
+ *
+ * @returns {string} the decoded string ("" when empty)
+ */
+function readOwnedCString(abi, ptr, maxLen = 1 << 22) {
+  if (!ptr) return "";
+  const freeString = abi.parity.needParity("tts_free_string");
+  const CHUNK = 8192;
+  const parts = [];
+  try {
+    let offset = 0;
+    while (offset < maxLen) {
+      const step = Math.min(CHUNK, maxLen - offset);
+      const bytes = koffi.decode(ptr, offset, "uint8_t", step);
+      const nul = bytes.indexOf(0);
+      if (nul >= 0) {
+        parts.push(Buffer.from(bytes.subarray(0, nul)));
+        break;
+      }
+      parts.push(Buffer.from(bytes));
+      offset += step;
+    }
+    return Buffer.concat(parts).toString("utf8");
+  } finally {
+    freeString(ptr);
+  }
+}
+
+/**
+ * Read an OWNED JSON string from the ABI and parse it (null on empty
+ * or malformed — forward compatible).
+ */
+function readOwnedJson(abi, ptr) {
+  const s = readOwnedCString(abi, ptr);
+  if (!s.length) return null;
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read and parse an owned DETAIL JSON string, mapping the native shape
+ * (`{"code","name","message",…}`) onto the public one (`codeName`) —
+ * the one place the key differs (GH #73 review).
+ */
+function readOwnedDetail(abi, ptr) {
+  const parsed = readOwnedJson(abi, ptr);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return {
+    code: typeof parsed.code === "number" ? parsed.code : 0,
+    codeName: typeof parsed.name === "string" ? parsed.name : "Unknown",
+    message: typeof parsed.message === "string" ? parsed.message : "",
+    displayMessage:
+      typeof parsed.displayMessage === "string" ? parsed.displayMessage : "",
+    engineId: typeof parsed.engineId === "string" ? parsed.engineId : "",
+    fieldKey: typeof parsed.fieldKey === "string" ? parsed.fieldKey : "",
+  };
 }
 
 /**
@@ -166,9 +321,13 @@ class TtsClient extends EventEmitter {
       JSON.stringify(credentials ?? {}),
     );
     if (!this._ctx) {
-      throw new Error(
-        `tts_create(${engineId}) failed: ${TtsClient.globalLastError(this._abi) ?? "unknown"}`,
-      );
+      // Global (create-time) error: attach the structured detail when
+      // the native build provides it (GH #69).
+      const detail = TtsClient.globalLastErrorDetail(this._abi);
+      const fallback = `tts_create(${engineId}) failed: ${
+        TtsClient.globalLastError(this._abi) ?? "unknown"
+      }`;
+      throw new TtsError(fallback, detail);
     }
     this._registered = []; // koffi callback handles kept alive
     this._closed = false;
@@ -180,19 +339,19 @@ class TtsClient extends EventEmitter {
   speak(text) {
     this._throwIfClosed();
     const rc = this._abi.protos.tts_speak(this._ctx, text);
-    if (rc !== 0) throw new Error(this._lastError() ?? "tts_speak failed");
+    if (rc !== 0) throw this._structuredError("tts_speak failed");
   }
 
   speakSsml(ssml) {
     this._throwIfClosed();
     const rc = this._abi.protos.tts_speak_ssml(this._ctx, ssml);
-    if (rc !== 0) throw new Error(this._lastError() ?? "tts_speak_ssml failed");
+    if (rc !== 0) throw this._structuredError("tts_speak_ssml failed");
   }
 
   speakSync(text) {
     this._throwIfClosed();
     const rc = this._abi.protos.tts_speak_sync(this._ctx, text);
-    if (rc !== 0) throw new Error(this._lastError() ?? "tts_speak_sync failed");
+    if (rc !== 0) throw this._structuredError("tts_speak_sync failed");
   }
 
   /** Synthesise to a Buffer. Returns an empty Buffer on zero audio. */
@@ -201,7 +360,7 @@ class TtsClient extends EventEmitter {
     const out = [null];
     const outLen = [0n];
     const rc = this._abi.protos.tts_synth_to_bytes(this._ctx, text, out, outLen);
-    if (rc !== 0) throw new Error(this._lastError() ?? "tts_synth_to_bytes failed");
+    if (rc !== 0) throw this._structuredError("tts_synth_to_bytes failed");
     const len = Number(outLen[0]);
     const ptr = out[0];
     if (!ptr || len === 0) return Buffer.alloc(0);
@@ -254,7 +413,7 @@ class TtsClient extends EventEmitter {
     const out = [null];
     const outCount = [0];
     const rc = this._abi.protos.tts_get_voices(this._ctx, out, outCount);
-    if (rc !== 0) throw new Error(this._lastError() ?? "tts_get_voices failed");
+    if (rc !== 0) throw this._structuredError("tts_get_voices failed");
     const count = outCount[0];
     const arr = out[0];
     if (!arr || count <= 0) return [];
@@ -301,16 +460,112 @@ class TtsClient extends EventEmitter {
     return (abi ?? loadLibrary()).protos.tts_get_engine_count();
   }
 
+  /**
+   * Typed setup schema for every engine compiled into this build
+   * (GH #68): fields with kinds (secret / filePath / directoryPath /
+   * url / choice / number / text) + capability flags, so a settings UI
+   * renders engine rows without a provider switch.
+   */
+  static engineSetups(abi) {
+    const a = abi ?? loadLibrary();
+    const ptr = a.parity.needParity("tts_get_engine_setups_json")();
+    const parsed = readOwnedJson(a, ptr);
+    if (!Array.isArray(parsed)) {
+      throw new TtsError("tts_get_engine_setups_json returned unparseable JSON");
+    }
+    // Tolerant normalisation: unknown kinds degrade to "text", missing
+    // properties get defaults (forward compatible with newer natives).
+    return parsed.map((s) => ({
+      id: cstr(s.id),
+      name: cstr(s.name),
+      needsCredentials: s.needsCredentials === true,
+      fields: (Array.isArray(s.fields) ? s.fields : []).map((f) => ({
+        key: cstr(f.key),
+        label: cstr(f.label),
+        kind: KINDS.has(f.kind) ? f.kind : "text",
+        required: f.required === true,
+        defaultValue: typeof f.defaultValue === "string" ? f.defaultValue : undefined,
+        choices: Array.isArray(f.choices) ? f.choices.map(cstr) : [],
+        placeholder: typeof f.placeholder === "string" ? f.placeholder : undefined,
+        helpText: typeof f.helpText === "string" ? f.helpText : undefined,
+      })),
+      capabilities: {
+        supportsRate: s.capabilities?.supportsRate === true,
+        supportsPitch: s.capabilities?.supportsPitch === true,
+        supportsVolume: s.capabilities?.supportsVolume === true,
+        supportsWordTiming: s.capabilities?.supportsWordTiming === true,
+        supportsSsml: s.capabilities?.supportsSsml === true,
+        supportsStreaming: s.capabilities?.supportsStreaming === true,
+        requiresInternet: s.capabilities?.requiresInternet === true,
+        staticVoiceCatalog: s.capabilities?.staticVoiceCatalog === true,
+        notes: typeof s.capabilities?.notes === "string" ? s.capabilities.notes : undefined,
+      },
+      requiredAny: Array.isArray(s.requiredAny)
+        ? s.requiredAny.map((g) => (Array.isArray(g) ? g.map(cstr) : []))
+        : [],
+    }));
+  }
+
+  /** The setup schema for one engine id, or null when unknown (GH #68). */
+  static engineSetup(engineId, abi) {
+    return TtsClient.engineSetups(abi).find((s) => s.id === engineId) ?? null;
+  }
+
   // --- errors / lifecycle ------------------------------------------------
 
   lastError() {
     return this._lastError();
   }
 
+  /** Stable classification of the last error (0 = none, GH #69). */
+  lastErrorCode() {
+    this._throwIfClosed();
+    return this._abi.parity.needParity("tts_get_last_error_code")(this._ctx);
+  }
+
+  /** Structured detail of the last error, or null (GH #69). */
+  lastErrorDetail() {
+    this._throwIfClosed();
+    const ptr = this._abi.parity.needParity("tts_get_last_error_detail_json")(this._ctx);
+    return readOwnedDetail(this._abi, ptr);
+  }
+
+  /**
+   * Tri-state credential check (GH #69): "verified" | "rejected" |
+   * "unverified" | { status: "error", error }. Static catalogs answer
+   * "unverified" — enumerating them proves nothing about the key.
+   */
+  checkCredentials() {
+    this._throwIfClosed();
+    const rc = this._abi.parity.needParity("tts_check_credentials")(this._ctx);
+    switch (rc) {
+      case 1:
+        return { status: "verified" };
+      case 0:
+        return { status: "rejected" };
+      case 2:
+        return { status: "unverified" };
+      default:
+        return { status: "error", error: this.lastErrorDetail() };
+    }
+  }
+
   static globalLastError(abi) {
     const p = (abi ?? loadLibrary()).protos.tts_get_last_error(null);
     const s = cstr(p);
     return s.length ? s : null;
+  }
+
+  /** Stable code of the global (create-time) error, 0 = none (GH #69). */
+  static globalLastErrorCode(abi) {
+    return (abi ?? loadLibrary()).parity.needParity("tts_get_last_error_code")(null);
+  }
+
+  /** Structured detail of the global error, or null (GH #69). */
+  static globalLastErrorDetail(abi) {
+    const a = abi ?? loadLibrary();
+    const ptr = a.parity.needParity("tts_get_last_error_detail_json")(null);
+    return readOwnedDetail(a, ptr);
   }
 
   close() {
@@ -346,6 +601,11 @@ class TtsClient extends EventEmitter {
     const p = this._abi.protos.tts_get_last_error(this._ctx);
     const s = cstr(p);
     return s.length ? s : null;
+  }
+
+  /** Build a TtsError carrying the structured detail (GH #69). */
+  _structuredError(fallback) {
+    return new TtsError(`${this._lastError() ?? fallback}`, this.lastErrorDetail());
   }
 
   _throwIfClosed() {
@@ -392,4 +652,4 @@ class TtsClient extends EventEmitter {
   }
 }
 
-module.exports = { TtsClient, loadLibrary, resolveLibraryPath };
+module.exports = { TtsClient, TtsError, TtsErrorCode, loadLibrary, resolveLibraryPath };

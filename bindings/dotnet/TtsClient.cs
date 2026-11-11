@@ -34,6 +34,7 @@ public static class Native
     [DllImport(Lib)] public static extern IntPtr tts_create(string engineId, string credentialsJson);
     [DllImport(Lib)] public static extern void tts_destroy(IntPtr ctx);
     [DllImport(Lib)] public static extern int tts_speak(IntPtr ctx, string text);
+    [DllImport(Lib)] public static extern int tts_speak_ssml(IntPtr ctx, string ssml);
     [DllImport(Lib)] public static extern int tts_speak_sync(IntPtr ctx, string text);
     [DllImport(Lib)] public static extern void tts_stop(IntPtr ctx);
     [DllImport(Lib)] public static extern void tts_pause(IntPtr ctx);
@@ -286,6 +287,20 @@ public class TtsClient : IDisposable
     {
         ThrowIfDisposed();
         if (Native.tts_speak(_ctx, text) != 0)
+            throw CreateException();
+    }
+
+    /// <summary>
+    /// Speak pre-built SSML. The SSML bypasses rate/pitch/volume
+    /// wrapping — callers embed all prosody themselves. Engines that
+    /// parse SSML receive it directly; engines that do not (ElevenLabs)
+    /// get it translated via SpeechMarkdown into their model-matched
+    /// dialect.
+    /// </summary>
+    public void SpeakSsml(string ssml)
+    {
+        ThrowIfDisposed();
+        if (Native.tts_speak_ssml(_ctx, ssml) != 0)
             throw CreateException();
     }
 
