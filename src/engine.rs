@@ -33,6 +33,20 @@ pub type OnEndCallback<'a> = &'a mut dyn FnMut();
 /// Callback for error events.
 pub type OnErrorCallback<'a> = &'a mut dyn FnMut(&str);
 
+/// Outcome of a credential check with an explicit "could not verify"
+/// state (GH #69): a static voice catalog lists voices without ever
+/// authenticating, so enumeration success is not validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CredentialCheck {
+    /// The credentials were exercised and accepted.
+    Verified,
+    /// The credentials were exercised and rejected.
+    Rejected,
+    /// No authenticated check was possible (static catalog, no
+    /// credentials, or an offline engine).
+    Unverified,
+}
+
 /// Convert SpeechMarkdown to SSML when detected, otherwise return the text
 /// unchanged. Returns `(processed_text, is_ssml)`.
 ///
@@ -97,6 +111,8 @@ pub fn preprocess_speech_markdown(text: &str, platform: &str) -> (String, bool) 
     }
 }
 
+/// Fallback without the `speechmarkdown` feature: text passes through
+/// unchanged, never reported as SSML.
 #[cfg(not(feature = "speechmarkdown"))]
 #[must_use]
 pub fn preprocess_speech_markdown(text: &str, _platform: &str) -> (String, bool) {
@@ -250,6 +266,28 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Credential verification with an explicit "unverified" state
+    /// (GH #69).
+    ///
+    /// [`Self::check_credentials`] cannot express the difference
+    /// between "the provider accepted the key" and "we never actually
+    /// authenticated" — enumerating a static catalog proves nothing.
+    /// This tristate does:
+    ///
+    /// * [`CredentialCheck::Verified`] — an authenticated round-trip
+    ///   (or local engine setup) succeeded.
+    /// * [`CredentialCheck::Rejected`] — the provider refused the
+    ///   credentials; the user must fix them.
+    /// * [`CredentialCheck::Unverified`] — no authenticated check is
+    ///   possible (static catalog, no credentials, offline engine).
+    ///
+    /// `Err` means the check itself failed (e.g. network) — retryable,
+    /// distinct from a rejection.
+    fn check_credentials_status(&self) -> TtsResult<CredentialCheck> {
+        let _ = self.check_credentials()?;
+        Ok(CredentialCheck::Unverified)
     }
 
     /// Synthesize text to audio bytes (full buffer, no playback).

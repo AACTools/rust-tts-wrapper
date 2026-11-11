@@ -40,6 +40,11 @@ include = [
   "tts_get_engines",
   "tts_free_engines",
   "tts_get_last_error",
+  "tts_get_last_error_code",
+  "tts_get_last_error_detail_json",
+  "tts_free_string",
+  "tts_get_engine_setups_json",
+  "tts_check_credentials",
   "tts_synth_to_bytes",
   "tts_free_bytes",
 ]

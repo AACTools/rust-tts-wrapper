@@ -38,7 +38,7 @@ fn creds() -> Option<String> {
 }
 
 fn make_engine() -> Option<Arc<dyn TtsEngine>> {
-    create_engine("qwen", &creds()?)
+    create_engine("qwen", &creds()?).ok()
 }
 
 #[test]

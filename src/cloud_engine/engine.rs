@@ -55,6 +55,55 @@ impl CloudEngine {
             .or_else(|| credentials.get("token"))
             .cloned()
             .unwrap_or_default();
+        // Test/proxy override for the credential-check endpoint (GH #69):
+        // mirrors synthUrl — lets the tristate check be exercised
+        // against a deterministic local server.
+        if let Some(voices_override) = credentials.get("voicesUrl") {
+            if !voices_override.is_empty() {
+                if config.voices_url.is_some() {
+                    config.voices_url = Some(voices_override.clone());
+                } else {
+                    eprintln!(
+                        "Engine '{id}' has no voice-list endpoint: credential \
+                         'voicesUrl' has no effect (GH #69)"
+                    );
+                }
+            }
+        }
+        // Google migration path (GH #68/#69): DotNetTtsWrapper's
+        // GoogleCredentials carries KeyFilePath. When no key is set
+        // directly, read the API key from the file's first non-empty
+        // line so a settings screen can offer a file picker.
+        let api_key = if api_key.is_empty() {
+            credentials
+                .get("keyFilePath")
+                .filter(|p| !p.is_empty())
+                .and_then(|p| {
+                    match std::fs::read_to_string(p) {
+                        Ok(content) => Some(content),
+                        Err(e) => {
+                            // Visible failure, not a silent no-key that
+                            // later masquerades as "rejected credentials".
+                            eprintln!(
+                                "google: failed to read keyFilePath '{p}' ({e}); \
+                                 proceeding without an API key (GH #69)"
+                            );
+                            None
+                        }
+                    }
+                })
+                .and_then(|content| {
+                    content
+                        .lines()
+                        // BOM first, then whitespace: "\u{feff} key" → "key"
+                        .map(|l| l.trim_start_matches('\u{feff}').trim())
+                        .find(|l| !l.is_empty())
+                        .map(std::string::ToString::to_string)
+                })
+                .unwrap_or(api_key)
+        } else {
+            api_key
+        };
         Some(CloudEngine {
             config,
             api_key,
@@ -1246,6 +1295,125 @@ impl TtsEngine for CloudEngine {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
         }
+    }
+
+    /// Tristate credential check (GH #69). Engines with a `voices_url`
+    /// verify against the provider: 2xx → Verified; 401/403 →
+    /// Rejected (the service answered and refused *these credentials*);
+    /// any other non-2xx and transport failures are `Err` — provider
+    /// outages (5xx), rate limits (429), proxy auth (407) and
+    /// unreachable hosts must not tell the user to "fix your key".
+    /// Engines without an authenticated endpoint report Unverified —
+    /// including OpenAI-style static catalogs where `get_voices()`
+    /// succeeds with any (or no) key.
+    fn check_credentials_status(&self) -> TtsResult<CredentialCheck> {
+        let Some(ref voices_url) = self.config.voices_url else {
+            return Ok(CredentialCheck::Unverified);
+        };
+        // Run on a dedicated thread like get_voices(): reqwest::blocking
+        // under a managed runtime (.NET/Python hosts) deadlocks or
+        // crashes (0xc0000005) — see the comment on get_voices.
+        let url = voices_url.clone();
+        let provider = self.config.provider_id.clone();
+        let auth_header = self.config.auth_header.clone();
+        let auth_prefix = self.config.auth_prefix.clone();
+        let api_key = self.api_key.clone();
+        let sigv4_creds = (
+            self.credentials
+                .get("accessKeyId")
+                .cloned()
+                .unwrap_or_default(),
+            self.credentials
+                .get("secretAccessKey")
+                .cloned()
+                .unwrap_or_default(),
+            self.credentials
+                .get("region")
+                .cloned()
+                .unwrap_or_else(|| "us-east-1".into()),
+        );
+        let handle = std::thread::Builder::new()
+            .name("tts-credential-check".into())
+            .spawn(move || {
+                let client = reqwest::blocking::Client::new();
+                let mut req = client.get(url.as_str());
+                if provider == "polly" {
+                    // Re-sign without &self: the SigV4 helpers are free
+                    // functions (same ones sigv4_request uses).
+                    let creds = SigV4Credentials {
+                        access_key: &sigv4_creds.0,
+                        secret_key: &sigv4_creds.1,
+                        region: &sigv4_creds.2,
+                        service: "polly",
+                    };
+                    let Ok(parsed) = Url::parse(&url) else {
+                        return Err(TtsError("polly voices_url unparseable".into()));
+                    };
+                    let mut path = parsed.path().to_string();
+                    if path.is_empty() {
+                        path = "/".into();
+                    }
+                    let query = parsed
+                        .query_pairs()
+                        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+                        .collect();
+                    let (amz_date, _) = amz_date_now();
+                    // GET with an empty body: sign the empty-payload hash
+                    // (same value sigv4_request computes via
+                    // sha256_hex(&[])) — a wrong hash changes the
+                    // canonical request and AWS answers 403
+                    // SignatureDoesNotMatch, which would read as a false
+                    // "credentials rejected".
+                    let payload_hash = sha256_hex(&[] as &[u8]);
+                    let auth = authorization_header(
+                        "GET",
+                        &SignedUrl {
+                            host: parsed.host_str().unwrap_or_default().to_string(),
+                            path,
+                            query,
+                        },
+                        &creds,
+                        &amz_date,
+                        None,
+                        &payload_hash,
+                    );
+                    req = req
+                        .header("X-Amz-Date", &amz_date)
+                        .header("Authorization", auth);
+                } else if !auth_header.is_empty() {
+                    let val = format!("{auth_prefix}{api_key}");
+                    req = req.header(&auth_header, val);
+                }
+                match req.send() {
+                    Ok(resp) if resp.status().is_success() => Ok(CredentialCheck::Verified),
+                    Ok(resp) => {
+                        let code = resp.status().as_u16();
+                        if code == 401 || code == 403 {
+                            Ok(CredentialCheck::Rejected)
+                        } else if code == 407 {
+                            // Proxy auth: the provider never saw the
+                            // credentials — a retry/config issue, not a
+                            // rejection. NOTE: keep auth keywords
+                            // ("authentication"/"unauthorized") OUT of
+                            // this message — the FFI classifier would
+                            // otherwise map it to CredentialsRejected.
+                            Err(TtsError(
+                                "credential check failed: proxy authorization required (HTTP 407)"
+                                    .into(),
+                            ))
+                        } else {
+                            Err(TtsError(format!(
+                                "credential check service error (HTTP {code})"
+                            )))
+                        }
+                    }
+                    Err(e) => Err(TtsError(format!("credential check network failure: {e}"))),
+                }
+            })
+            .map_err(|e| TtsError(format!("failed to spawn credential-check thread: {e}")))?;
+        handle
+            .join()
+            .map_err(|_| TtsError("credential-check thread panicked".into()))?
     }
 
     fn engine_id(&self) -> &'static str {

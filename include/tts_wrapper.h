@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/**
+ * Opaque engine context returned by [`tts_create`] and consumed by
+ * every other `tts_*` function. Destroy with [`tts_destroy`].
+ */
 typedef struct tts_ctx tts_ctx;
 
 /**
@@ -63,10 +67,20 @@ typedef void (*CBoundaryCb)(const char*, int32_t, int32_t, float, float, int32_t
  */
 typedef void (*CMarkCb)(const char*, int32_t, float, float, void*);
 
+/**
+ * Viseme callback: cb(viseme_id, audio_offset_sec, userdata).
+ */
 typedef void (*CVisemeCb)(int32_t, float, void*);
 
+/**
+ * Payload-free lifecycle callback (start/end): cb(userdata).
+ */
 typedef void (*CVoidCb)(void*);
 
+/**
+ * Error callback: cb(message_cstr, userdata). The message pointer is
+ * valid only for the duration of the call.
+ */
 typedef void (*CErrorCb)(const char*, void*);
 
 /**
@@ -338,6 +352,82 @@ void tts_free_engines(struct tts_engine_info *engines, int32_t count);
  * `ctx` may be null (returns global error), or a valid context pointer.
  */
 const char *tts_get_last_error(struct tts_ctx *ctx);
+
+/**
+ * Stable classification of the last error (GH #69).
+ *
+ * Returns the [`TtsErrorCode`] value as a u32 (0 = no error recorded).
+ * Per-context when `ctx` is provided; the global record (create
+ * failures) when null. The mapping is part of the ABI: see
+ * `src/error_codes.rs` and the header docs.
+ *
+ * # Safety
+ *
+ * `ctx` may be null (global error) or a valid context pointer.
+ */
+uint32_t tts_get_last_error_code(struct tts_ctx *ctx);
+
+/**
+ * Full structured error detail as a JSON string (GH #69):
+ *
+ * `{"code":1,"name":"MissingConfiguration","message":"…",`
+ * `"displayMessage":"…","engineId":"azure","fieldKey":"subscriptionKey"}`
+ *
+ * `message` is the engine message with obvious secrets redacted;
+ * `displayMessage` is a safe, display-ready hint (never contains
+ * message content). `engineId`/`fieldKey` are empty strings when not
+ * applicable. Caller must free with [`tts_free_string`]. Returns null
+ * when no error is recorded.
+ *
+ * # Safety
+ *
+ * `ctx` may be null (global error) or a valid context pointer.
+ */
+char *tts_get_last_error_detail_json(struct tts_ctx *ctx);
+
+/**
+ * Free a string returned by [`tts_get_last_error_detail_json`] or
+ * [`tts_get_engine_setups_json`].
+ *
+ * # Safety
+ *
+ * `s` must be null or a pointer from those functions, freed once.
+ */
+void tts_free_string(char *s);
+
+/**
+ * The typed engine setup schema for every engine compiled into this
+ * build, as a JSON array (GH #68). See `src/engine_schema.rs` for the
+ * shape: per-engine `fields` (canonical key, label, kind, required,
+ * default, choices) and `capabilities` (rate/pitch/volume/timing/
+ * ssml/streaming/internet/static-catalog + notes).
+ *
+ * Caller must free with [`tts_free_string`]. Never returns null on
+ * success; returns `"[]"` when no engines are compiled in.
+ */
+char *tts_get_engine_setups_json(void);
+
+/**
+ * Verify the context's credentials with an explicit "unverified"
+ * state (GH #69).
+ *
+ * Returns:
+ * - `1` — **Verified**: an authenticated check (or validated local
+ *   setup) succeeded.
+ * - `0` — **Rejected**: the provider refused the credentials.
+ * - `2` — **Unverified**: no authenticated check is possible (static
+ *   voice catalog, zero-credential engine, offline engine).
+ *   Enumerating voices alone never turns this into Verified.
+ * - `-1` — the check itself failed (e.g. required field missing,
+ *   network unreachable); the detail is available from
+ *   [`tts_get_last_error_detail_json`] with a stable code —
+ *   `MissingConfiguration` carries the offending `fieldKey`.
+ *
+ * # Safety
+ *
+ * `ctx` must be a valid pointer from [`tts_create`].
+ */
+int32_t tts_check_credentials(struct tts_ctx *ctx);
 
 /**
  * Pause in-progress speech.

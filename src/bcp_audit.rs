@@ -53,9 +53,11 @@ mod audit {
     mod omnivoice {
         use crate::omnivoice_local_support::bcp47_to_omnivoice_lang;
 
-        /// The runtime's 646-language table uses lowercase ISO 639-3
-        /// codes with NO regional variants and NO display names.
-        /// Every mapping must produce a bare ISO code.
+        /// The runtime's language table uses lowercase ISO 639-3 ids
+        /// with NO regional variants (verified against lang-map.h —
+        /// `pt-br`/`zh-cn` do not exist). Regional BCP-47 input maps to
+        /// the base id; a mapping may only be lowercase, or an exact
+        /// runtime-table entry — never a display name.
         #[test]
         fn mapped_names_are_iso_codes_not_display_names() {
             for bcp47 in [
@@ -69,12 +71,19 @@ mod audit {
                      qualifier — runtime only accepts bare ISO codes"
                 );
                 if !mapped.is_empty() {
+                    // Either a bare base subtag, or an exact entry the
+                    // runtime's own table accepts (defensive against a
+                    // future table adding regional ids — none exist
+                    // today).
+                    let bare_ok = mapped
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+                    let table = crate::omnivoice_local_support::omnivoice_runtime_languages();
+                    let exact_ok = table.iter().any(|(id, _)| *id == mapped);
                     assert!(
-                        mapped
-                            .chars()
-                            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
-                        "omnivoice: '{bcp47}' → '{mapped}' has uppercase/symbols — \
-                         runtime table is lowercase ISO 639-3"
+                        bare_ok || exact_ok,
+                        "omnivoice: '{bcp47}' → '{mapped}' has uppercase/symbols and is \
+                         not an exact runtime-table entry"
                     );
                 }
             }

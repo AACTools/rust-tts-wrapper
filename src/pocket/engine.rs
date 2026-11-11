@@ -18,25 +18,36 @@ use std::sync::Mutex;
 
 /// A mark event with its position in the assembled audio.
 pub struct MarkTiming {
+    /// Mark/bookmark name from the SSML `<mark>` tag.
     pub name: String,
+    /// Position in the assembled audio (seconds).
     pub t_s: f32,
 }
 
 /// The fully-assembled result: audio + word timings + marks.
 pub struct SynthesisResult {
+    /// Generated PCM audio + attention traces.
     pub speech: GeneratedSpeech,
+    /// Attention-measured word timings.
     pub words: Vec<WordTimingOwned>,
+    /// Mark events at their assembled positions.
     pub marks: Vec<MarkTiming>,
     /// the spoken text (SSML stripped) — for char-mapping callbacks
     pub spoken_text: String,
 }
 
+/// A measured word timing (attention-aligned, `estimated=false`).
 pub struct WordTimingOwned {
+    /// The word text.
     pub word: String,
+    /// Start in the audio (seconds).
     pub start_s: f32,
+    /// End in the audio (seconds).
     pub end_s: f32,
 }
 
+/// Kyutai pocket-tts engine: ONNX bundle, donor-wav cloning,
+/// attention-measured word timings (see the module docs).
 pub struct PocketTtsEngine {
     inner: Mutex<Option<PocketTtsModel>>,
     cfg: PocketConfig,

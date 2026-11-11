@@ -30,9 +30,15 @@ mod factory_tests {
     }
 
     #[test]
-    fn test_create_unknown_engine_returns_none() {
-        // should return None with a helpful warning rather than panic.
-        assert!(create_engine("does-not-exist", "").is_none());
+    fn test_create_unknown_engine_returns_err() {
+        // GH #69: unknown engines return a structured
+        // EngineNotAvailable error rather than a bare None.
+        let err = create_engine("does-not-exist", "")
+            .expect_err("unknown engine should error, not panic");
+        assert_eq!(
+            err.code,
+            rust_tts_wrapper::error_codes::TtsErrorCode::EngineNotAvailable
+        );
     }
 
     #[test]
@@ -41,7 +47,7 @@ mod factory_tests {
         // with no modelId set, the engine still constructs (it errors
         // at speak-time, not construction-time).
         let engine = create_engine("sherpaonnx", "");
-        assert!(engine.is_some(), "sherpaonnx should construct");
+        assert!(engine.is_ok(), "sherpaonnx should construct");
     }
 
     #[test]
@@ -50,7 +56,7 @@ mod factory_tests {
         // numThreads should be parsed from credentials without panicking.
         let creds = r#"{"numThreads":"4","provider":"cpu"}"#;
         let engine = create_engine("sherpaonnx", creds);
-        assert!(engine.is_some());
+        assert!(engine.is_ok());
     }
 }
 
@@ -88,7 +94,7 @@ mod cloud_engine_smoke_tests {
                 _ => r#"{"apiKey":"k"}"#,
             };
             assert!(
-                create_engine(id, creds).is_some(),
+                create_engine(id, creds).is_ok(),
                 "failed to construct cloud engine '{id}'"
             );
         }
@@ -99,7 +105,7 @@ mod cloud_engine_smoke_tests {
         // Polly is SigV4-signed now — with full credentials it constructs
         // like every other cloud engine.
         let creds = r#"{"accessKeyId":"a","secretAccessKey":"s","region":"us-east-1"}"#;
-        assert!(create_engine("polly", creds).is_some());
+        assert!(create_engine("polly", creds).is_ok());
     }
 }
 

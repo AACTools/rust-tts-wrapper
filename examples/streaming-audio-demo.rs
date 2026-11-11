@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("=== {} Demo ===", description);
 
         match create_engine(engine_id, credentials) {
-            Some(engine) => {
+            Ok(engine) => {
                 // Example 1: Stream to file
                 let output_file = output_dir.join(format!("{}_streaming.wav", engine_id));
                 if let Err(e) = stream_to_file(&*engine, test_text, &output_file) {
@@ -53,8 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!();
             }
-            None => {
-                println!("⚠️  {} engine not available\n", engine_id);
+            Err(e) => {
+                println!("⚠️  {} engine not available: {}\n", engine_id, e);
             }
         }
     }
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
         let credentials = format!("{{\"apiKey\":\"{}\"}}", api_key);
 
-        if let Some(openai_engine) = create_engine("openai", &credentials) {
+        if let Ok(openai_engine) = create_engine("openai", &credentials) {
             let output_file = output_dir.join("openai_streaming.mp3");
             println!("🎵 Testing OpenAI streaming...");
 

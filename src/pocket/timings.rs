@@ -4,9 +4,13 @@
 
 use crate::pocket::tokenizer::PocketTokenizer;
 
+/// A word timing derived from generation-step attention.
 pub struct WordTiming {
+    /// The word text.
     pub word: String,
+    /// Start in the audio (seconds).
     pub start_s: f32,
+    /// End in the audio (seconds).
     pub end_s: f32,
 }
 

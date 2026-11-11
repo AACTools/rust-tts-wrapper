@@ -18,8 +18,9 @@ Every binding wraps the **flat C ABI** declared in
 | Control | `tts_stop`, `tts_pause`, `tts_resume` |
 | Settings | `tts_set_voice`, `tts_set_rate`, `tts_set_pitch`, `tts_set_volume` |
 | Events | `tts_set_on_audio`, `tts_set_on_boundary` (7-arg incl. `estimated`), `tts_set_on_mark`, `tts_set_on_viseme`, `tts_set_on_start`, `tts_set_on_end`, `tts_set_on_error` |
-| Enumeration | `tts_get_voices`/`tts_free_voices`, `tts_get_engine_count`, `tts_get_engines`/`tts_free_engines` |
-| Errors | `tts_get_last_error` (null ctx → global error; `NULL` = no error) |
+| Enumeration | `tts_get_voices`/`tts_free_voices`, `tts_get_engine_count`, `tts_get_engines`/`tts_free_engines`, `tts_get_engine_setups_json` (GH #68: typed setup fields + capabilities, JSON) |
+| Errors | `tts_get_last_error` (null ctx → global error; `NULL` = no error), `tts_get_last_error_code` (stable u32, GH #69), `tts_get_last_error_detail_json` (code/name/message/displayMessage/engineId/fieldKey), `tts_free_string` |
+| Credentials | `tts_check_credentials` (1 = Verified, 0 = Rejected, 2 = Unverified, -1 = check failed → detail, GH #69) |
 
 Conventions that hold across the ABI:
 

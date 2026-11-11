@@ -2515,3 +2515,39 @@ pub(crate) fn test_fire_scaled_estimates_empty_pcm() {
     fire_scaled_estimates(&mut cb, "some words here", &[], 24_000);
     assert_eq!(fired, 0, "zero-length audio fires nothing (all at t=0)");
 }
+
+// ===== GH #68/#69: google keyFilePath =============================
+
+#[test]
+fn key_file_path_read_and_bom_handling() {
+    // google keyFilePath supplies the key when apiKey is absent —
+    // first non-empty line, UTF-8 BOM tolerated (DotNetTtsWrapper
+    // GoogleCredentials migration parity).
+    let dir = std::env::temp_dir().join(format!("rtw-keyfile-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let key_file = dir.join("key.txt");
+    std::fs::write(&key_file, "\u{feff}  \nreal-key-123\nsecond-line\n").unwrap();
+
+    let mut creds = HashMap::new();
+    creds.insert("keyFilePath".to_string(), key_file.display().to_string());
+
+    let engine = CloudEngine::new("google", &creds).expect("engine");
+    assert_eq!(engine.api_key, "real-key-123");
+
+    std::fs::remove_file(&key_file).ok();
+    std::fs::remove_dir(&dir).ok();
+}
+
+#[test]
+fn key_file_path_missing_file_yields_empty_key() {
+    // An unreadable key file must not crash creation; the later
+    // authenticated call surfaces the problem (and construction
+    // eprintlns the read failure).
+    let mut creds = HashMap::new();
+    creds.insert(
+        "keyFilePath".to_string(),
+        "/nonexistent/definitely/not/here.txt".to_string(),
+    );
+    let engine = CloudEngine::new("google", &creds).expect("engine");
+    assert_eq!(engine.api_key, "");
+}

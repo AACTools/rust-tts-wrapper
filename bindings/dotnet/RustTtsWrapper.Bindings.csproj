@@ -44,6 +44,12 @@
     <PackageReference Include="DotNetTtsWrapper" Version="1.1.4" />
   </ItemGroup>
 
+  <!-- The xunit test project exercises the internal request scheduler
+       seam (ISpeechBackend) directly. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="RustTtsWrapper.Bindings.Tests" />
+  </ItemGroup>
+
   <!-- The xunit test project lives in tests/ — keep it out of the
        library assembly (the default **/*.cs glob would otherwise compile
        the test sources into the NuGet assembly without xunit refs). -->

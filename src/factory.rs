@@ -1,8 +1,68 @@
 //! Engine factory: create engines by ID and list all registered engines.
 
 use crate::engine::TtsEngine;
+use crate::error_codes::TtsErrorCode;
 use crate::types::EngineDescriptor;
 use std::sync::Arc;
+
+/// Structured engine-setup failure (GH #69). Carries a stable code, the
+/// offending field key when the problem is a missing/invalid setting,
+/// and the engine id — enough for a settings screen to point the user
+/// at the exact row to fix.
+#[derive(Debug, Clone)]
+pub struct EngineSetupError {
+    /// Stable classification (see [`TtsErrorCode`]).
+    pub code: TtsErrorCode,
+    /// Engine the failure belongs to.
+    pub engine_id: String,
+    /// Offending credential/setup field, when known.
+    pub field_key: Option<String>,
+    /// Human-readable detail (already redacted by the constructor).
+    pub message: String,
+}
+
+impl EngineSetupError {
+    /// Build a setup error (the constructor redacts the message).
+    #[must_use]
+    pub fn new(
+        code: TtsErrorCode,
+        engine_id: impl Into<String>,
+        field_key: Option<&str>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code,
+            engine_id: engine_id.into(),
+            field_key: field_key.map(std::string::ToString::to_string),
+            message: crate::error_codes::redact_message(&message.into()),
+        }
+    }
+
+    /// The "engine compiled out / unknown id" error.
+    #[must_use]
+    pub fn not_available(engine_id: &str, reason: &str) -> Self {
+        Self::new(
+            TtsErrorCode::EngineNotAvailable,
+            engine_id,
+            None,
+            format!("Engine '{engine_id}' is not available: {reason}"),
+        )
+    }
+}
+
+impl std::fmt::Display for EngineSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for EngineSetupError {}
+
+impl From<EngineSetupError> for crate::types::TtsError {
+    fn from(e: EngineSetupError) -> Self {
+        crate::types::TtsError(e.message)
+    }
+}
 
 /// Parse engine credentials JSON into a string map, coercing JSON scalars
 /// (numbers, bools) to their string form. Fixes #58: a single
@@ -59,10 +119,43 @@ use crate::system_engine::SystemEngine;
 ///
 /// `credentials_json` is a JSON object with engine-specific credentials
 /// (e.g. `{"apiKey": "..."}`). Pass `""` for engines that don't need credentials.
-#[must_use]
+///
+/// # Examples
+///
+/// Cloud engines construct lazily — creation succeeds offline, the
+/// first synthesis call exercises the credentials:
+///
+/// ```no_run
+/// use rust_tts_wrapper::factory::create_engine;
+///
+/// let engine = create_engine("openai", r#"{"apiKey":"sk-…"}"#)?;
+///
+/// // 24 kHz mono PCM16 chunks arrive as they are decoded:
+/// let mut chunks = 0;
+/// engine.speak("Hello world", None, 1.0, 1.0, 1.0,
+///     Some(&mut |_chunk: &[u8]| chunks += 1), None, None)?;
+/// # Ok::<(), rust_tts_wrapper::types::TtsError>(())
+/// ```
+///
+/// The error is structured (GH #69): unknown or compiled-out engines
+/// carry [`TtsErrorCode::EngineNotAvailable`]; missing local setup
+/// paths carry [`TtsErrorCode::MissingConfiguration`] with the
+/// offending field key.
+///
+/// [`TtsErrorCode::EngineNotAvailable`]: crate::error_codes::TtsErrorCode::EngineNotAvailable
+/// [`TtsErrorCode::MissingConfiguration`]: crate::error_codes::TtsErrorCode::MissingConfiguration
+///
+/// # Errors
+/// Returns [`EngineSetupError`] with a stable code (GH #69):
+/// `EngineNotAvailable` for unknown/compiled-out ids,
+/// `MissingConfiguration` (with the field key) when a required local
+/// setup path is absent, and engine-specific codes for load failures.
 #[allow(unused_variables)]
 #[allow(clippy::too_many_lines)]
-pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
+pub fn create_engine(
+    engine_id: &str,
+    credentials_json: &str,
+) -> Result<Arc<dyn TtsEngine>, EngineSetupError> {
     // Detect engines that exist in the full catalogue but were compiled out
     // by disabled features, so callers get a useful error rather than a
     // generic "unknown engine". Only emit these messages when the
@@ -71,57 +164,53 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
         "system" => {
             #[cfg(all(feature = "system", target_os = "linux"))]
             {
-                return Some(Arc::new(SystemEngine::new()));
+                return Ok(Arc::new(SystemEngine::new()));
             }
             #[cfg(not(all(feature = "system", target_os = "linux")))]
             {
-                eprintln!(
-                    "Engine 'system' requires the 'system' feature on Linux. \
-                     Current build does not satisfy these conditions."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "requires the 'system' feature on Linux",
+                ));
             }
         }
         "avsynth" => {
             #[cfg(all(feature = "avsynth", target_os = "macos"))]
             {
-                return Some(Arc::new(AvSynthEngine::new()));
+                return Ok(Arc::new(AvSynthEngine::new()));
             }
             #[cfg(not(all(feature = "avsynth", target_os = "macos")))]
             {
-                eprintln!(
-                    "Engine 'avsynth' requires the 'avsynth' feature and macOS. \
-                     Current build does not satisfy these conditions."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "requires the 'avsynth' feature and macOS",
+                ));
             }
         }
         "sapi" => {
             #[cfg(all(feature = "sapi", target_os = "windows"))]
             {
-                return Some(Arc::new(SapiEngine::new()));
+                return Ok(Arc::new(SapiEngine::new()));
             }
             #[cfg(not(all(feature = "sapi", target_os = "windows")))]
             {
-                eprintln!(
-                    "Engine 'sapi' requires the 'sapi' feature and Windows. \
-                     Current build does not satisfy these conditions."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "requires the 'sapi' feature and Windows",
+                ));
             }
         }
         "sherpaonnx" => {
             #[cfg(feature = "sherpaonnx")]
             {
-                return Some(Arc::new(SherpaOnnxEngine::new(credentials_json)));
+                return Ok(Arc::new(SherpaOnnxEngine::new(credentials_json)));
             }
             #[cfg(not(feature = "sherpaonnx"))]
             {
-                eprintln!(
-                    "Engine 'sherpaonnx' is not enabled in this build. \
-                     Rebuild with --features sherpaonnx."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "not enabled in this build — rebuild with --features sherpaonnx",
+                ));
             }
         }
         "qwen3-local" => {
@@ -129,20 +218,16 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
             {
                 let creds = parse_credentials(credentials_json);
                 return match Qwen3LocalEngine::new(&creds) {
-                    Ok(engine) => Some(Arc::new(engine)),
-                    Err(e) => {
-                        eprintln!("Engine 'qwen3-local' failed to load: {e}");
-                        None
-                    }
+                    Ok(engine) => Ok(Arc::new(engine)),
+                    Err(e) => Err(fielded_setup_error(engine_id, &creds, e.0)),
                 };
             }
             #[cfg(not(feature = "qwen3-local"))]
             {
-                eprintln!(
-                    "Engine 'qwen3-local' is not enabled in this build. \
-                     Rebuild with --features qwen3-local."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "not enabled in this build — rebuild with --features qwen3-local",
+                ));
             }
         }
         "omnivoice-local" => {
@@ -150,6 +235,18 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
             {
                 use crate::omnivoice_local_engine::{OmniVoiceLocalEngine, OmniVoiceLocalParams};
                 let creds = parse_credentials(credentials_json);
+                // Name the first missing path so the error carries the
+                // exact field key (GH #69).
+                for key in ["modelPath", "codecPath"] {
+                    if creds.get(key).is_none_or(String::is_empty) {
+                        return Err(EngineSetupError::new(
+                            TtsErrorCode::MissingConfiguration,
+                            engine_id,
+                            Some(key),
+                            format!("omnivoice-local: {key} is required"),
+                        ));
+                    }
+                }
                 let params = OmniVoiceLocalParams {
                     model_path: creds.get("modelPath").cloned().unwrap_or_default(),
                     codec_path: creds.get("codecPath").cloned().unwrap_or_default(),
@@ -163,36 +260,31 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
                     ..Default::default()
                 };
                 return match OmniVoiceLocalEngine::new(params) {
-                    Ok(engine) => Some(Arc::new(engine)),
-                    Err(e) => {
-                        eprintln!("Engine 'omnivoice-local' failed to load: {e}");
-                        None
-                    }
+                    Ok(engine) => Ok(Arc::new(engine)),
+                    Err(e) => Err(fielded_setup_error(engine_id, &creds, e.0)),
                 };
             }
             #[cfg(not(feature = "omnivoice-local"))]
             {
-                eprintln!(
-                    "Engine 'omnivoice-local' is not enabled in this build. \
-                     Rebuild with --features omnivoice-local."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "not enabled in this build — rebuild with --features omnivoice-local",
+                ));
             }
         }
         "floravox" => {
             #[cfg(feature = "floravox")]
             {
-                return Some(Arc::new(crate::floravox_engine::FloravoxEngine::new(
+                return Ok(Arc::new(crate::floravox_engine::FloravoxEngine::new(
                     credentials_json,
                 )));
             }
             #[cfg(not(feature = "floravox"))]
             {
-                eprintln!(
-                    "Engine 'floravox' is not enabled in this build. \
-                     Rebuild with --features floravox."
-                );
-                return None;
+                return Err(EngineSetupError::not_available(
+                    engine_id,
+                    "not enabled in this build — rebuild with --features floravox",
+                ));
             }
         }
         _ => {}
@@ -202,33 +294,56 @@ pub fn create_engine(engine_id: &str, credentials_json: &str) -> Option<Arc<dyn 
     // engine id is unknown to this build.
     #[cfg(feature = "cloud")]
     {
-        let result = cloud_engine::create_cloud_engine(engine_id, credentials_json);
-        if result.is_none() {
-            eprintln!(
-                "Unknown engine '{engine_id}'. Available engines: {}",
+        match cloud_engine::create_cloud_engine(engine_id, credentials_json) {
+            Some(engine) => Ok(engine),
+            None => Err(EngineSetupError::new(
+                TtsErrorCode::EngineNotAvailable,
+                engine_id,
+                None,
+                format!(
+                    "Unknown engine '{engine_id}'. Available engines: {}",
+                    engine_list()
+                        .iter()
+                        .map(|e| e.id.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )),
+        }
+    }
+
+    #[cfg(not(feature = "cloud"))]
+    {
+        Err(EngineSetupError::new(
+            TtsErrorCode::EngineNotAvailable,
+            engine_id,
+            None,
+            format!(
+                "Unknown engine '{engine_id}' (cloud feature is disabled; only \
+                 built-in engines are available). Available engines: {}",
                 engine_list()
                     .iter()
                     .map(|e| e.id.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
-            );
-        }
-        result
+            ),
+        ))
     }
+}
 
-    #[cfg(not(feature = "cloud"))]
-    {
-        eprintln!(
-            "Unknown engine '{engine_id}' (cloud feature is disabled; only \
-             built-in engines are available). Available engines: {}",
-            engine_list()
-                .iter()
-                .map(|e| e.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        None
-    }
+/// Build a setup error for a local-engine load failure, attaching the
+/// first missing required field when the credentials make the cause
+/// unambiguous (GH #69). When nothing is missing — e.g. a corrupt model
+/// file — no field key is claimed (the user's paths are filled in;
+/// pointing at them would be misleading).
+fn fielded_setup_error(
+    engine_id: &str,
+    creds: &std::collections::HashMap<String, String>,
+    raw_message: String,
+) -> EngineSetupError {
+    let field = crate::engine_schema::first_missing_required_field(engine_id, creds);
+    let code = crate::error_codes::classify_error_message(&raw_message);
+    EngineSetupError::new(code, engine_id, field.as_deref(), raw_message)
 }
 
 /// Return the number of registered engines.
@@ -237,7 +352,20 @@ pub fn engine_count() -> usize {
     engine_list().len()
 }
 
-/// Return a list of all registered engine descriptors.
+/// Return a list of all registered engine descriptors (only the
+/// engines compiled into this build — see the [features
+/// list](https://github.com/AACTools/rust-tts-wrapper#features) in
+/// the README).
+///
+/// # Examples
+///
+/// ```
+/// let engines = rust_tts_wrapper::factory::engine_list();
+/// assert!(!engines.is_empty());
+/// for e in &engines {
+///     println!("{}: {} (credentials: {})", e.id, e.name, e.credential_keys_json);
+/// }
+/// ```
 #[must_use]
 #[allow(clippy::vec_init_then_push)]
 #[allow(clippy::too_many_lines)]
@@ -274,7 +402,7 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         id: "sherpaonnx".into(),
         name: "Sherpa-ONNX".into(),
         needs_credentials: false,
-        credential_keys_json: "[]".into(),
+        credential_keys_json: r#"["modelPath","modelId","numThreads","numSteps","provider","referenceAudio","referenceText"]"#.into(),
     });
 
     #[cfg(feature = "qwen3-local")]
@@ -322,7 +450,12 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
             ),
             ("azure", "Azure", true, r#"["subscriptionKey","region"]"#),
             ("edge", "Microsoft Edge (Read Aloud)", false, "[]"),
-            ("google", "Google Cloud", true, r#"["apiKey"]"#),
+            (
+                "google",
+                "Google Cloud",
+                true,
+                r#"["apiKey","keyFilePath"]"#,
+            ),
             (
                 "gemini",
                 "Google Gemini (3.8 TTS)",

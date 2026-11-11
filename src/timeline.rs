@@ -186,6 +186,7 @@ impl PlaybackTimeline {
         self.entries.len()
     }
 
+    /// True when the timeline holds no entries.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -251,6 +252,7 @@ impl PlaybackClock {
         }
     }
 
+    /// True while the clock is paused (wall time frozen).
     #[must_use]
     pub fn is_paused(&self) -> bool {
         self.pause_started.is_some()

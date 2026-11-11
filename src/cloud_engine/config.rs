@@ -9,14 +9,23 @@ pub const QWEN_DEFAULT_VOICE: &str = "longanhuan_v3.6";
 /// Configuration for a single cloud TTS provider.
 #[derive(Debug, Clone, Default)]
 pub struct CloudConfig {
+    /// Synthesis endpoint (overridable via the `synthUrl` credential).
     pub synth_url: String,
+    /// Header name carrying the credential (empty = no header auth).
     pub auth_header: String,
+    /// Value prefix inside the auth header (e.g. `Bearer `).
     pub auth_prefix: String,
+    /// Request field/param carrying the voice id.
     pub voice_param: String,
+    /// Request field carrying the model id, if the API takes one.
     pub model_param: Option<String>,
+    /// Model id used when the caller sets none.
     pub model_default: Option<String>,
+    /// Voice used when the caller sets none.
     pub default_voice: Option<String>,
+    /// Request field carrying the text to speak.
     pub text_field: String,
+    /// Extra static body fields merged into every request.
     pub extra_body: HashMap<String, serde_json::Value>,
     /// Whether this engine requires SSML in the request body (Azure).
     pub body_is_ssml: bool,
