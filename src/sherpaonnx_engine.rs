@@ -488,6 +488,15 @@ impl SherpaOnnxEngine {
                     &fallback_root,
                     &self.loaded_model_id,
                 ) {
+                    Ok(Some(res)) if res.reused => {
+                        // fallback-dir lexicon already exists (read-only
+                        // model dir): cheap path reuse, still must reach
+                        // the config every call — no log, this fires per
+                        // utterance
+                        if !res.path.starts_with(&model_dir) {
+                            compat_lexicon_path = Some(res.path);
+                        }
+                    }
                     Ok(Some(res)) => {
                         eprintln!(
                             "sherpa: generated compat lexicon.txt for '{}' from bundle \
@@ -2965,11 +2974,7 @@ mod tests {
             let gated = row.is_some() && should_compat_generate_lexicon(&m.model_type, &lower);
             if gated {
                 eligible += 1;
-                assert!(
-                    crate::sherpa_lang::default_bundle_for_model(&info)
-                        .is_some_and(|b| b.bcp47 == "de"),
-                    "id {id}"
-                );
+                assert!(row.is_some_and(|b| b.bcp47 == "de"), "id {id}");
             }
         }
         assert_eq!(eligible, 52, "German compat-eligible model count moved");
@@ -2979,6 +2984,36 @@ mod tests {
     fn test_engine_num_threads_invalid_falls_back_to_default() {
         let engine = SherpaOnnxEngine::new(r#"{"numThreads":"not-a-number"}"#);
         assert_eq!(engine.num_threads, 2); // default
+    }
+
+    /// The compat-fallback lexicon path must reach the vits config: an
+    /// out-of-model-dir lexicon is merged into the `lexicon` field
+    /// alongside (sorted, deduped) any in-model-dir lexicons.
+    #[test]
+    fn test_build_vits_config_merges_extra_lexicon() {
+        let d = tempfile::tempdir().unwrap().keep();
+        std::fs::write(d.join("tokens.txt"), "a 0\n").unwrap();
+        let cfg = build_vits_config(&d, true, false, None);
+        assert!(
+            cfg.lexicon.is_none(),
+            "no lexicons anywhere → field unset (was: {:?})",
+            cfg.lexicon
+        );
+
+        // extra only
+        let extra = d.join("generated-elsewhere.txt");
+        std::fs::write(&extra, "haus||h a ʊ s\n").unwrap();
+        let cfg = build_vits_config(&d, true, false, Some(&extra));
+        assert_eq!(cfg.lexicon.as_deref(), Some(extra.to_str().unwrap()));
+
+        // extra + in-model-dir lexicon: both, deterministic order, no dupes
+        std::fs::write(d.join("lexicon.txt"), "a||a\n").unwrap();
+        let cfg = build_vits_config(&d, true, false, Some(&extra));
+        let joined = cfg.lexicon.expect("both present");
+        let parts: Vec<&str> = joined.split(',').collect();
+        assert_eq!(parts.len(), 2, "{joined}");
+        assert!(parts.contains(&d.join("lexicon.txt").to_str().unwrap()));
+        assert!(parts.contains(&extra.to_str().unwrap()));
     }
 
     #[test]

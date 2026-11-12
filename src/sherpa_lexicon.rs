@@ -268,13 +268,15 @@ impl VocabPhonemeMap {
 
     /// Map one bundle phone symbol to target-vocabulary tokens. `None` =
     /// unmappable; `Some(vec![])` = resolves to nothing (a stress mark
-    /// the vocabulary does not carry).
+    /// the vocabulary does not carry). Input is NFC-normalized first
+    /// (rule 1).
     #[must_use]
     pub fn map_symbol(&mut self, sym: &str) -> Option<Vec<String>> {
         if let Some(cached) = self.cache.get(sym) {
             return cached.clone();
         }
-        let resolved = self.resolve(sym);
+        let nfc: String = sym.nfc().collect();
+        let resolved = self.resolve(&nfc);
         self.cache.insert(sym.to_string(), resolved.clone());
         resolved
     }
@@ -340,8 +342,15 @@ impl VocabPhonemeMap {
             return Some(Vec::new());
         }
         if chars.first().is_some_and(|c| STRESS_MARKS.contains(c)) {
+            let mark = chars[0];
             let rest: String = chars[1..].iter().collect();
-            if let Some(parts) = self.resolve_segment(&rest) {
+            if let Some(mut parts) = self.resolve_segment(&rest) {
+                // the mark is kept only when the vocabulary carries it
+                // (rule 7: deleted when absent); prepending preserves
+                // prosody for languages whose bundles stress-prefix
+                if self.target_vocab.contains(&mark.to_string()) {
+                    parts.insert(0, mark.to_string());
+                }
                 return Some(parts);
             }
         }
@@ -691,12 +700,21 @@ fn discover_bundle_lexicon(key: &str) -> Option<PathBuf> {
 /// writable — the config must point there explicitly).
 #[derive(Debug)]
 pub struct CompatLexiconResult {
-    /// entries written by the converter
+    /// entries written by the converter (0 when an existing lexicon was
+    /// reused — see [`CompatLexiconResult::reused`])
     pub written: usize,
     /// entries skipped (unmappable symbols)
     pub skipped: usize,
     /// final lexicon.txt location
     pub path: PathBuf,
+    /// true when a lexicon already existed at the target and the full
+    /// conversion was skipped. The engine re-runs this on every
+    /// `synthesize` until the model dir has its own lexicon, so a
+    /// read-only model dir (iOS bundles) must NOT re-convert 277k
+    /// entries per utterance — the fallback-dir lexicon is reused and
+    /// its path returned cheaply (the config needs it every call: it
+    /// sits outside the model dir and is not auto-discovered).
+    pub reused: bool,
 }
 
 /// Generate a sherpa `lexicon.txt` for a non-English model from its
@@ -716,6 +734,13 @@ pub fn ensure_compat_lexicon(
     model_id: &str,
 ) -> Result<Option<CompatLexiconResult>, LexiconGenError> {
     let Some(bundle_lexicon) = discover_bundle_lexicon(bundle_key) else {
+        // an opted-in user must not get silence: say what is missing and
+        // where the bundle is expected (fetching arrives with the
+        // sherpa-g2p feature, plan Phase 3 — provisioning for now)
+        eprintln!(
+            "sherpa: lexiconCompat: bundle '{bundle_key}' not found in the lexicon cache — \
+             skipped. Provision the bundle or set VOICEGARDEN_LEXICON_DIR."
+        );
         return Ok(None);
     };
     ensure_compat_lexicon_from(model_dir, &bundle_lexicon, fallback_root, model_id)
@@ -772,6 +797,20 @@ pub fn ensure_compat_lexicon_from(
         dir
     };
 
+    // the engine calls this on EVERY synthesize until the model dir has
+    // its own lexicon: a read-only model dir lands here repeatedly, and
+    // must reuse the fallback-dir lexicon instead of re-converting the
+    // whole bundle per utterance
+    let existing = target_dir.join("lexicon.txt");
+    if existing.is_file() {
+        return Ok(Some(CompatLexiconResult {
+            written: 0,
+            skipped: 0,
+            path: existing,
+            reused: true,
+        }));
+    }
+
     let n = COMPAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = target_dir.join(format!("lexicon.txt.{}.{}.tmp", std::process::id(), n));
     let stats = generate_lexicon_txt(bundle_lexicon, &mut map, &tmp);
@@ -785,6 +824,7 @@ pub fn ensure_compat_lexicon_from(
                 written,
                 skipped,
                 path: final_path,
+                reused: false,
             }))
         }
         Ok((_written, skipped)) => {
@@ -1253,7 +1293,10 @@ mod tests {
         assert_eq!(seq, vec!["h", "a", "\u{028A}", "s"]);
     }
 
-    /// Stress marks absent from the vocabulary are dropped, not fatal.
+    /// Stress marks absent from the vocabulary are dropped, not fatal;
+    /// when the vocabulary carries them, stress-prefixed composites
+    /// KEEP the mark (rule 7 — prosody survives for bundle languages
+    /// that stress-prefix).
     #[test]
     fn vocab_ladder_drops_uncarried_stress_marks() {
         let dir = tempfile::tempdir().unwrap().keep();
@@ -1261,6 +1304,19 @@ mod tests {
         let mut map = VocabPhonemeMap::for_language(&dir.join("tokens.txt")).unwrap();
         assert_eq!(map.map_symbol("\u{02C8}"), Some(Vec::new()));
         assert_eq!(map.map_symbol("\u{02C8}a"), Some(vec!["a".to_string()]));
+
+        // vocab WITH the stress mark: bare identity, prefix kept
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join("tokens.txt"), "a 0\n\u{02C8} 1\n").unwrap();
+        let mut map = VocabPhonemeMap::for_language(&dir.join("tokens.txt")).unwrap();
+        assert_eq!(
+            map.map_symbol("\u{02C8}"),
+            Some(vec!["\u{02C8}".to_string()])
+        );
+        assert_eq!(
+            map.map_symbol("\u{02C8}a"),
+            Some(vec!["\u{02C8}".to_string(), "a".to_string()])
+        );
     }
 
     /// A vocabulary carrying the tie-stripped whole (`pf` as a token)
@@ -1392,6 +1448,41 @@ mod tests {
             tmp.join("lexicons-gen").join("m").join("lexicon.txt")
         );
         assert!(res.path.is_file());
+    }
+
+    /// THE iOS scenario: a read-only model dir must reuse the
+    /// fallback-dir lexicon on subsequent calls — the engine re-runs
+    /// this per synthesize, and re-converting 277k entries per
+    /// utterance would be a multi-second tax. Skipped as root.
+    #[test]
+    fn compat_lexicon_reuses_fallback_on_second_call() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap().keep();
+        let model = tmp.join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::copy(thorsten_vocab(), model.join("tokens.txt")).unwrap();
+        let bundle = tmp.join("bundle-de.txt");
+        std::fs::write(&bundle, "haus\th a\u{028A}\u{032F} s\n").unwrap();
+
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let probe = model.join(".write-probe");
+        let is_root = std::fs::write(&probe, b"").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        if !is_root {
+            let first = ensure_compat_lexicon_from(&model, &bundle, &tmp, "m")
+                .unwrap()
+                .expect("generated");
+            assert!(!first.reused);
+            assert_eq!(first.written, 1);
+
+            let second = ensure_compat_lexicon_from(&model, &bundle, &tmp, "m")
+                .unwrap()
+                .expect("reused");
+            assert!(second.reused, "must not re-convert");
+            assert_eq!(second.written, 0);
+            assert_eq!(second.path, first.path, "same fallback path");
+        }
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     /// A bundle whose nothing converts (wrong-language) → zero-entry

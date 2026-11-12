@@ -163,22 +163,30 @@ New `src/sherpa_lang.rs`:
 
 Generalize the English-only machinery in `src/sherpa_lexicon.rs` /
 `src/sherpa_convention.rs` into a vocabulary-driven converter
-(`PhonemeMap::for_language`-shaped). Per bundle phone symbol, in order:
+(`VocabPhonemeMap` — **implemented**). Per bundle phone symbol, in
+order (every candidate validates against the vocabulary before
+emitting; segments resolve recursively; resolutions are memoized):
 
-1. exact match in the model's `tokens.txt` → identity;
-2. strip tie bars (U+0361/U+035C) → if the result matches, use it; else
-   split the components (`p͡f` → `p` `f`) when all are in vocab;
-3. split modifier letters (length `ː` U+02D0, `ˑ` U+02D1) off the base when
-   the composite is not a token (`uː` → `u` `ː`) and both parts are in vocab;
-4. strip the offglide breve (U+032F): diphthongs are written `aʊ̯`/`aɪ̯`
-   (base + offglide + U+032F) — try the composite, then base + plain
-   offglide (`a ʊ`), per vocab;
-5. strip remaining rare diacritics (see inventory below) and retry;
-6. ASCII→IPA homoglyphs (`g` → `ɡ` U+0261; NFC does NOT do this) then retry 1;
-7. stress marks (`ˈ` `ˌ`) deleted when absent from the vocab (German) /
-   kept when present (English, unchanged);
-8. else unmappable → Path A: skip entry (existing behaviour); Path B: word
-   is dropped with a logged warning + counter.
+1. NFC → exact vocabulary match (identity);
+2. ASCII→IPA homoglyphs (`g` → `ɡ` U+0261; NFC does NOT do this),
+   identity retry;
+3. tie bars (U+0361/U+035C): the tie-stripped whole (`p͡f` → `pf`)
+   if it is a token, else split at the tie bars and resolve each
+   segment through the segment ladder (`p͡f` → `p` `f`; `t͡s̯` →
+   `t` `s` via the segment ladder);
+4. trailing length-mark split (`uː` → `u` `ː`), base resolved
+   recursively;
+5. strip one strippable diacritic (offglide breve U+032F first —
+   the common case — then the rare ones) and recurse;
+6. NFD: precomposed letters (`ã ä ü õ`) decompose to base + combining
+   mark; drop the marks and retry (`äː` → `a` `ː`);
+7. stress marks: bare marks absent from the vocabulary map to nothing
+   (dropped); stress-prefixed symbols retry without the prefix and
+   KEEP the mark when the vocabulary carries it;
+8. character split as the last resort (`aʊ̯` → `a` `ʊ` after the
+   breve strip);
+9. else `None` — unmappable (Path A: skip entry; Path B: word dropped
+   with a logged warning + counter).
 
 Measured diacritic inventory across the v0.3.1 German lexicons (occurrence
 counts; the converter must handle at least these):
@@ -215,13 +223,17 @@ when the `sherpa-g2p` front-end is available it is always used):
   `lexicon.txt` beside the model (or in the fallback dir below) for
   interop — other sherpa clients and bare-sherpa usage of the same model
   dir benefit. English keeps today's automatic behaviour unchanged.
-- Extend `discover_lexicon_assets`/`GRUUT_CACHE_LAYOUTS` to per-language
-  layouts (`<key>/lexicon.txt` under the crate's cache root), replacing the
-  eng-US/en hardcoding for allowlisted languages (English layouts stay for
-  English).
-- Fetch behind the new `sherpa-g2p` feature via `LexiconArchive::fetch`,
-  constructing the archive pinned by the allowlist row (see Phase 1).
-  Without the feature: discovery only, no download (today's behaviour).
+- Bundle discovery is a separate helper (implemented as
+  `discover_bundle_lexicon`/`bundle_lexicon_candidates`: flat `<key>/`
+  first — the pinned crate 0.3.0 caches BOTH archives flat — then
+  `expanded/<key>/`, behind `VOICEGARDEN_LEXICON_DIR` mirroring the
+  crate); the English `discover_lexicon_assets`/`GRUUT_CACHE_LAYOUTS`
+  stay untouched for English.
+- **Fetch moved to Phase 3** (implemented deviation): Phase 2 ships
+  discovery only — no download, no `sherpa-g2p` feature yet. A missing
+  bundle under `lexiconCompat` logs what is missing and where, rather
+  than failing silently; provisioning + `LexiconArchive::fetch`
+  (archive pinned by the allowlist row) land with the front-end.
 - Extend lexicon generation to allowlisted non-English models via a
   SEPARATE gate (`should_compat_generate_lexicon`) driven by the
   `lexiconCompat` credentials option — the English auto path

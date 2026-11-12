@@ -69,7 +69,7 @@ ssml-expand = ["dep:floravox-ssml"]
 # Requires the omnivoice.cpp shared library; see VOICE_CLONING_PLAN.md
 # for build + model setup and the critical --duration finding.
 omnivoice-local = ["dep:hound", "ssml-expand"]
-sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models"]
+sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
 # with measured word timings on duration-patched voices, a student-tier
@@ -170,7 +170,7 @@ url = { version = "2.5.8", optional = true }
 # sherpa lexicon generation: NFC/NFD for the vocabulary-driven phone
 # ladder (ã/ä/ü precomposed-vowel handling). Already in the tree via
 # transitive deps; direct so the ladder owns its normalization.
-unicode-normalization = "0.1"
+unicode-normalization = { version = "0.1", optional = true }
 # MP3 → PCM16 decode so cloud engines deliver uniform PCM like the local ones.
 # Pure-Rust symphonia (mp3 codec only) — avoids the C/minimp3 SIMD portability
 # issue that breaks cross-builds to aarch64-pc-windows-msvc.
