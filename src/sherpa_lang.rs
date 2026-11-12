@@ -186,19 +186,32 @@ mod tests {
 
     #[test]
     fn bilingual_compounds_are_excluded_by_id() {
-        // real registry ids (real compound spellings, see
-        // test_lexicon_gate_against_full_registry for the convention)
+        // real registry ids; these are also excluded by the metadata
+        // guard (they list lang+en) — regression coverage for the shape
         let m = model("melo-zh_en-melo-tts", "zh", "CN");
         assert!(default_bundle_for_model(&m).is_none());
         let m = model("kokoro-zh_en-multi-lang", "zh", "CN");
         assert!(default_bundle_for_model(&m).is_none());
-        // the id check is what excludes this one: it lists a SINGLE fa
-        // language, so language-count logic alone would resolve it
+        // the real matcha-fa_en-khadijah lists fa+en; the synthetic
+        // single-fa shape below isolates the ID check: no fa rows exist,
+        // so without the id check this would still be None — it is the
+        // de_en case underneath that makes the id branch decisive
         let m = model("matcha-fa_en-khadijah", "fa", "IR");
         assert!(default_bundle_for_model(&m).is_none());
+        // DECISIVE id-check case: compound id + single language that HAS
+        // rows — only is_bilingual_en_compound excludes this. If this
+        // assertion is removed, delete the id check in
+        // default_bundle_for_model and the suite stays green (mutation
+        // hole); this fixture is what pins the branch.
+        let m = model("piper-de_en-hybrid", "de", "DE");
+        assert!(default_bundle_for_model(&m).is_none());
         // no false positive: `_en` followed by a letter is not a compound
-        let m = model("mms_eng", "en", "US");
-        assert!(default_bundle_for_model(&m).is_none()); // no en rows, and no panic
+        // (mms_eng's registry lang_code is "eng", ISO 639-2/B — which
+        // also must NOT alias to a hypothetical "en" row: primary-subtag
+        // matching is exact, not prefix)
+        let m = model("mms_eng", "eng", "US");
+        assert!(default_bundle_for_model(&m).is_none());
+        assert!(bundles_for_language("eng").is_empty());
     }
 
     #[test]
@@ -297,7 +310,10 @@ mod tests {
             }
         }
         // the pinned registry has 52 German vits + 1 supertonic entry;
-        // supertonic is multilingual → excluded, so expect 52
+        // supertonic is multilingual → excluded, so expect 52. If a
+        // legitimate de+de-AT (same primary) entry ever lands, the
+        // implementation resolves it but this pin fails first — review
+        // the pin deliberately, exactly like the gate-test count pins.
         assert_eq!(de_single, 52, "German single-language model count moved");
     }
 
