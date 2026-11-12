@@ -206,7 +206,7 @@ fn ffi_wav_synthesis_uses_the_decoded_sample_rate() {
     assert!(!ctx.is_null(), "Gemini context");
     let mut buffer = std::ptr::null_mut();
     let mut length = 0;
-    let rc = tts_synth_to_wav(ctx, c"Hello".as_ptr(), &mut buffer, &mut length);
+    let rc = tts_synth_to_wav(ctx, c"Hello".as_ptr(), &raw mut buffer, &raw mut length);
     tts_destroy(ctx);
     handle.join().expect("mock thread");
     assert_eq!(rc, 0);
