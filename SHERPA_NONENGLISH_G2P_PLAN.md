@@ -143,11 +143,21 @@ New `src/sherpa_lang.rs`:
   `floravox_engine` uses. Lifecycle: both German rows ship from Phase 1
   behind the `sherpa-g2p` feature (`validated: false`); Phase 4's bake-off
   picks the default row; Phase 5 flips `validated` → download enablement.
-- Unit tests: registry language → (key, archive); compounds rejected;
-  unknown language → None. Registry `lang_code`s are bare codes
-  (`"de"` with `country: "DE"` as a separate field — no underscore forms
-  exist in the pinned registry), so fixtures must use real shapes, and
+- Unit tests: registry language → (key, archive); compounds rejected
+  (real registry ids); multilingual NON-compound models rejected
+  (supertonic lists 31 languages — resolution requires every language
+  entry to share one primary subtag); unknown language → None; a
+  full-registry invariant test pinning the contract against the real
+  corpus. Registry `lang_code`s are bare codes (`"de"` with
+  `country: "DE"` as a separate field — no underscore forms exist in
+  the pinned registry), so fixtures must use real shapes, and
   normalization maps `de` → bundle lookup, not `de_DE` → `de`.
+- **Implemented deviation (Phase 1 PR)**: the module ships under the
+  existing `sherpaonnx` feature rather than `sherpa-g2p` — Phase 1 needs
+  neither `voicegarden-lexicons` nor `floravox-g2p`, and an empty feature
+  would be dead config. The `sherpa-g2p` feature arrives with its deps in
+  Phase 3, when the fetch/front-end code that justifies it lands; the
+  engine consumption of `LANG_BUNDLES` is what that feature gates.
 
 ### Phase 2 — generalized model-aware converter + Path A for German
 
@@ -339,13 +349,15 @@ pattern):
   `lexicon.txt` loads and the plain-text path speaks.
 - CI (`.github/workflows/sherpaonnx-live.yml`): add the thorsten model +
   both German bundle download steps beside the eng-US ones. Pre-seed the
-  CRATE's own cache layout — `~/.voicegarden/lexicons/de/` (base) and
-  `~/.voicegarden/lexicons/expanded/deu/` (expanded subdir, matching the
-  existing `expanded/eng-US` layout) — AND write each dir's `.sha256`
-  stamp with the manifest sha (`add4f489…` for de, `880f03da…` for deu):
-  the crate's cache hit requires the stamp plus the `fst`/`pho` files, so
-  without it `fetch` re-downloads 13–19 MB every run. With it, the live
-  tests exercise the real `fetch` path and find the bundles cached.
+  crate's own cache layout AND write each dir's `.sha256` stamp with the
+  manifest sha (`add4f489…` for de, `880f03da…` for deu): the crate's
+  cache hit requires the stamp plus the `fst`/`pho` files, so without it
+  `fetch` re-downloads 13–19 MB every run. **Verify the cache path
+  against the PINNED crate when writing this step**: Cargo.lock pins
+  voicegarden-lexicons 0.3.0, whose `default_expanded()` caches FLAT
+  (`~/.voicegarden/lexicons/deu`, no `expanded/` subdir) — the
+  `expanded/deu/` layout above assumes a newer crate; either bump to a
+  release whose layout matches or seed flat to match the pin.
 - iOS: extend `tests/ios_sherpa_smoke.c` — front-end on, WFST forced to
   load (one OOV sentence), assert audio and no crash.
 - Measure OOV rate on a German corpus (e.g. 50k Wikipedia words) with the

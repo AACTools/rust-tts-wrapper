@@ -20,7 +20,8 @@
 //! voicegarden-lexicons crate matches entries on `lang` OR `bcp47`, so
 //! asking the expanded archive for `"de"` silently resolves `deu`.
 //! Consumers must construct exactly the archive named in
-//! [`LangBundle::archive`] — never the `expanded.or_else(base)` order
+//! [`LangBundle::archive`] AND fetch by [`LangBundle::key`], never the
+//! raw lang_code — never the `expanded.or_else(base)` order
 //! `floravox_engine` uses for its own purposes.
 //!
 //! # Lifecycle
@@ -107,19 +108,28 @@ pub fn bundles_for_language(lang_code: &str) -> Vec<&'static LangBundle> {
 }
 
 /// The default bundle row for a model: the first allowlist row for the
-/// model's first registry language. `None` for languages without a
-/// bundle, bilingual `<lang>_en` compounds (checked on the id, the only
-/// id-based decision here), and models with no language metadata.
-///
-/// Multi-language models use their FIRST language — piper voices carry
-/// exactly one; genuinely multi-language voices (zh_en, fa_en) are the
-/// compounds excluded above.
+/// model's language. `None` for languages without a bundle (English
+/// today), bilingual `<lang>_en` compounds (checked on the id, the only
+/// id-based decision here), models with no language metadata, and
+/// MULTI-language models: resolution requires every language entry to
+/// share one primary subtag. A 31-language supertonic voice or a zh_en
+/// compound must not get a German-only (or any single-language)
+/// front-end — that silence is the wrong-bundle failure class this
+/// module exists to prevent.
 #[must_use]
 pub fn default_bundle_for_model(model: &SherpaModelInfo) -> Option<&'static LangBundle> {
     if crate::sherpaonnx_engine::is_bilingual_en_compound(&model.id.to_ascii_lowercase()) {
         return None;
     }
     let first = model.language.first()?;
+    let primary = primary_subtag(&first.lang_code);
+    if model
+        .language
+        .iter()
+        .any(|l| primary_subtag(&l.lang_code) != primary)
+    {
+        return None; // genuinely multi-language
+    }
     bundles_for_language(&first.lang_code).into_iter().next()
 }
 
@@ -176,12 +186,33 @@ mod tests {
 
     #[test]
     fn bilingual_compounds_are_excluded_by_id() {
-        // zh_en compound: an English-only or single-bundle front-end would
-        // be wrong even though the id contains "en" and the model lists
-        // Chinese
-        let m = model("vits-melo-tts-zh_en", "zh", "CN");
+        // real registry ids (real compound spellings, see
+        // test_lexicon_gate_against_full_registry for the convention)
+        let m = model("melo-zh_en-melo-tts", "zh", "CN");
         assert!(default_bundle_for_model(&m).is_none());
-        let m = model("kokoro-zh_en-v1_0", "zh", "CN");
+        let m = model("kokoro-zh_en-multi-lang", "zh", "CN");
+        assert!(default_bundle_for_model(&m).is_none());
+        // the id check is what excludes this one: it lists a SINGLE fa
+        // language, so language-count logic alone would resolve it
+        let m = model("matcha-fa_en-khadijah", "fa", "IR");
+        assert!(default_bundle_for_model(&m).is_none());
+        // no false positive: `_en` followed by a letter is not a compound
+        let m = model("mms_eng", "en", "US");
+        assert!(default_bundle_for_model(&m).is_none()); // no en rows, and no panic
+    }
+
+    #[test]
+    fn multilingual_non_compound_models_resolve_none() {
+        // supertonic-3-multilingual lists 31 languages; with German first
+        // it must STILL resolve None — a German-only front-end on a
+        // 31-language voice is the wrong-bundle failure this module
+        // exists to prevent
+        let mut m = model("supertonic-3-multilingual", "de", "DE");
+        m.language.push(SherpaLanguage {
+            lang_code: "en".to_string(),
+            language_name: "English".to_string(),
+            country: "US".to_string(),
+        });
         assert!(default_bundle_for_model(&m).is_none());
     }
 
@@ -217,6 +248,57 @@ mod tests {
         // (none ships yet — the assertion documents the semantics)
         assert_eq!(primary_subtag("pt-BR"), "pt");
         assert_eq!(primary_subtag(""), "");
+        // whitespace-only codes resolve nothing
+        assert!(bundles_for_language("   ").is_empty());
+    }
+
+    /// The full pinned registry, the same convention as
+    /// `test_lexicon_gate_against_full_registry`: pins the resolution
+    /// contract against the real corpus (1780 models) so a registry bump
+    /// that introduces a multilingual German voice (or a new compound
+    /// spelling) fails here instead of surprising a user.
+    #[test]
+    fn resolution_against_full_registry() {
+        let mut de_single = 0;
+        for (id, m) in sherpa_onnx_models::models() {
+            let info = SherpaModelInfo {
+                id: id.clone(),
+                model_type: m.model_type.clone(),
+                engines: String::new(),
+                name: String::new(),
+                language: m
+                    .language
+                    .iter()
+                    .map(|l| SherpaLanguage {
+                        lang_code: l.lang_code.clone(),
+                        language_name: l.language_name.clone(),
+                        country: l.country.clone(),
+                    })
+                    .collect(),
+                sample_rate: m.sample_rate,
+                num_speakers: m.num_speakers,
+                quality: String::new(),
+                url: String::new(),
+                compression: false,
+                filesize_mb: 0.0,
+                license: String::new(),
+                license_url: String::new(),
+            };
+            let resolved = default_bundle_for_model(&info);
+            let single_german = info.language.len() == 1
+                && primary_subtag(&info.language[0].lang_code) == "de"
+                && !crate::sherpaonnx_engine::is_bilingual_en_compound(&id.to_ascii_lowercase());
+            if single_german {
+                de_single += 1;
+                let b = resolved.expect("single-language German model resolves");
+                assert_eq!((b.key, b.archive), ("de", Archive::Base), "id {id}");
+            } else {
+                assert!(resolved.is_none(), "id {id} must not resolve");
+            }
+        }
+        // the pinned registry has 52 German vits + 1 supertonic entry;
+        // supertonic is multilingual → excluded, so expect 52
+        assert_eq!(de_single, 52, "German single-language model count moved");
     }
 
     #[test]
