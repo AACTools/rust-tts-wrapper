@@ -91,6 +91,8 @@ mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpa_convention;
 #[cfg(feature = "sherpaonnx")]
+pub mod sherpa_lang;
+#[cfg(feature = "sherpaonnx")]
 pub mod sherpa_lexicon;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpa_p2p;

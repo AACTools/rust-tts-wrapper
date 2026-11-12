@@ -1134,7 +1134,7 @@ fn is_english_model_id(mid: &str) -> bool {
 /// Bilingual `<lang>_en` compound (zh_en, fa_en, …)? These models need
 /// their own multi-language front-end — an English-only lexicon would
 /// be wrong for them even though their id contains "en".
-fn is_bilingual_en_compound(mid: &str) -> bool {
+pub(crate) fn is_bilingual_en_compound(mid: &str) -> bool {
     let b = mid.as_bytes();
     if b.len() < 5 {
         return false;
