@@ -234,33 +234,15 @@ class TtsError extends Error {
 }
 
 /**
- * Read an OWNED NUL-terminated C string from the ABI and free the
- * native allocation. `ptr` must come from a void*-declared proto (see
- * loadLibrary) so koffi hands us the raw pointer instead of a detached
- * JS string. koffi 2.16's decode(ptr, 'const char *') segfaults on
- * runtime pointers, so the string is assembled from byte chunks.
- *
- * @returns {string} the decoded string ("" when empty)
+ * Decode the NUL-terminated bytes behind the raw ABI pointer and free it.
+ * The char array form stops at NUL without dereferencing a char ** or
+ * reading a fixed-size block beyond the end of the allocation.
  */
-function readOwnedCString(abi, ptr, maxLen = 1 << 22) {
+function readOwnedCString(abi, ptr) {
   if (!ptr) return "";
   const freeString = abi.parity.needParity("tts_free_string");
-  const CHUNK = 8192;
-  const parts = [];
   try {
-    let offset = 0;
-    while (offset < maxLen) {
-      const step = Math.min(CHUNK, maxLen - offset);
-      const bytes = koffi.decode(ptr, offset, "uint8_t", step);
-      const nul = bytes.indexOf(0);
-      if (nul >= 0) {
-        parts.push(Buffer.from(bytes.subarray(0, nul)));
-        break;
-      }
-      parts.push(Buffer.from(bytes));
-      offset += step;
-    }
-    return Buffer.concat(parts).toString("utf8");
+    return koffi.decode(ptr, "char", -1);
   } finally {
     freeString(ptr);
   }
