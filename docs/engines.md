@@ -138,6 +138,17 @@ voice in the weights; English (en-US inventory) for now.
 
 ### Sherpa-ONNX models
 
+For iOS 15 and later, build the static library with
+`scripts/build-ios-sherpa.sh aarch64-apple-ios` for a device or
+`scripts/build-ios-sherpa.sh aarch64-apple-ios-sim` for an Apple Silicon
+simulator. Use `x86_64-apple-ios` for an Intel simulator. Install the
+corresponding target with `rustup target add` first. The script bundles the
+pinned Sherpa-ONNX and ONNX Runtime libraries. Link the resulting
+`target/<target>/release/librust_tts_wrapper.a` with C++ and the
+`Accelerate`, `CoreFoundation`, `CoreML`, and `Foundation` frameworks.
+Set `modelPath` to a directory the app can read. Place each extracted
+model in a subdirectory named after its registry ID.
+
 1300+ models from the
 [sherpa-onnx-models](https://crates.io/crates/sherpa-onnx-models)
 registry crate (canonical:

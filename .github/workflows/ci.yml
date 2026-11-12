@@ -179,6 +179,20 @@ jobs:
             cargo build --release --target $T --no-default-features --features cloud
             # (floravox iOS builds removed — see private fork)
           done
+      - name: Build and link Sherpa-ONNX for iOS device and simulator
+        if: "!matrix.android"
+        run: |
+          for T in aarch64-apple-ios aarch64-apple-ios-sim; do
+            scripts/build-ios-sherpa.sh "$T" debug
+            case "$T" in
+              aarch64-apple-ios) SDK=iphoneos; CLANG_TARGET=arm64-apple-ios15.0 ;;
+              aarch64-apple-ios-sim) SDK=iphonesimulator; CLANG_TARGET=arm64-apple-ios15.0-simulator ;;
+            esac
+            xcrun --sdk "$SDK" clang -target "$CLANG_TARGET" -I include \
+              tests/ios_sherpa_smoke.c "target/$T/debug/librust_tts_wrapper.a" \
+              -lc++ -framework Accelerate -framework CoreFoundation -framework CoreML -framework Foundation \
+              -o "target/$T/debug/sherpa-smoke"
+          done
 
   windows-build:
     runs-on: windows-latest
