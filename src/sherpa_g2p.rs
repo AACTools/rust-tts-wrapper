@@ -28,7 +28,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use floravox_g2p::{
+use floravox_g2p_fst::{
     ChainedFallback, LexiconPhonemizer, MmapLexicon, OovFallback, PhonetisaurusG2p, RuleFallback,
     TokenPhonemizer,
 };
@@ -83,7 +83,7 @@ impl OovFallback for LazyWfst {
 /// plus the Phase 2 vocabulary mapper. Build once per engine, reuse
 /// across utterances (the word cache makes repeats hash lookups).
 pub struct G2pFrontend {
-    chain: Box<dyn floravox_g2p::TokenPhonemizer + Send>,
+    chain: Box<dyn floravox_g2p_fst::TokenPhonemizer + Send>,
     mapper: VocabPhonemeMap,
 }
 
@@ -148,7 +148,7 @@ impl G2pFrontend {
         let lex = lex.to_mem();
         let wfst = LazyWfst::new(bundle_dir.join("phonetisaurus.fst"));
         let rules = RuleFallback::default();
-        let chain = floravox_g2p::CachedPhonemizer::new(
+        let chain = floravox_g2p_fst::CachedPhonemizer::new(
             LexiconPhonemizer::new(lex, ChainedFallback(wfst, rules)),
             1024,
         );
@@ -196,7 +196,7 @@ impl G2pFrontend {
                 // "sieben") — accepted for quantities, noted for codes.
                 let expanded: String;
                 let parts: Vec<&str> = {
-                    let core = floravox_g2p::word_core(token).unwrap_or_default();
+                    let core = floravox_g2p_fst::word_core(token).unwrap_or_default();
                     if core.chars().any(|c| c.is_ascii_digit()) {
                         let Some(german) = digits_to_german(core)
                             .or_else(|| digits_plus_suffix(core))
@@ -623,7 +623,7 @@ mod tests {
     /// no WFST (so OOV falls through to the rule fallback and mostly
     /// drops — deterministic for tests).
     fn mini_bundle(dir: &Path) {
-        floravox_g2p::LexiconWriter::new(dir.join("mini"))
+        floravox_g2p_fst::LexiconWriter::new(dir.join("mini"))
             .write(vec![
                 ("haus".into(), "h aʊ̯ s".into()),
                 ("guten".into(), "ɡ uː t ə n".into()),
@@ -804,7 +804,7 @@ mod tests {
     fn frontend_nfc_normalizes_input() {
         let dir = tempfile::tempdir().unwrap().keep();
         // a dictionary word stored precomposed: "schön"
-        floravox_g2p::LexiconWriter::new(dir.join("mini"))
+        floravox_g2p_fst::LexiconWriter::new(dir.join("mini"))
             .write(vec![("schön".into(), "ʃ eː n".into())])
             .expect("write mini lexicon");
         let tokens = mini_tokens(&dir);
@@ -879,7 +879,7 @@ mod tests {
     fn phonemize_drops_unhandled_numerics_and_expands_suffix_forms() {
         let dir = tempfile::tempdir().unwrap().keep();
         // the mini dictionary gains the suffix-expanded word
-        floravox_g2p::LexiconWriter::new(dir.join("mini"))
+        floravox_g2p_fst::LexiconWriter::new(dir.join("mini"))
             .write(vec![
                 ("haus".into(), "h aʊ̯ s".into()),
                 ("tag".into(), "t aː k".into()),

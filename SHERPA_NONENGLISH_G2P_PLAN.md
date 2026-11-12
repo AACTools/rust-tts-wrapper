@@ -418,37 +418,15 @@ pattern):
 
 ## Feature and dependency changes
 
-```toml
-# Cargo.toml
-[features]
-sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p"]
+`sherpa-g2p` uses `voicegarden-lexicons` 0.3 and the same
+`floravox-g2p` 0.6.1 crate as the bundle loader. The 0.6.1 crate
+links ONNX Runtime only with its `onnx` feature. Sherpa uses its FST
+lexicon and Phonetisaurus APIs. The separate Floravox synthesis engine
+uses the 0.8.8 API required by `floravox-core`.
 
-[dependencies]
-voicegarden-lexicons = { version = "0.3", optional = true }  # already present
-floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }  # already present
-```
-
-- NOT default: keeps default builds lean, mirrors `floravox-lexicons`.
-  Deliberately independent of it too — `floravox-lexicons` drags in the
-  whole Floravox synthesis engine (`floravox-core`, an ONNX runtime),
-  while the Apple XCFramework builds with `--no-default-features
-  --features cloud,sherpaonnx` and must not.
-- **Enable in both Apple build scripts**: `scripts/apple/build-xcframework.sh`
-  (line 19) and `scripts/build-ios-sherpa.sh` (line 81) change to
-  `--features cloud,sherpaonnx,sherpa-g2p`. Check `.github/workflows` and
-  `Package.swift` for any other place the Apple feature set is spelled out.
-- ~~`floravox-g2p` WITHOUT the `onnx` feature — no second ONNX
-  runtime~~ **corrected by implementation**: floravox-g2p 0.8.8 (the
-  newest published version) depends on ort UNCONDITIONALLY as a target
-  dependency — the `onnx` feature only toggles its byt5 module. A
-  second ONNX runtime therefore ships beside sherpa-onnx-sys's in
-  static builds (Apple `--crate-type staticlib`). Until a
-  floravox-g2p release makes ort optional, the Apple XCFramework build
-  (link, binary size, duplicate onnxruntime symbols) is a REQUIRED
-  Mac validation before Phase 3 merges — the macOS CoreML/BNNS clash
-  documented in this repo's Cargo.toml is exactly the risk.
-- `voicegarden-lexicons` vendors its own older `floravox-g2p`; only paths
-  cross that boundary (same note as `floravox_engine.rs`).
+Both Apple build scripts enable `cloud,sherpaonnx,sherpa-g2p`.
+Validate the macOS and iOS links and check the German speech path
+before merging Phase 3.
 
 ## Risks
 

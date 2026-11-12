@@ -67,6 +67,7 @@ fn model_present(id: &str) -> bool {
 //
 //   SHERPA_DE_MODEL_DIR=/path/to/vits-piper-de_DE-thorsten-medium \
 //   SHERPA_DE_BUNDLE_DIR=/path/to/voicegarden-lexicons/de \
+//   SHERPA_DE_MANIFEST=/path/to/voicegarden-lexicons/lexicons.json \
 //   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- --ignored german
 
 #[cfg(all(unix, feature = "sherpa-g2p"))]
@@ -112,7 +113,6 @@ fn vits_piper_german_g2p_synthesizes() {
     std::fs::create_dir_all(&parent).unwrap();
     std::os::unix::fs::symlink(&model_dir, parent.join("piper-de_DE-thorsten-medium")).unwrap();
 
-    std::env::set_var("VOICEGARDEN_LEXICON_DIR", cache.path());
     let engine = create_engine(
         "sherpaonnx",
         &format!(
@@ -121,7 +121,6 @@ fn vits_piper_german_g2p_synthesizes() {
         ),
     )
     .expect("sherpaonnx engine");
-    std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
 
     let sink = std::sync::Arc::new(std::sync::Mutex::new(AudioSink::new()));
     let sink_for_cb = sink.clone();
@@ -130,18 +129,24 @@ fn vits_piper_german_g2p_synthesizes() {
     };
     // dictionary words, digits, a nonce OOV word (must be SPOKEN via
     // the WFST, not dropped), a capitalized noun
-    engine
-        .speak(
-            "Guten Morgen! Ich habe 42 Häuser. Das Blorpinxel ist neu.",
-            None,
-            1.0,
-            1.0,
-            1.0,
-            Some(&mut cb),
-            None,
-            None,
-        )
-        .expect("speak");
+    let previous_cache = std::env::var_os("VOICEGARDEN_LEXICON_DIR");
+    std::env::set_var("VOICEGARDEN_LEXICON_DIR", cache.path());
+    let result = engine.speak(
+        "Guten Morgen! Ich habe 42 Häuser. Das Blorpinxel ist neu.",
+        None,
+        1.0,
+        1.0,
+        1.0,
+        Some(&mut cb),
+        None,
+        None,
+    );
+    if let Some(path) = previous_cache {
+        std::env::set_var("VOICEGARDEN_LEXICON_DIR", path);
+    } else {
+        std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
+    }
+    result.expect("speak");
 
     let sink = sink.lock().unwrap();
     assert!(sink.total_bytes > 0, "expected non-empty audio");

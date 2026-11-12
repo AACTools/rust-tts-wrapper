@@ -70,17 +70,9 @@ ssml-expand = ["dep:floravox-ssml"]
 # for build + model setup and the critical --duration finding.
 omnivoice-local = ["dep:hound", "ssml-expand"]
 sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization"]
-# #82 wrapper-side G2P front-end for non-English piper (the
-# phoneme_codepoints path): voicegarden bundle fetch + FST chain.
-# Independent of floravox-lexicons (no Floravox engine). CAUTION: the
-# published floravox-g2p 0.8.8 (newest on crates.io) pulls ort
-# UNCONDITIONALLY as a target dep — a second ONNX runtime ships beside
-# sherpa-onnx-sys's on Apple staticlib builds. The XCFramework build
-# must be validated on a Mac BEFORE merging Phase 3 (tracked in the PR
-# checklist); the misaki feature is 0.8.8's minimum compilable surface
-# (its lib.rs references misaki unconditionally) and is never invoked
-# by this path.
-sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p", "floravox-g2p/misaki"]
+# German Piper G2P uses the same FST crate version as VoiceGarden's
+# bundle loader. Its ONNX feature is disabled for Sherpa builds.
+sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p-fst"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
 # with measured word timings on duration-patched voices, a student-tier
@@ -169,6 +161,7 @@ floravox-core = { version = "=0.8.8", optional = true }
 # Exact pin: MisakiG2p implements a floravox-core trait — a drifted
 # patch pair breaks the build (same reasoning as sherpa-onnx-sys above).
 floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
+floravox-g2p-fst = { package = "floravox-g2p", version = "=0.6.1", optional = true, default-features = false }
 voicegarden-lexicons = { version = "0.3", optional = true }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=2.0.1", optional = true }
