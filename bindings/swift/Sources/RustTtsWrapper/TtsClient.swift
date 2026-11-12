@@ -258,13 +258,26 @@ public final class TtsClient: @unchecked Sendable {
 
     /// Synthesise to a byte buffer.
     public func synthToBytes(_ text: String) throws -> Data {
+        try synthesize(text, wav: false)
+    }
+
+    /// Synthesize playable WAV data without starting playback.
+    /// Supports cloud and Sherpa-ONNX engines and preserves the audio sample rate.
+    public func synthToWav(_ text: String) throws -> Data {
+        try synthesize(text, wav: true)
+    }
+
+    private func synthesize(_ text: String, wav: Bool) throws -> Data {
         guard let ctx else { throw TtsError("client closed") }
         var bufPtr: UnsafeMutablePointer<UInt8>?
         var length: UInt = 0
+        let synth = wav ? tts_synth_to_wav : tts_synth_to_bytes
         let rc = text.withCString { textPtr in
-            tts_synth_to_bytes(ctx, textPtr, &bufPtr, &length)
+            synth(ctx, textPtr, &bufPtr, &length)
         }
-        if rc != 0 { throw structuredError("synth_to_bytes failed") }
+        if rc != 0 {
+            throw structuredError(wav ? "synth_to_wav failed" : "synth_to_bytes failed")
+        }
         guard let buf = bufPtr, length > 0 else { return Data() }
         defer { tts_free_bytes(buf, length) }
         return Data(bytes: buf, count: Int(length))

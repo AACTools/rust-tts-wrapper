@@ -1612,6 +1612,34 @@ pub extern "C" fn tts_synth_to_bytes(
     out_bytes: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    synth_to_buffer(ctx, text, out_bytes, out_len, false)
+}
+
+/// Synthesize text to a playable WAV file without starting playback.
+/// Supported by cloud and Sherpa-ONNX engines. Writes a heap-allocated
+/// buffer to `*out_bytes` and its length to `*out_len`.
+/// Caller must free with [`tts_free_bytes`].
+/// Returns 0 on success, -1 on failure.
+///
+/// # Safety
+/// `ctx` must be valid. `out_bytes` and `out_len` must be non-null.
+#[no_mangle]
+pub extern "C" fn tts_synth_to_wav(
+    ctx: *mut tts_ctx,
+    text: *const c_char,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    synth_to_buffer(ctx, text, out_bytes, out_len, true)
+}
+
+fn synth_to_buffer(
+    ctx: *mut tts_ctx,
+    text: *const c_char,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+    wav: bool,
+) -> i32 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if ctx.is_null() || text.is_null() || out_bytes.is_null() || out_len.is_null() {
             return -1;
@@ -1639,7 +1667,12 @@ pub extern "C" fn tts_synth_to_bytes(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let engine = &ctx_ref.engine;
-        match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
+        let result = if wav {
+            engine.synth_to_wav(&text_str, voice.as_deref(), rate, pitch, volume)
+        } else {
+            engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume)
+        };
+        match result {
             Ok(data) => {
                 if data.is_empty() {
                     unsafe {
@@ -1673,10 +1706,10 @@ pub extern "C" fn tts_synth_to_bytes(
     .unwrap_or(-1)
 }
 
-/// Free a byte buffer returned by [`tts_synth_to_bytes`].
+/// Free a buffer returned by [`tts_synth_to_bytes`] or [`tts_synth_to_wav`].
 ///
 /// # Safety
-/// `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
+/// `bytes` must be from one of these functions with the matching `len`.
 #[no_mangle]
 pub extern "C" fn tts_free_bytes(bytes: *mut u8, len: usize) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

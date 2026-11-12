@@ -13,7 +13,7 @@ reference harness compiled with `-Wall -Wextra -Werror`.
 | Area | Symbols |
 |---|---|
 | Lifecycle | `tts_create`, `tts_destroy` |
-| Synthesis | `tts_speak`, `tts_speak_ssml`, `tts_speak_sync`, `tts_synth_to_bytes`, `tts_free_bytes` |
+| Synthesis | `tts_speak`, `tts_speak_ssml`, `tts_speak_sync`, `tts_synth_to_bytes`, `tts_synth_to_wav`, `tts_free_bytes` |
 | Control | `tts_stop`, `tts_pause`, `tts_resume` |
 | Settings | `tts_set_voice`, `tts_set_rate`, `tts_set_pitch`, `tts_set_volume` |
 | Events | `tts_set_on_audio`, `tts_set_on_boundary` (7-arg incl. `estimated`), `tts_set_on_mark`, `tts_set_on_viseme`, `tts_set_on_start`, `tts_set_on_end`, `tts_set_on_error` |
@@ -33,6 +33,10 @@ Conventions that hold across the ABI:
 - **Word boundaries:** `cb(word, byte_offset, byte_len, start_s, end_s,
   estimated, userdata)` — UTF-8 byte offsets into the submitted text
   (SAPI reports UTF-16 units; Azure passes its own units through).
+
+`tts_synth_to_wav` returns one PCM WAV buffer at the synthesized sample
+rate for cloud and Sherpa-ONNX engines. Free it with `tts_free_bytes`.
+`tts_synth_to_bytes` keeps its original engine-specific byte format.
 
 ## Error codes (GH #69)
 

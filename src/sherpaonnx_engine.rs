@@ -1,7 +1,9 @@
 //! Sherpa-ONNX offline TTS engine with model registry.
 
 use crate::boundaries::{EstimateFirer, EstimatePlan};
-use crate::engine::TtsEngine;
+use crate::engine::{
+    pcm16_mono_to_wav, OnAudioCallback, OnBoundaryCallback, OnMarkCallback, TtsEngine,
+};
 use crate::types::{
     Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
 };
@@ -337,19 +339,18 @@ fn load_models() -> HashMap<String, SherpaModelInfo> {
         .collect()
 }
 
-impl TtsEngine for SherpaOnnxEngine {
+impl SherpaOnnxEngine {
     #[allow(clippy::too_many_lines)]
-    fn speak(
+    fn synthesize(
         &self,
         text: &str,
         voice: Option<&str>,
         rate: f32,
         pitch: f32,
         volume: f32,
-        mut on_audio: Option<crate::engine::OnAudioCallback>,
-        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
-        _on_mark: Option<crate::engine::OnMarkCallback>,
-    ) -> TtsResult<()> {
+        mut on_audio: Option<OnAudioCallback>,
+        mut on_boundary: Option<OnBoundaryCallback>,
+    ) -> TtsResult<u32> {
         if self.loaded_model_id.is_empty() {
             return Err(TtsError(
                 "No SherpaOnnx modelId configured. Pass modelId in credentials JSON. \
@@ -752,7 +753,45 @@ impl TtsEngine for SherpaOnnxEngine {
             }
         }
 
+        Ok(u32::try_from(tts.sample_rate()).unwrap_or(0))
+    }
+}
+
+impl TtsEngine for SherpaOnnxEngine {
+    fn speak(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+        on_audio: Option<OnAudioCallback>,
+        on_boundary: Option<OnBoundaryCallback>,
+        _on_mark: Option<OnMarkCallback>,
+    ) -> TtsResult<()> {
+        self.synthesize(text, voice, rate, pitch, volume, on_audio, on_boundary)?;
         Ok(())
+    }
+
+    fn synth_to_wav(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+    ) -> TtsResult<Vec<u8>> {
+        let mut pcm = Vec::new();
+        let sample_rate = self.synthesize(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            Some(&mut |chunk| pcm.extend_from_slice(chunk)),
+            None,
+        )?;
+        pcm16_mono_to_wav(&pcm, Some(sample_rate))
     }
 
     fn speak_sync(

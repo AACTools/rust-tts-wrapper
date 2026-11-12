@@ -11,13 +11,13 @@ use super::*;
 #[cfg(feature = "cloud")]
 pub(crate) const STREAMING_CHUNK_SIZE: usize = 8192;
 
-/// Decode an MP3 byte buffer to little-endian mono PCM16. Multi-channel input
+/// Decode audio to little-endian mono PCM16 and report the decoded sample rate. Multi-channel input
 /// is downmixed by averaging interleaved samples. Returns an empty vec if no
 /// frames decode. Used so cloud engines deliver uniform PCM16 through
 /// `on_audio` (matching the local SherpaOnnx / SAPI engines) instead of raw
 /// MP3 bytes that a SAPI site would have to decode itself.
 #[cfg(feature = "cloud")]
-pub(crate) fn decode_audio_to_pcm16_mono(bytes: &[u8], ext_hint: &str) -> Vec<u8> {
+pub(crate) fn decode_audio_to_pcm16_mono(bytes: &[u8], ext_hint: &str) -> (Vec<u8>, Option<u32>) {
     use symphonia::core::codecs::DecoderOptions;
     use symphonia::core::formats::FormatOptions;
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
@@ -39,30 +39,34 @@ pub(crate) fn decode_audio_to_pcm16_mono(bytes: &[u8], ext_hint: &str) -> Vec<u8
         &MetadataOptions::default(),
     ) {
         Ok(p) => p.format,
-        Err(_) => return Vec::new(),
+        Err(_) => return (Vec::new(), None),
     };
     let track = format.default_track().cloned();
     let Some(track) = track else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     let Ok(mut decoder) =
         symphonia::default::get_codecs().make(&track.codec_params, &DecoderOptions::default())
     else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
 
     let mut pcm: Vec<u8> = Vec::new();
+    let mut sample_rate = None;
     while let Ok(packet) = format.next_packet() {
         let Ok(decoded_buf) = decoder.decode(&packet) else {
             continue;
         };
+        if decoded_buf.frames() > 0 {
+            sample_rate.get_or_insert(decoded_buf.spec().rate);
+        }
         mix_packet_to_mono_pcm16(&decoded_buf, &mut pcm);
     }
-    pcm
+    (pcm, sample_rate)
 }
 
 /// MP3 → PCM16 mono via the generic decoder.
-pub(crate) fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> Vec<u8> {
+pub(crate) fn decode_mp3_to_pcm16_mono(mp3: &[u8]) -> (Vec<u8>, Option<u32>) {
     decode_audio_to_pcm16_mono(mp3, "mp3")
 }
 
@@ -421,7 +425,7 @@ impl symphonia::core::io::MediaSource for SharedPipeReader {
 /// * `is_pcm` — the body is already raw PCM16 mono; chunk it straight
 ///   through without spawning a decode thread.
 ///
-/// Returns the total bytes delivered. Empty delivery (probe failure on a
+/// Returns the total bytes delivered and their sample rate. Empty delivery (probe failure on a
 /// zero-byte or undecodable body) is not an error, matching the buffered
 /// path's behaviour.
 ///
@@ -446,7 +450,7 @@ pub(crate) fn stream_body_to_on_audio(
     pcm_rate: u32,
     plan: Option<EstimatePlan>,
     on_event: &mut dyn FnMut(StreamEvt<'_>),
-) -> Result<usize, String> {
+) -> Result<(usize, Option<u32>), String> {
     let mut firer = plan.map(|p| EstimateFirer::new(p, 1.0));
 
     if is_pcm {
@@ -485,7 +489,7 @@ pub(crate) fn stream_body_to_on_audio(
                 ));
             });
         }
-        return Ok(total);
+        return Ok((total, Some(pcm_rate)));
     }
 
     let pipe = Arc::new(SharedPipe::new());
@@ -552,7 +556,7 @@ pub(crate) fn stream_body_to_on_audio(
                         ));
                     });
                 }
-                return Ok(total);
+                return Ok((total, dec.sample_rate()));
             }
         }
     }
@@ -568,7 +572,7 @@ pub(crate) fn stream_body_to_on_audio(
             ));
         });
     }
-    Ok(total)
+    Ok((total, dec.sample_rate()))
 }
 
 /// Sniff the first few bytes for an MP3 sync word or ID3 tag. Kept as a

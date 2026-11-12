@@ -2,6 +2,7 @@
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
+use crate::engine::{pcm16_mono_to_wav, OnAudioCallback, OnBoundaryCallback, OnMarkCallback};
 
 pub(crate) type VisemeFn = Box<dyn FnMut(i32, f32)>;
 
@@ -175,19 +176,18 @@ impl CloudEngine {
     }
 }
 
-impl TtsEngine for CloudEngine {
+impl CloudEngine {
     #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
-    fn speak(
+    fn synthesize(
         &self,
         text: &str,
         voice: Option<&str>,
         rate: f32,
         pitch: f32,
         volume: f32,
-        mut on_audio: Option<crate::engine::OnAudioCallback>,
-        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
-        _on_mark: Option<crate::engine::OnMarkCallback>,
-    ) -> TtsResult<()> {
+        mut on_audio: Option<OnAudioCallback>,
+        mut on_boundary: Option<OnBoundaryCallback>,
+    ) -> TtsResult<Option<u32>> {
         // SpeechMarkdown platform selector: ElevenLabs needs the dialect
         // that matches the requested model (v3 audio tags vs pre-v3
         // <break> markup) — the other dialect gets read aloud or ignored.
@@ -319,7 +319,7 @@ impl TtsEngine for CloudEngine {
                 if bytes == 0 {
                     return Err(TtsError("qwen synthesis returned no audio".into()));
                 }
-                return Ok(());
+                return Ok(Some(QWEN_PCM_SAMPLE_RATE));
             }
             let ws_url_str = if self.config.provider_id == "edge" {
                 format!(
@@ -491,12 +491,14 @@ impl TtsEngine for CloudEngine {
             // straight through with no decode step.
             let mut edge_pipe: Option<Arc<SharedPipe>> = None;
             let mut edge_handle: Option<std::thread::JoinHandle<()>> = None;
-            let mut edge_rx: Option<std::sync::mpsc::Receiver<Vec<u8>>> = None;
-            let deliver_edge_audio =
-                |rx: &std::sync::mpsc::Receiver<Vec<u8>>,
-                 cb: &mut crate::engine::OnAudioCallback| {
-                    while let Ok(chunk) = rx.try_recv() {
+            let mut edge_rx = None;
+            let mut decoded_rate = None;
+            let mut deliver_edge_audio =
+                |rx: &std::sync::mpsc::Receiver<(Vec<u8>, Option<u32>)>,
+                 cb: &mut OnAudioCallback| {
+                    while let Ok((chunk, rate)) = rx.try_recv() {
                         if !chunk.is_empty() {
+                            decoded_rate = rate;
                             cb(&chunk);
                         }
                     }
@@ -640,7 +642,7 @@ impl TtsEngine for CloudEngine {
                                 // whatever PCM has come back so far.
                                 if edge_pipe.is_none() {
                                     let pipe = Arc::new(SharedPipe::new());
-                                    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                                    let (tx, rx) = std::sync::mpsc::channel();
                                     let dec_pipe = Arc::clone(&pipe);
                                     edge_handle = Some(
                                         std::thread::Builder::new()
@@ -650,7 +652,10 @@ impl TtsEngine for CloudEngine {
                                                 loop {
                                                     match dec.next_chunk() {
                                                         Ok(Some(chunk)) => {
-                                                            if tx.send(chunk).is_err() {
+                                                            if tx
+                                                                .send((chunk, dec.sample_rate()))
+                                                                .is_err()
+                                                            {
                                                                 break;
                                                             }
                                                         }
@@ -707,7 +712,7 @@ impl TtsEngine for CloudEngine {
                     self.config.provider_id
                 )));
             }
-            return Ok(());
+            return Ok(decoded_rate);
         }
 
         // ElevenLabs word timing comes from the /with-timestamps endpoint
@@ -896,6 +901,7 @@ impl TtsEngine for CloudEngine {
         // reject, empty synthesis, …) — reported as an error rather than a
         // silent success.
         let mut audio_total = 0usize;
+        let mut decoded_rate = None;
 
         // The with-timestamps response is one JSON document (base64 audio
         // + character alignment). When the variant was rejected above, the
@@ -913,7 +919,8 @@ impl TtsEngine for CloudEngine {
                 let mp3_bytes = base64::engine::general_purpose::STANDARD
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
-                let pcm = decode_mp3_to_pcm16_mono(&mp3_bytes);
+                let (pcm, sample_rate) = decode_mp3_to_pcm16_mono(&mp3_bytes);
+                decoded_rate = sample_rate;
                 audio_total += pcm.len();
                 if let Some(cb) = on_audio.as_mut() {
                     for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
@@ -947,8 +954,8 @@ impl TtsEngine for CloudEngine {
 
             match parse_gemini_interaction_audio(&json) {
                 GeminiAudioBlock::Present(wav) => {
-                    let sample_rate = wav_sample_rate(&wav);
-                    let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
+                    let (pcm, sample_rate) = decode_audio_to_pcm16_mono(&wav, "wav");
+                    decoded_rate = sample_rate;
                     if pcm.is_empty() {
                         // An audio block was present but symphonia could
                         // not probe/decode it — an error, not a silent
@@ -965,7 +972,12 @@ impl TtsEngine for CloudEngine {
                         }
                     }
                     if let Some(cb) = on_boundary.as_mut() {
-                        fire_scaled_estimates(cb, boundary_search_text, &pcm, sample_rate);
+                        fire_scaled_estimates(
+                            cb,
+                            boundary_search_text,
+                            &pcm,
+                            sample_rate.unwrap_or_else(|| wav_sample_rate(&wav)),
+                        );
                     }
                 }
                 GeminiAudioBlock::Corrupt => {
@@ -1003,7 +1015,8 @@ impl TtsEngine for CloudEngine {
                 let mp3_bytes = base64::engine::general_purpose::STANDARD
                     .decode(b64)
                     .map_err(|e| TtsError(format!("Base64 decode: {e}")))?;
-                let pcm = decode_mp3_to_pcm16_mono(&mp3_bytes);
+                let (pcm, sample_rate) = decode_mp3_to_pcm16_mono(&mp3_bytes);
+                decoded_rate = sample_rate;
                 audio_total += pcm.len();
                 if let Some(cb) = on_audio.as_mut() {
                     for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
@@ -1084,7 +1097,7 @@ impl TtsEngine for CloudEngine {
                     }
                 }
             };
-            stream_body_to_on_audio(
+            (_, decoded_rate) = stream_body_to_on_audio(
                 resp,
                 self.config.response_is_pcm,
                 // Raw-PCM providers here (Azure, Cartesia) are pinned to
@@ -1106,7 +1119,45 @@ impl TtsEngine for CloudEngine {
                 self.config.provider_id
             )));
         }
+        Ok(decoded_rate)
+    }
+}
+
+impl TtsEngine for CloudEngine {
+    fn speak(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+        on_audio: Option<OnAudioCallback>,
+        on_boundary: Option<OnBoundaryCallback>,
+        _on_mark: Option<OnMarkCallback>,
+    ) -> TtsResult<()> {
+        self.synthesize(text, voice, rate, pitch, volume, on_audio, on_boundary)?;
         Ok(())
+    }
+
+    fn synth_to_wav(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+    ) -> TtsResult<Vec<u8>> {
+        let mut pcm = Vec::new();
+        let sample_rate = self.synthesize(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            Some(&mut |chunk| pcm.extend_from_slice(chunk)),
+            None,
+        )?;
+        pcm16_mono_to_wav(&pcm, sample_rate)
     }
 
     fn speak_sync(

@@ -46,5 +46,6 @@ include = [
   "tts_get_engine_setups_json",
   "tts_check_credentials",
   "tts_synth_to_bytes",
+  "tts_synth_to_wav",
   "tts_free_bytes",
 ]

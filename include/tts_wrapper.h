@@ -460,10 +460,25 @@ int32_t tts_synth_to_bytes(struct tts_ctx *ctx,
                            uintptr_t *out_len);
 
 /**
- * Free a byte buffer returned by [`tts_synth_to_bytes`].
+ * Synthesize text to a playable WAV file without starting playback.
+ * Supported by cloud and Sherpa-ONNX engines. Writes a heap-allocated
+ * buffer to `*out_bytes` and its length to `*out_len`.
+ * Caller must free with [`tts_free_bytes`].
+ * Returns 0 on success, -1 on failure.
  *
  * # Safety
- * `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
+ * `ctx` must be valid. `out_bytes` and `out_len` must be non-null.
+ */
+int32_t tts_synth_to_wav(struct tts_ctx *ctx,
+                         const char *text,
+                         uint8_t **out_bytes,
+                         uintptr_t *out_len);
+
+/**
+ * Free a buffer returned by [`tts_synth_to_bytes`] or [`tts_synth_to_wav`].
+ *
+ * # Safety
+ * `bytes` must be from one of these functions with the matching `len`.
  */
 void tts_free_bytes(uint8_t *bytes, uintptr_t len);
 

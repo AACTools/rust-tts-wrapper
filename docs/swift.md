@@ -49,6 +49,23 @@ Credentials are `[String: String]` dictionaries serialised to the JSON
 the Rust factory parses (canonical keys — see the
 [engines doc](engines.md)).
 
+## Playing audio in an Apple app
+
+For cloud and Sherpa-ONNX voices, use `synthToWav` to get a complete
+PCM WAV file at the synthesized sample rate. Run the blocking synthesis
+call off the main actor. Keep the player alive while audio plays.
+
+```swift
+import AVFoundation
+
+let data = try await Task.detached { try client.synthToWav("Hello world") }.value
+let player = try AVAudioPlayer(data: data)
+player.play()
+```
+
+`synthToBytes` keeps the engine's original byte format. Cloud and Sherpa-ONNX
+deliver raw PCM through that method.
+
 ## Raw SSML, errors, credentials and the setup schema (GH #68/#69/#73)
 
 ```swift
