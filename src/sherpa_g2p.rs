@@ -185,13 +185,35 @@ impl G2pFrontend {
                 // so the pause token survives — testing the raw token
                 // made sentence-final numbers speak English letter
                 // names via the rule fallback)
+                // digit expansion tests the WORD CORE (punctuation
+                // stays attached: "42." expands to "zweiundvierzig."
+                // so the pause token survives). Covers decimals
+                // ("1,5"), strict thousands ("3.500") and
+                // 0..=999_999_999; anything else the normalizer
+                // rejects DROPS with a count — never the English rule
+                // fallback (the loop reviews caught both, live)
                 let expanded: String;
-                let token = match floravox_g2p::word_core(token)
-                    .filter(|core| !core.is_empty() && core.chars().all(|c| c.is_ascii_digit()))
-                {
-                    Some(core) => {
-                        expanded = reattach_punct(token, &digits_to_german(core));
+                let token = match floravox_g2p::word_core(token).and_then(|core| {
+                    if core.chars().any(|c| c.is_ascii_digit())
+                        && core
+                            .chars()
+                            .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
+                    {
+                        digits_to_german(core)
+                    } else {
+                        None
+                    }
+                }) {
+                    Some(german) => {
+                        expanded = reattach_punct(token, &german);
                         expanded.as_str()
+                    }
+                    None if looks_numeric(token) => {
+                        // numeric but unhandled (e.g. >999_999_999,
+                        // malformed separators): drop, counted
+                        dropped += 1;
+                        words += 1;
+                        continue;
                     }
                     None => token,
                 };
@@ -243,6 +265,10 @@ impl G2pFrontend {
 /// Rebuild a token around an expanded core: the non-alphanumeric edges
 /// of the original (the punctuation `word_core` stripped) are reattached
 /// so `punct_phonemes` still sees them ("42." → "zweiundvierzig.").
+/// NOTE: a leading sign lands after the number ("-42" → "zweiundvierzig-")
+/// — floravox appends pause symbols after the core, inverting the
+/// intended break; accepted for now (negative numbers in TTS input are
+/// rare), revisit if the Phase 4 corpus shows otherwise.
 fn reattach_punct(original: &str, expanded_core: &str) -> String {
     let chars: Vec<char> = original.chars().collect();
     let first = chars.iter().position(|c| c.is_alphanumeric());
@@ -258,45 +284,119 @@ fn reattach_punct(original: &str, expanded_core: &str) -> String {
     out
 }
 
+/// Does this token look numeric enough that the normalizer SHOULD have
+/// handled it? (digits with , . separators and edge punctuation) — used
+/// to drop unhandled numerics with a count instead of spelling them.
+fn looks_numeric(token: &str) -> bool {
+    let core: Vec<char> = token.chars().skip_while(|c| !c.is_ascii_digit()).collect();
+    let trimmed: String = core
+        .into_iter()
+        .take_while(|c| c.is_ascii_digit() || matches!(c, ',' | '.'))
+        .collect();
+    !trimmed.is_empty()
+        && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
+        && trimmed.chars().filter(char::is_ascii_digit).count() >= 2
+}
+
 /// Split text into sentences on the #4075 delimiter set (`. ! ? ; :`
-/// plus newlines). Delimiters stay attached to their sentence (they
-/// phonemize to pause symbols); whitespace-only chunks (the newline
-/// after a `?`) are skipped. Abbreviation/decimal splitting is out
-/// of scope and documented in the plan.
+/// plus newlines), with two refinements: a `.` BETWEEN digits is a
+/// decimal/thousands separator, not a sentence end ("1.5", "3.500"),
+/// and chunks with no alphanumeric character ("...", the newline
+/// after a `?`) are skipped — with `max_num_sentences=1` each would
+/// otherwise trigger a separate generate call for a lone pause token.
 fn split_sentences(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut cur = String::new();
-    for ch in text.chars() {
+    let mut prev: Option<char> = None;
+    let mut it = text.chars().peekable();
+    while let Some(ch) = it.next() {
+        let next = it.peek().copied();
+        let between_digits =
+            prev.is_some_and(|p| p.is_ascii_digit()) && next.is_some_and(|n| n.is_ascii_digit());
+        let is_delim = match ch {
+            '.' if between_digits => false,
+            '.' | '!' | '?' | ';' | ':' | '\n' | '\r' => true,
+            _ => false,
+        };
         cur.push(ch);
-        if matches!(ch, '.' | '!' | '?' | ';' | ':' | '\n' | '\r') {
-            if cur.trim().is_empty() {
-                cur.clear();
-            } else {
+        if is_delim {
+            if cur.chars().any(char::is_alphanumeric) {
                 out.push(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
             }
         }
+        prev = Some(ch);
     }
-    if !cur.trim().is_empty() {
+    if cur.chars().any(char::is_alphanumeric) {
         out.push(cur);
     }
     out
 }
 
-/// Minimal German digit normalizer: tokens that are all digits become
-/// German words ("42" → "zweiundvierzig"). Scaled to 0..=999_999 —
-/// beyond that the token is returned unchanged (it will drop at the
-/// dictionary with a count, rather than mispronounce).
-fn digits_to_german(digits: &str) -> String {
-    let Ok(n) = digits.parse::<u64>() else {
-        return digits.to_string();
-    };
-    if n > 999_999 {
-        return digits.to_string();
+/// Minimal German digit normalizer. Handles:
+/// - plain integers 0..=999_999_999 ("42" → "zweiundvierzig",
+///   "1000000" → "einemillion", "2000000" → "zweimillionen")
+/// - thousands-separated integers ("3.500" → "dreitausendfünfhundert")
+/// - decimals ("1,5" → "einskommafünf" — German reads the digits after
+///   the comma individually: "1,58" → "einskommafünfacht")
+///
+/// `None` when the token is not covered (beyond 999_999_999, malformed
+/// separators) — the caller DROPS the word with a count rather than
+/// letting the rule fallback spell English letter names into a German
+/// stream (the loop-2 review caught exactly that, live).
+fn digits_to_german(token: &str) -> Option<String> {
+    // decimal form: integer part, comma, digits ("1,5" / "1,58")
+    if let Some((int_part, frac)) = token.split_once(',') {
+        let valid = !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit());
+        if !valid {
+            return None;
+        }
+        let mut out = integer_to_german(int_part)?;
+        out.push_str("komma");
+        for c in frac.chars() {
+            out.push_str(&integer_to_german(&c.to_string())?);
+        }
+        return Some(out);
     }
-    let unit_words = [
+    // integer form: digits with optional thousands dots in strict
+    // groups of three ("3.500", "1.000.000"); a stray dot ("1.5",
+    // "3.50.00") is rejected rather than guessed
+    if token.is_empty() {
+        return None;
+    }
+    let groups: Vec<&str> = token.split('.').collect();
+    let all_digits = groups
+        .iter()
+        .all(|g| !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()));
+    if !all_digits {
+        return None;
+    }
+    let strict_thousands = groups.len() == 1
+        || groups.iter().enumerate().all(|(i, g)| {
+            if i == 0 {
+                (1..=3).contains(&g.len())
+            } else {
+                g.len() == 3
+            }
+        });
+    if !strict_thousands {
+        return None; // malformed separators: drop rather than guess
+    }
+    let plain: String = token.chars().filter(|c| *c != '.').collect();
+    integer_to_german(&plain)
+}
+
+/// 0..=999_999_999 in German words (thousands dots stripped by the
+/// caller). `None` beyond range or for non-digit input.
+fn integer_to_german(digits: &str) -> Option<String> {
+    const UNITS: [&str; 10] = [
         "null", "eins", "zwei", "drei", "vier", "fünf", "sechs", "sieben", "acht", "neun",
     ];
-    let teen_words = [
+    const TEENS: [&str; 10] = [
         "zehn",
         "elf",
         "zwölf",
@@ -308,77 +408,86 @@ fn digits_to_german(digits: &str) -> String {
         "achtzehn",
         "neunzehn",
     ];
-    let tens_words = [
+    const TENS: [&str; 10] = [
         "", "", "zwanzig", "dreißig", "vierzig", "fünfzig", "sechzig", "siebzig", "achtzig",
         "neunzig",
     ];
+    /// 1..=999: "eins" standalone, "ein" in compounds ("ein"hundert,
+    /// hunder"ein", "ein"undzwanzig)
+    fn under_hundred(n: u64) -> String {
+        let hundreds = n / 100;
+        let rest = n % 100;
+        let mut out = String::new();
+        if hundreds > 0 {
+            out.push_str(if hundreds == 1 {
+                "ein"
+            } else {
+                UNITS[hundreds as usize]
+            });
+            out.push_str("hundert");
+        }
+        match rest {
+            0 => {}
+            1..=9 => out.push_str(UNITS[rest as usize]),
+            10..=19 => out.push_str(TEENS[(rest - 10) as usize]),
+            _ => {
+                let tens_idx = (rest / 10) as usize;
+                let units_idx = (rest % 10) as usize;
+                if units_idx == 0 {
+                    out.push_str(TENS[tens_idx]);
+                } else {
+                    out.push_str(if units_idx == 1 {
+                        "ein"
+                    } else {
+                        UNITS[units_idx]
+                    });
+                    out.push_str("und");
+                    out.push_str(TENS[tens_idx]);
+                }
+            }
+        }
+        out
+    }
+
+    let n = digits.parse::<u64>().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
     if n < 10 {
-        return unit_words[n as usize].to_string();
+        return Some(UNITS[n as usize].to_string());
     }
     if (10..20).contains(&n) {
-        return teen_words[(n - 10) as usize].to_string();
+        return Some(TEENS[(n - 10) as usize].to_string());
     }
     let mut parts: Vec<String> = Vec::new();
-    let thousands = n / 1000;
-    let rest = n % 1000;
-    if thousands > 0 {
-        // 1000 = "eintausend", 2000 = "zweitausend"
-        parts.push(format!(
-            "{}tausend",
-            if thousands == 1 {
-                "ein".to_string()
-            } else {
-                under_hundred(thousands, &unit_words, &teen_words, &tens_words)
-            }
-        ));
+    let millions = n / 1_000_000;
+    let rest = n % 1_000_000;
+    if millions > 0 {
+        // "einemillion" / "zweimillionen" (compound form of eine/zwei)
+        parts.push(if millions == 1 {
+            "einemillion".to_string()
+        } else {
+            format!("{}millionen", under_hundred(millions))
+        });
     }
     if rest > 0 {
-        parts.push(under_hundred(rest, &unit_words, &teen_words, &tens_words));
-    }
-    parts.join("")
-}
-
-/// 1..=999 in German words. 1 = "eins" standalone, "ein" in
-/// compounds ("ein"hundert, hunder"ein").
-fn under_hundred(
-    n: u64,
-    unit_words: &[&str; 10],
-    teen_words: &[&str; 10],
-    tens_words: &[&str; 10],
-) -> String {
-    let hundreds = n / 100;
-    let rest = n % 100;
-    let mut out = String::new();
-    if hundreds > 0 {
-        out.push_str(if hundreds == 1 {
-            "ein"
-        } else {
-            unit_words[hundreds as usize]
-        });
-        out.push_str("hundert");
-    }
-    match rest {
-        0 => {}
-        1..=9 if hundreds > 0 => {
-            // 101 = "einhunderteins"; keep "eins"
-            out.push_str(unit_words[rest as usize]);
+        let thousands = rest / 1000;
+        let tail = rest % 1000;
+        if thousands > 0 {
+            parts.push(format!(
+                "{}tausend",
+                if thousands == 1 {
+                    "ein".to_string()
+                } else {
+                    under_hundred(thousands)
+                }
+            ));
         }
-        1..=9 => out.push_str(unit_words[rest as usize]),
-        10..=19 => out.push_str(teen_words[(rest - 10) as usize]),
-        _ => {
-            let t = (rest / 10) as usize;
-            let u = (rest % 10) as usize;
-            if u == 0 {
-                out.push_str(tens_words[t]);
-            } else {
-                // 21 = "einundzwanzig" — "ein", not "eins"
-                out.push_str(if u == 1 { "ein" } else { unit_words[u] });
-                out.push_str("und");
-                out.push_str(tens_words[t]);
-            }
+        if tail > 0 {
+            parts.push(under_hundred(tail));
         }
     }
-    out
+    Some(parts.join(""))
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -454,6 +563,7 @@ mod tests {
                 ("guten".into(), "ɡ uː t ə n".into()),
                 ("tag".into(), "t aː k".into()),
                 ("zweiundvierzig".into(), "ts v aɪ̯ ç ɪ ç".into()),
+                ("einskommafünf".into(), "aɪ n s k o m a f ʏ n f".into()),
             ])
             .expect("write mini lexicon");
     }
@@ -477,23 +587,65 @@ mod tests {
 
     #[test]
     fn digits_expand_to_german_words() {
-        assert_eq!(digits_to_german("0"), "null");
-        assert_eq!(digits_to_german("3"), "drei");
-        assert_eq!(digits_to_german("16"), "sechzehn");
-        assert_eq!(digits_to_german("17"), "siebzehn"); // irregular
-        assert_eq!(digits_to_german("20"), "zwanzig");
-        assert_eq!(digits_to_german("21"), "einundzwanzig"); // ein, not eins
-        assert_eq!(digits_to_german("42"), "zweiundvierzig");
-        assert_eq!(digits_to_german("100"), "einhundert");
-        assert_eq!(digits_to_german("101"), "einhunderteins");
-        assert_eq!(digits_to_german("121"), "einhunderteinundzwanzig");
-        assert_eq!(digits_to_german("1000"), "eintausend");
+        let d = |t: &str| digits_to_german(t).expect("in range");
+        assert_eq!(d("0"), "null");
+        assert_eq!(d("3"), "drei");
+        assert_eq!(d("16"), "sechzehn");
+        assert_eq!(d("17"), "siebzehn"); // irregular
+        assert_eq!(d("20"), "zwanzig");
+        assert_eq!(d("21"), "einundzwanzig"); // ein, not eins
+        assert_eq!(d("42"), "zweiundvierzig");
+        assert_eq!(d("100"), "einhundert");
+        assert_eq!(d("101"), "einhunderteins");
+        assert_eq!(d("121"), "einhunderteinundzwanzig");
+        assert_eq!(d("1000"), "eintausend");
+        assert_eq!(d("1234"), "eintausendzweihundertvierunddreißig");
+        // the loop-2 findings, closed:
+        assert_eq!(d("1000000"), "einemillion"); // was English "one zero zero..."
+        assert_eq!(d("2000000"), "zweimillionen");
         assert_eq!(
-            digits_to_german("1234"),
-            "eintausendzweihundertvierunddreißig"
+            d("1234567"),
+            "einemillionzweihundertvierunddreißigtausendfünfhundertsiebenundsechzig"
         );
-        // out of scope: unchanged, drops at the dictionary with a count
-        assert_eq!(digits_to_german("1000000"), "1000000");
+        assert_eq!(d("1,5"), "einskommafünf"); // was English "one five"
+        assert_eq!(d("1,58"), "einskommafünfacht"); // post-comma digits, German style
+        assert_eq!(d("3.500"), "dreitausendfünfhundert"); // strict thousands dots
+                                                          // out of scope → None → the caller drops with a count
+        assert!(digits_to_german("1000000000").is_none()); // 1e9
+        assert!(digits_to_german("1.5").is_none()); // ambiguous separator
+        assert!(digits_to_german("3.50.00").is_none()); // malformed groups
+        assert!(digits_to_german("x1").is_none());
+    }
+
+    #[test]
+    fn numeric_sentences_survive_splitting_and_expansion() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        mini_bundle(&dir);
+        let tokens = mini_tokens(&dir);
+        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+
+        // '.' between digits does not end a sentence; decimals speak German
+        let r = fe.phonemize("Haus 1,5 Tag");
+        assert_eq!(r.sentences.len(), 1);
+        assert_eq!(r.dropped, 0);
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        // the STREAM carries the dictionary phones for "einskommafünf"
+        assert!(
+            sentence.contains("a\u{026a}nskomaf\u{028f}nf"),
+            "decimal in German: {sentence}"
+        );
+
+        // unhandled numerics drop WITH a count, never English spelling
+        let r = fe.phonemize("Haus 1000000000 Tag");
+        assert_eq!(r.dropped, 1);
+        assert_eq!(r.sentences.len(), 1);
+
+        // pause-only sentences are skipped entirely
+        assert_eq!(split_sentences("Haus...").len(), 1);
+        assert_eq!(split_sentences("Haus... Tag").len(), 2);
     }
 
     #[test]
