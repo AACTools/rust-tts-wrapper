@@ -181,57 +181,75 @@ impl G2pFrontend {
             let mut codepoints: Vec<i32> = Vec::new();
             for token in sentence.split_whitespace() {
                 // Numeric tokens (#82 loop reviews, live-verified): a
-                // token whose word CORE STARTS with a digit must expand
-                // to German or DROP — never reach the fallback chain,
+                // token whose word core CONTAINS a digit must expand to
+                // German or DROP — never reach the fallback chain,
                 // which spells alphanumeric junk in ENGLISH ("1e9" →
-                // "wʌniːnaɪn"). Covered: plain/strict-thousands/
-                // decimal numerals (digits_to_german) and
-                // digits+alphabetic-suffix forms ("1920er" → the
-                // German number + "er", a normal word for the
-                // dictionary/WFST). Letter-leading mixes ("b2b") stay
-                // ordinary words. Leading zeros collapse ("007" →
+                // "wʌniːnaɪn", "MP3" → "ɛmpiːθriː"; the German WFST
+                // cannot process digit characters at all). Covered, in
+                // order: plain/strict-thousands/decimal numerals
+                // (digits_to_german), digits+alphabetic-suffix forms
+                // ("1920er" → the German number + "er", one word for
+                // the dictionary/WFST), and mixed alphanumerics split
+                // into alphabetic runs (words) + digit runs (expanded):
+                // "COVID-19" → "covid neunzehn", "A4" → "a vier",
+                // "b2b" → "b zwei b". Leading zeros collapse ("007" →
                 // "sieben") — accepted for quantities, noted for codes.
                 let expanded: String;
-                let token = {
+                let parts: Vec<&str> = {
                     let core = floravox_g2p::word_core(token).unwrap_or_default();
-                    if core.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-                        let Some(german) =
-                            digits_to_german(core).or_else(|| digits_plus_suffix(core))
+                    if core.chars().any(|c| c.is_ascii_digit()) {
+                        let Some(german) = digits_to_german(core)
+                            .or_else(|| digits_plus_suffix(core))
+                            .or_else(|| split_digit_runs(core))
                         else {
-                            // unhandled numeric ("1e9", ">999_999_999",
+                            // unhandled numeric (">999_999_999",
                             // malformed separators): drop, counted
                             dropped += 1;
                             words += 1;
                             continue;
                         };
                         expanded = reattach_punct(token, &german);
-                        expanded.as_str()
+                        expanded.split_whitespace().collect()
                     } else {
-                        token
+                        vec![token]
                     }
                 };
                 words += 1;
-                // NFC first (decomposed input composes to the key form),
-                // then phonemize (dictionary keys are lowercase; the
-                // FST lexicon lowercases its lookup)
-                let nfc: String = token.nfc().collect();
-                let phones = self.chain.phonemize_token(&nfc);
-                let mut mapped: Vec<char> = Vec::with_capacity(phones.len());
+                let mut mapped: Vec<char> = Vec::new();
                 let mut ok = true;
-                for sym in &phones {
-                    let Some(parts) = self.mapper.map_symbol(sym) else {
-                        ok = false;
-                        break;
-                    };
-                    for p in parts {
-                        // single codepoints only — the whole stream is
-                        // address-by-codepoint
-                        let mut chars = p.chars();
-                        if let (Some(c), None) = (chars.next(), chars.next()) {
-                            mapped.push(c);
-                        } else {
+                for (i, part) in parts.iter().enumerate() {
+                    // runs within one original token are separate
+                    // words: a space token between them, same as
+                    // between original tokens
+                    if i > 0 && !mapped.is_empty() {
+                        mapped.push(' ');
+                    }
+                    // NFC first (decomposed input composes to the key
+                    // form; dictionary keys are lowercase, the FST
+                    // lexicon lowercases its lookup)
+                    let nfc: String = part.nfc().collect();
+                    let phones = self.chain.phonemize_token(&nfc);
+                    for sym in &phones {
+                        let Some(tokens) = self.mapper.map_symbol(sym) else {
                             ok = false;
+                            break;
+                        };
+                        for p in tokens {
+                            // single codepoints only — the whole stream
+                            // is address-by-codepoint
+                            let mut chars = p.chars();
+                            if let (Some(c), None) = (chars.next(), chars.next()) {
+                                mapped.push(c);
+                            } else {
+                                ok = false;
+                            }
                         }
+                        if !ok {
+                            break;
+                        }
+                    }
+                    if !ok {
+                        break;
                     }
                 }
                 if !ok || mapped.is_empty() {
@@ -394,6 +412,48 @@ fn digits_plus_suffix(core: &str) -> Option<String> {
         digits_to_german(num)?,
         suffix.to_lowercase()
     ))
+}
+
+/// Mixed alphanumerics ("COVID-19", "A4", "b2b", "MP3") split into
+/// runs: alphabetic runs become words (dictionary/WFST — German
+/// phones), digit runs expand to German words. Returns the
+/// space-joined replacement, or `None` when a digit run is not a
+/// covered numeral (then the caller drops the token).
+///
+/// The German WFST cannot process digit characters (not in its input
+/// alphabet) — without this split such tokens fall through to the
+/// English letter-name speller (live-verified: "MP3" → "ɛmpiːθriː").
+fn split_digit_runs(core: &str) -> Option<String> {
+    let mut runs: Vec<String> = Vec::new();
+    let mut run = String::new();
+    let mut run_is_digits = false;
+    for ch in core.chars() {
+        let is_digit = ch.is_ascii_digit();
+        if !is_digit && !ch.is_ascii_alphabetic() {
+            // inner separators (the hyphen in "COVID-19") end the run
+            if !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+            continue;
+        }
+        if !run.is_empty() && is_digit != run_is_digits {
+            runs.push(std::mem::take(&mut run));
+        }
+        run_is_digits = is_digit;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    let mut joined: Vec<String> = Vec::with_capacity(runs.len());
+    for part in runs {
+        if part.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            joined.push(digits_to_german(&part)?);
+        } else {
+            joined.push(part.to_lowercase());
+        }
+    }
+    (!joined.is_empty()).then(|| joined.join(" "))
 }
 
 /// 0..=999_999_999 in German words (thousands dots stripped by the
@@ -795,10 +855,22 @@ mod tests {
             digits_plus_suffix("1920er"),
             Some("eintausendneunhundertzwanziger".to_string())
         );
-        // mixed alphanumerics and out-of-range numerals are None → drop
+        // mixed alphanumerics and out-of-range numerals are None as
+        // PURE numerals — the run-split handles them at the next layer
         assert!(digits_to_german("1e9").is_none());
         assert!(digits_plus_suffix("1e9").is_none()); // "e9" is not a suffix
         assert!(digits_to_german("1000000000").is_none());
+        // ... but the run split decomposes them German-ly
+        assert_eq!(split_digit_runs("1e9").as_deref(), Some("eins e neun"));
+        assert_eq!(
+            split_digit_runs("COVID-19").as_deref(),
+            Some("covid neunzehn")
+        );
+        assert_eq!(split_digit_runs("A4").as_deref(), Some("a vier"));
+        assert_eq!(split_digit_runs("b2b").as_deref(), Some("b zwei b"));
+        assert_eq!(split_digit_runs("MP3").as_deref(), Some("mp drei"));
+        // an unexpandable digit run kills the whole token (drop path)
+        assert_eq!(split_digit_runs("x1000000000"), None);
         // leading zeros collapse (documented: fine for quantities)
         assert_eq!(d("007"), "sieben");
     }
@@ -838,18 +910,15 @@ mod tests {
         let r = fe.phonemize("Haus 3.500,50 Tag");
         assert_eq!(r.dropped, 0, "money format must speak");
 
-        // "1e9" drops with a count — never English phones
+        // mixed tokens decompose into German runs — never the English
+        // letter speller (loop-4 finding, live-verified). In this
+        // WFST-less fixture the alphabetic runs still miss the
+        // dictionary and drop; the RUN SPLIT itself is asserted above
+        // and by the real-bundle tests.
         let r = fe.phonemize("Haus 1e9 Tag");
-        assert_eq!(r.dropped, 1);
-        assert_eq!(r.sentences.len(), 1);
-
-        // letter-leading digit mixes stay on the WORD path (never the
-        // numeric-drop path): with the real bundle the WFST pronounces
-        // them; in this WFST-less fixture the rule fallback may spell
-        // them — either way the sentence survives
+        assert_eq!(r.sentences.len(), 1); // sentence survives
         let r = fe.phonemize("Haus b2b Tag");
         assert_eq!(r.sentences.len(), 1);
-        assert!(!r.sentences[0].is_empty());
     }
 
     #[test]

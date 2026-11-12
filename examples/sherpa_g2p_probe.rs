@@ -75,14 +75,23 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let (wav, rate) = synthesize(&model, &tokens, Some(a_lexicon), &text, None);
+    // the lexicon path legitimately fails when every word is OOV for
+    // it (sherpa cannot tokenize) — exactly the #82 case; print why
+    // and still produce the B side, which is the point of the compare
+    let (wav, rate) =
+        synthesize(&model, &tokens, Some(a_lexicon), &text, None).unwrap_or_else(|| {
+            println!("A: no audio from the lexicon path (all words OOV?) — see B");
+            (Vec::new(), 22_050)
+        });
     let a_path = out_dir.join("ab_text.wav");
-    write_wav(&a_path, &wav, rate);
-    println!(
-        "A: {} ({} samples @ {rate} Hz)",
-        a_path.display(),
-        wav.len()
-    );
+    if !wav.is_empty() {
+        write_wav(&a_path, &wav, rate);
+        println!(
+            "A: {} ({} samples @ {rate} Hz)",
+            a_path.display(),
+            wav.len()
+        );
+    }
 
     // ── B: wrapper G2P → phoneme_codepoints ──
     let mut frontend = G2pFrontend::open(&bundle_dir, "de", &tokens).expect("G2P front-end");
@@ -105,7 +114,8 @@ fn main() {
     }
     std::fs::write(out_dir.join("ab_codepoints.txt"), &stream).expect("write stream");
 
-    let (wav, rate) = synthesize(&model, &tokens, None, "", Some(result.sentences));
+    let (wav, rate) =
+        synthesize(&model, &tokens, None, "", Some(result.sentences)).expect("B audio");
     let b_path = out_dir.join("ab_codepoints.wav");
     write_wav(&b_path, &wav, rate);
     println!(
@@ -126,13 +136,15 @@ fn find_onnx(dir: &Path) -> Option<PathBuf> {
 }
 
 /// Returns `(samples, sample_rate)` — the rate comes from the model.
+/// `None` when sherpa produced no audio (e.g. the lexicon path with
+/// all-OOV text).
 fn synthesize(
     model: &Path,
     tokens: &Path,
     lexicon: Option<PathBuf>,
     text: &str,
     codepoints: Option<Vec<Vec<i32>>>,
-) -> (Vec<f32>, i32) {
+) -> Option<(Vec<f32>, i32)> {
     let config = sherpa_onnx::OfflineTtsConfig {
         model: sherpa_onnx::OfflineTtsModelConfig {
             vits: sherpa_onnx::OfflineTtsVitsModelConfig {
@@ -152,10 +164,9 @@ fn synthesize(
         phoneme_codepoints: codepoints,
         ..Default::default()
     };
-    let audio = tts
-        .generate_with_config(text, &gen, None::<&mut dyn FnMut(&[f32], f32) -> bool>)
-        .expect("audio");
-    (audio.samples().to_vec(), audio.sample_rate())
+    let audio =
+        tts.generate_with_config(text, &gen, None::<&mut dyn FnMut(&[f32], f32) -> bool>)?;
+    Some((audio.samples().to_vec(), audio.sample_rate()))
 }
 
 /// Minimal 16-bit mono WAV writer (the probe's output shape).
