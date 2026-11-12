@@ -28,13 +28,13 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // Pass a directory containing mms_eng/model.onnx and mms_eng/tokens.txt.
+    // Pass the parent of an extracted inflect-en-nano-v2 model directory.
     if (chdir(argv[1]) != 0) {
         perror(argv[1]);
         return 1;
     }
     struct tts_ctx *client = tts_create(
-        "sherpaonnx", "{\"modelPath\":\".\",\"modelId\":\"mms_eng\"}");
+        "sherpaonnx", "{\"modelPath\":\".\",\"modelId\":\"inflect-en-nano-v2\"}");
     if (!client) {
         fprintf(stderr, "Could not initialize Sherpa-ONNX: %s\n", tts_get_last_error(NULL));
         return 1;
