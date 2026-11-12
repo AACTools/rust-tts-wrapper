@@ -222,20 +222,21 @@ when the `sherpa-g2p` front-end is available it is always used):
 - Fetch behind the new `sherpa-g2p` feature via `LexiconArchive::fetch`,
   constructing the archive pinned by the allowlist row (see Phase 1).
   Without the feature: discovery only, no download (today's behaviour).
-- Extend `should_auto_generate_lexicon`: allowlisted non-English VITS/piper
-  models qualify for generation (English rules unchanged, still
-  pairs-gated). The German path needs NO pairs table — the operational
-  basis is the probe's result, not convention identity: gruut-de is
-  *close to* but demonstrably not identical to thorsten's encoding
-  (mechanical normalization — tie bars, length marks, ASCII `g` —
-  converted 277,912/277,912 entries), so conversion always runs and is
-  always asserted; the pairs requirement stays English-only.
-- **Update `test_lexicon_gate_against_full_registry`
-  (`src/sherpaonnx_engine.rs:1699`)**: it asserts
-  `!gated || is_english_model_id(&lower)` and pins per-family gated counts
-  (piper 132, …). Extending the gate to allowlisted German models breaks
-  both — deliberately: relax the invariant to "English or allowlisted"
-  and re-pin the counts in the same PR.
+- Extend lexicon generation to allowlisted non-English models via a
+  SEPARATE gate (`should_compat_generate_lexicon`) driven by the
+  `lexiconCompat` credentials option — the English auto path
+  (`should_auto_generate_lexicon`) is untouched. The German path needs
+  NO pairs table — the operational basis is the probe's result, not
+  convention identity: gruut-de is *close to* but demonstrably not
+  identical to thorsten's encoding (mechanical normalization — tie
+  bars, length marks, ASCII `g` — converted 277,912/277,912 entries),
+  so conversion always runs and is always asserted; the pairs
+  requirement stays English-only.
+- **Registry invariant (implemented)**: `test_compat_gate_against_full_registry`
+  pins the compat gate over the pinned registry — exactly the 52 German
+  single-language vits-family models (51 piper + coqui-de-css10)
+  qualify; the English gate test (`test_lexicon_gate_against_full_registry`)
+  is unchanged since the auto path did not change.
 - Read-only model dirs (iOS bundles): when the model dir is not writable,
   generate into `<cache_root>/lexicons-gen/<model_id>/lexicon.txt` and add
   that path to `collect_lexicons` for the config. New credentials key

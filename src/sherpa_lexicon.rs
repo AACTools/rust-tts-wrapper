@@ -8,14 +8,17 @@
 //! unless a lexicon ships beside the model. This module generates one
 //! from the MIT-licensed voicegarden gruut lexicons (see #66).
 //!
-//! The gruut English phoneme inventory is IPA-based with:
-//! - 33 single-character symbols that map identity to piper/kokoro/kitten
-//!   vocabularies (consonants, monophthongs, syllabics)
-//! - 7 multi-character symbols (diphthongs `aɪ aʊ eɪ oʊ ɔɪ`, affricates
-//!   `t͡ʃ d͡ʒ`) that decompose into their component characters — every
-//!   component is in every observed model vocabulary
-//! - stress-prefixed variants (`ˈaɪ`, `ˌeɪ`, …) that split into the
-//!   stress mark + the decomposed parts
+//! Two converter flavors:
+//! - [`PhonemeMap::for_english`] — the #66/#67 tables for English
+//!   (gruut → misaki/espeak conventions, P2P pairs, phonological rules).
+//! - [`VocabPhonemeMap`] — the vocabulary-driven ladder for any bundle
+//!   language (#82): no per-language tables, everything derived from the
+//!   target `tokens.txt` plus universal Unicode facts (tie bars, length
+//!   marks, the offglide breve, ASCII→IPA homoglyphs, NFD base
+//!   stripping). Validated against `piper-de_DE-thorsten-medium`: the
+//!   base `de` bundle converts 277,912/277,912 entries, expanded `deu`
+//!   333,944/333,945 (one loanword carries `ɝ`, which no German model
+//!   vocabulary contains).
 //!
 //! Non-English gruut languages (de, fr, es, …) follow the same pattern:
 //! the generator reads the target model's `tokens.txt` and only emits
@@ -26,6 +29,9 @@
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+
+use unicode_normalization::char::is_combining_mark;
+use unicode_normalization::UnicodeNormalization as _;
 
 /// A gruut→model phoneme mapping. Each gruut source symbol maps to a
 /// sequence of model-vocabulary symbols (identity for most, two-part
@@ -171,6 +177,220 @@ impl PhonemeMap {
 /// Returns an error if the file is unreadable or contains invalid UTF-8.
 pub fn read_tokens_txt_public(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
     read_tokens_txt(path)
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Vocabulary-driven symbol ladder (#82)
+// ──────────────────────────────────────────────────────────────────
+
+/// Tie bars joining an affricate into one symbol (`p͡f`, `t͡s`).
+const TIE_BARS: [char; 2] = ['\u{0361}', '\u{035C}'];
+/// Modifier letters that lengthen the preceding vowel.
+const LENGTH_MARKS: [char; 2] = ['\u{02D0}', '\u{02D1}'];
+/// Stress marks (suprasegmental; German bundle carries none, gruut
+/// English does).
+const STRESS_MARKS: [char; 2] = ['\u{02C8}', '\u{02CC}'];
+/// Diacritics stripped after identity/tie/modifier attempts: the
+/// offglide breve (`̯`, diphthong offglides `aʊ̯`), syllabic (`̩`),
+/// voiceless (`̥`), nasalized (`̃`), lowered (`̞`), dental (`̪`),
+/// raised (`̝`), pre-aspirated (`ˀ`). Occurrence counts in the v0.3.1
+/// German bundles are recorded in SHERPA_NONENGLISH_G2P_PLAN.md (the
+/// offglide breve is common — ~12k — the rest ≤60 each).
+const STRIPPABLE_DIACRITICS: [char; 8] = [
+    '\u{032F}', '\u{0329}', '\u{0325}', '\u{0303}', '\u{031E}', '\u{032A}', '\u{031D}', '\u{02C0}',
+];
+
+/// ASCII→IPA homoglyphs: phonemizers that emit ASCII look-alikes for IPA
+/// letters. NFC/NFD do NOT fold these. ASCII `g` appears 92,996 times in
+/// the deu lexicon; IPA `ɡ` (U+0261) is what piper vocabularies carry.
+const HOMOGLYPHS: &[(char, char)] = &[('g', '\u{0261}')];
+
+fn homoglyph_sub(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            HOMOGLYPHS
+                .iter()
+                .find(|(a, _)| *a == c)
+                .map_or(c, |(_, b)| *b)
+        })
+        .collect()
+}
+
+/// A bundle phone symbol → model-token-sequence mapper driven entirely
+/// by the target vocabulary: no per-language tables. The ladder, per
+/// symbol (SHERPA_NONENGLISH_G2P_PLAN.md Phase 2, rules 1–8):
+///
+/// 1. NFC → exact vocabulary match (identity);
+/// 2. homoglyph substitution (`g` → `ɡ`), identity retry;
+/// 3. tie bars: the tie-stripped whole (`p͡f` → `pf`) if it is a token,
+///    else split at the tie bars and resolve each segment recursively
+///    (`p͡f` → `p` `f`; `t͡s̯` → `t` `s` via the segment ladder);
+/// 4. trailing length mark split (`uː` → `u` `ː`), base resolved
+///    recursively;
+/// 5. strip one strippable diacritic and recurse (offglide breve before
+///    the rare ones);
+/// 6. NFD: precomposed letters (`ã ä ü õ`) decompose to base + combining
+///    mark; drop the combining marks and retry (`äː` → `a` `ː`);
+/// 7. stress marks: bare marks absent from the vocabulary map to nothing
+///    (dropped); stress-prefixed symbols retry without the prefix;
+/// 8. character split as the last resort (`aʊ̯` → `a` `ʊ` after the
+///    breve strip);
+///
+/// Returns `None` when unmappable — the caller skips the word / entry.
+///
+/// Resolutions are memoized per symbol: a lexicon repeats symbols
+/// heavily (92,996 `g`s), and the ladder allocates.
+pub struct VocabPhonemeMap {
+    target_vocab: HashSet<String>,
+    cache: std::collections::HashMap<String, Option<Vec<String>>>,
+}
+
+impl VocabPhonemeMap {
+    /// Build a ladder over a model's `tokens.txt`.
+    ///
+    /// # Errors
+    /// Returns an error if the tokens.txt is unreadable, invalid UTF-8,
+    /// or parses to an empty vocabulary (same refusal as the English
+    /// path: an empty vocabulary would silently convert nothing).
+    pub fn for_language(tokens_path: &Path) -> Result<Self, LexiconGenError> {
+        let target_vocab = read_tokens_txt(tokens_path)?;
+        if target_vocab.is_empty() {
+            return Err(LexiconGenError(format!(
+                "{} parsed to an empty vocabulary — refusing to convert a lexicon",
+                tokens_path.display()
+            )));
+        }
+        Ok(Self {
+            target_vocab,
+            cache: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Map one bundle phone symbol to target-vocabulary tokens. `None` =
+    /// unmappable; `Some(vec![])` = resolves to nothing (a stress mark
+    /// the vocabulary does not carry).
+    #[must_use]
+    pub fn map_symbol(&mut self, sym: &str) -> Option<Vec<String>> {
+        if let Some(cached) = self.cache.get(sym) {
+            return cached.clone();
+        }
+        let resolved = self.resolve(sym);
+        self.cache.insert(sym.to_string(), resolved.clone());
+        resolved
+    }
+
+    /// The ladder, on the memoized path's already-NFC'd input.
+    fn resolve(&mut self, sym: &str) -> Option<Vec<String>> {
+        // rules 1–2: identity, then homoglyph identity
+        for candidate in [sym.to_string(), homoglyph_sub(sym)] {
+            if self.target_vocab.contains(&candidate) {
+                return Some(vec![candidate]);
+            }
+        }
+        // rule 3: tie bars
+        if sym.chars().any(|c| TIE_BARS.contains(&c)) {
+            let stripped: String = sym.chars().filter(|c| !TIE_BARS.contains(c)).collect();
+            if self.target_vocab.contains(&stripped) {
+                return Some(vec![stripped]);
+            }
+            let mut out = Vec::new();
+            let mut all = true;
+            for segment in tie_segments(sym) {
+                if let Some(mut parts) = self.resolve_segment(&segment) {
+                    out.append(&mut parts);
+                } else {
+                    all = false;
+                    break;
+                }
+            }
+            if all {
+                return Some(out);
+            }
+        }
+        self.resolve_segment(sym)
+    }
+
+    /// The segment ladder (no tie bars inside): identity, homoglyph,
+    /// length-mark split, diacritic strip (recursive), NFD base strip,
+    /// stress handling, char split.
+    fn resolve_segment(&mut self, seg: &str) -> Option<Vec<String>> {
+        // rules 1–2 again at segment level
+        for candidate in [seg.to_string(), homoglyph_sub(seg)] {
+            if self.target_vocab.contains(&candidate) {
+                return Some(vec![candidate]);
+            }
+        }
+        // rule 4: trailing length mark splits off; the base resolves
+        // recursively (e.g. `ɡ̥ː` strips U+0325 first, then splits)
+        let last = seg.chars().next_back();
+        if last.is_some_and(|c| LENGTH_MARKS.contains(&c)) {
+            let base: String = seg.chars().take(seg.chars().count() - 1).collect();
+            if let Some(mut parts) = self.resolve_segment(&base) {
+                parts.push(last.unwrap().to_string());
+                if parts.iter().all(|p| self.target_vocab.contains(p)) {
+                    return Some(parts);
+                }
+            }
+        }
+        // rule 7: stress marks
+        let chars: Vec<char> = seg.chars().collect();
+        if chars.len() == 1 && STRESS_MARKS.contains(&chars[0]) {
+            // a bare stress mark the vocabulary does not carry → emit
+            // nothing (identity above already handled the carried case)
+            return Some(Vec::new());
+        }
+        if chars.first().is_some_and(|c| STRESS_MARKS.contains(c)) {
+            let rest: String = chars[1..].iter().collect();
+            if let Some(parts) = self.resolve_segment(&rest) {
+                return Some(parts);
+            }
+        }
+        // rule 5: strip one strippable diacritic, recurse (offglide
+        // breve first — it is the common case)
+        if let Some(pos) = seg.chars().position(|c| STRIPPABLE_DIACRITICS.contains(&c)) {
+            let stripped: String = seg
+                .chars()
+                .enumerate()
+                .filter(|(i, _)| *i != pos)
+                .map(|(_, c)| c)
+                .collect();
+            if let Some(parts) = self.resolve_segment(&stripped) {
+                return Some(parts);
+            }
+        }
+        // rule 6: NFD — precomposed letters to base + combining marks;
+        // drop the combining marks and retry (ã→a, ä→a, ü→u, õ→o)
+        let nfd: String = seg.nfd().filter(|c| !is_combining_mark(*c)).collect();
+        if nfd != seg {
+            if let Some(parts) = self.resolve_segment(&nfd) {
+                return Some(parts);
+            }
+        }
+        // rule 8: char split — every character must be a token
+        if chars.len() > 1
+            && chars
+                .iter()
+                .all(|c| self.target_vocab.contains(&c.to_string()))
+        {
+            return Some(chars.iter().map(std::string::ToString::to_string).collect());
+        }
+        None
+    }
+}
+
+/// Split a symbol at its tie bars into segments (`p͡f` → `p`, `f`).
+fn tie_segments(sym: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for c in sym.chars() {
+        if TIE_BARS.contains(&c) {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    out.push(cur);
+    out
 }
 
 /// Locally available conversion assets for one model.
@@ -429,12 +649,158 @@ pub fn ensure_generated_lexicon(
     }
 }
 
-/// voicegarden lexicon cache root (`~/.voicegarden/lexicons`), when it
-/// exists.
+/// voicegarden lexicon cache root (`~/.voicegarden/lexicons` by
+/// default; `VOICEGARDEN_LEXICON_DIR` overrides, mirroring the crate),
+/// when it exists.
 fn voicegarden_cache_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    let dir = PathBuf::from(home).join(".voicegarden").join("lexicons");
+    let dir = if let Some(v) = std::env::var_os("VOICEGARDEN_LEXICON_DIR") {
+        PathBuf::from(v)
+    } else {
+        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+        PathBuf::from(home).join(".voicegarden").join("lexicons")
+    };
     dir.exists().then_some(dir)
+}
+
+/// Bundle lexicon locations for one bundle key, in preference order:
+/// the flat layout (`<key>/` — crate 0.3.0 caches BOTH archives flat)
+/// and the newer `expanded/<key>/` layout. The bundle's `lexicon.txt`
+/// is the plain-text form of the dictionary (word<TAB>phones).
+fn bundle_lexicon_candidates(cache: &Path, key: &str) -> Vec<PathBuf> {
+    vec![
+        cache.join(key).join("lexicon.txt"),
+        cache.join("expanded").join(key).join("lexicon.txt"),
+    ]
+}
+
+/// Locate the cached bundle lexicon for a bundle key: the
+/// `SHERPA_BUNDLE_LEXICON` env override first (warn when it points
+/// nowhere), then the voicegarden cache layouts.
+fn discover_bundle_lexicon(key: &str) -> Option<PathBuf> {
+    if let Some(p) = env_path_or_warn("SHERPA_BUNDLE_LEXICON") {
+        return Some(p);
+    }
+    let cache = voicegarden_cache_dir()?;
+    bundle_lexicon_candidates(&cache, key)
+        .into_iter()
+        .find(|p| p.exists())
+}
+
+/// Outcome of a compat-lexicon generation: stats plus where the file
+/// landed (the model dir, or the fallback dir when the model dir is not
+/// writable — the config must point there explicitly).
+#[derive(Debug)]
+pub struct CompatLexiconResult {
+    /// entries written by the converter
+    pub written: usize,
+    /// entries skipped (unmappable symbols)
+    pub skipped: usize,
+    /// final lexicon.txt location
+    pub path: PathBuf,
+}
+
+/// Generate a sherpa `lexicon.txt` for a non-English model from its
+/// language bundle (the `lexiconCompat: true` option, plan Phase 2).
+/// Resolves the bundle via [`discover_bundle_lexicon`] and delegates to
+/// [`ensure_compat_lexicon_from`]. Purely local: the bundle must already
+/// be cached (fetched by provisioning, Phase 3) — no download happens
+/// here. See [`ensure_compat_lexicon_from`] for the write-target and
+/// atomicity contract.
+///
+/// # Errors
+/// See [`ensure_compat_lexicon_from`].
+pub fn ensure_compat_lexicon(
+    model_dir: &Path,
+    bundle_key: &str,
+    fallback_root: &Path,
+    model_id: &str,
+) -> Result<Option<CompatLexiconResult>, LexiconGenError> {
+    let Some(bundle_lexicon) = discover_bundle_lexicon(bundle_key) else {
+        return Ok(None);
+    };
+    ensure_compat_lexicon_from(model_dir, &bundle_lexicon, fallback_root, model_id)
+}
+
+/// [`ensure_compat_lexicon`] with an explicit bundle lexicon path (the
+/// cache-layout resolution is the only difference — tests inject paths
+/// directly instead of racing on env vars).
+///
+/// No-op (`Ok(None)`) when the model already has a lexicon or has no
+/// `tokens.txt`. Write target: the model dir when writable; otherwise
+/// `<fallback_root>/lexicons-gen/<model_id>/lexicon.txt` — the caller
+/// must add a returned outside path to the model config (it is not
+/// discovered automatically). Atomic like the English path: temp
+/// sibling + rename; a zero-entry output is deleted and reported.
+///
+/// # Errors
+/// Assets-found-but-conversion-failed (I/O, empty vocabulary, or zero
+/// convertible entries).
+pub fn ensure_compat_lexicon_from(
+    model_dir: &Path,
+    bundle_lexicon: &Path,
+    fallback_root: &Path,
+    model_id: &str,
+) -> Result<Option<CompatLexiconResult>, LexiconGenError> {
+    // per-call counter for unique temp names — see ensure_generated_lexicon
+    static COMPAT_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    if has_lexicon_file(model_dir) {
+        return Ok(None);
+    }
+    let tokens_path = model_dir.join("tokens.txt");
+    if !tokens_path.exists() {
+        return Ok(None);
+    }
+
+    let mut map = VocabPhonemeMap::for_language(&tokens_path)?;
+
+    // write into the model dir when possible, else the fallback dir
+    // (a lexicon outside the model dir must be passed to the config
+    // explicitly — it is not discovered automatically)
+    let probe = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .truncate(false)
+        .open(model_dir.join(".lexicon-write-probe"));
+    let target_dir = if probe.is_ok() {
+        let _ = std::fs::remove_file(model_dir.join(".lexicon-write-probe"));
+        model_dir.to_path_buf()
+    } else {
+        let dir = fallback_root.join("lexicons-gen").join(model_id);
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| LexiconGenError(format!("creating {}: {e}", dir.display())))?;
+        dir
+    };
+
+    let n = COMPAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = target_dir.join(format!("lexicon.txt.{}.{}.tmp", std::process::id(), n));
+    let stats = generate_lexicon_txt(bundle_lexicon, &mut map, &tmp);
+    match stats {
+        Ok((written, skipped)) if written > 0 => {
+            let final_path = target_dir.join("lexicon.txt");
+            std::fs::rename(&tmp, &final_path).map_err(|e| {
+                LexiconGenError(format!("renaming into {}: {e}", target_dir.display()))
+            })?;
+            Ok(Some(CompatLexiconResult {
+                written,
+                skipped,
+                path: final_path,
+            }))
+        }
+        Ok((_written, skipped)) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(LexiconGenError(format!(
+                "conversion produced 0 entries (skipped {skipped}) — bundle {} against {} \
+                 has no convertible words; no lexicon written",
+                bundle_lexicon.display(),
+                tokens_path.display()
+            )))
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
 }
 
 fn read_tokens_txt(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
@@ -457,6 +823,28 @@ fn read_tokens_txt(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
     Ok(vocab)
 }
 
+/// A symbol mapper: one source phone symbol → a sequence of
+/// target-vocabulary tokens. `None` = unmappable (skip the word);
+/// empty = resolves to nothing (e.g. a stress mark the vocabulary does
+/// not carry). Implemented by the English tables ([`PhonemeMap`]) and
+/// the vocabulary-driven ladder ([`VocabPhonemeMap`]).
+pub trait SymbolMapper {
+    /// Map one phone symbol; see the trait docs for the contract.
+    fn map_symbol(&mut self, sym: &str) -> Option<Vec<String>>;
+}
+
+impl SymbolMapper for PhonemeMap {
+    fn map_symbol(&mut self, sym: &str) -> Option<Vec<String>> {
+        self.map_phonemes(&[sym])
+    }
+}
+
+impl SymbolMapper for VocabPhonemeMap {
+    fn map_symbol(&mut self, sym: &str) -> Option<Vec<String>> {
+        VocabPhonemeMap::map_symbol(self, sym)
+    }
+}
+
 /// Convert a gruut lexicon file (`word ph1 ph2 ph3...` per line) into a
 /// sherpa-onnx lexicon.txt, mapping phonemes through `map`.
 ///
@@ -467,9 +855,9 @@ fn read_tokens_txt(path: &Path) -> Result<HashSet<String>, LexiconGenError> {
 /// # Errors
 /// Returns an error if either file is unreadable or the output cannot be
 /// written.
-pub fn generate_lexicon_txt(
+pub fn generate_lexicon_txt<M: SymbolMapper>(
     gruut_lexicon_path: &Path,
-    map: &PhonemeMap,
+    map: &mut M,
     output_path: &Path,
 ) -> Result<(usize, usize), LexiconGenError> {
     let input = std::fs::File::open(gruut_lexicon_path)
@@ -501,13 +889,22 @@ pub fn generate_lexicon_txt(
         if gruut_phones.is_empty() {
             continue;
         }
-        match map.map_phonemes(&gruut_phones) {
-            Some(mapped) => {
-                writeln!(writer, "{word}||{}", mapped.join(" "))
-                    .map_err(|e| LexiconGenError(format!("writing: {e}")))?;
-                written += 1;
+        let mut mapped: Vec<String> = Vec::with_capacity(gruut_phones.len() + 2);
+        let mut ok = true;
+        for sym in &gruut_phones {
+            if let Some(parts) = map.map_symbol(sym) {
+                mapped.extend(parts);
+            } else {
+                ok = false;
+                break;
             }
-            None => skipped += 1,
+        }
+        if ok && !mapped.is_empty() {
+            writeln!(writer, "{word}||{}", mapped.join(" "))
+                .map_err(|e| LexiconGenError(format!("writing: {e}")))?;
+            written += 1;
+        } else {
+            skipped += 1;
         }
     }
 
@@ -603,14 +1000,14 @@ mod tests {
     #[test]
     fn lexicon_generation_round_trip() {
         let tokens = write_test_tokens(&english_vocab());
-        let map = PhonemeMap::for_english(&tokens).unwrap();
+        let mut map = PhonemeMap::for_english(&tokens).unwrap();
 
         let dir = tokens.parent().unwrap();
         let gruut = dir.join("test_gruut.txt");
         std::fs::write(&gruut, "hello h ə l oʊ\nsky s k aɪ\nxyz ɑ b ϥ\n").unwrap();
 
         let out = dir.join("test_lexicon.txt");
-        let (written, skipped) = generate_lexicon_txt(&gruut, &map, &out).unwrap();
+        let (written, skipped) = generate_lexicon_txt(&gruut, &mut map, &out).unwrap();
         assert_eq!(written, 2);
         assert_eq!(skipped, 1);
 
@@ -765,5 +1162,308 @@ mod tests {
             vocab.contains("a") && vocab.contains("b"),
             "vocab: {vocab:?}"
         );
+    }
+
+    // ── VocabPhonemeMap: the vocabulary-driven ladder (#82) ──
+
+    /// A thorsten-like vocabulary: the real de_DE-thorsten-medium
+    /// tokens.txt is 152 single-character IPA symbols including `ː ɡ ˈ ˌ`
+    /// — and NOT ASCII `g`, `pf`, `aʊ`, or `ts` (affricates/diphthongs
+    /// must decompose). This synthetic set mirrors those facts.
+    fn thorsten_vocab() -> std::path::PathBuf {
+        let syms = [
+            "_", "^", "$", " ", "!", "?", ",", ".", "\u{02C8}",
+            "\u{02CC}", // stress IS carried
+            "a", "e", "i", "o", "u", "ʏ", "y", "ø", "œ", "ɔ", "ɛ", "ə", "ɪ", "ʊ", "ɐ",
+            "a", // vowels
+            "b", "d", "f", "h", "j", "k", "l", "m", "n", "p", "s", "t", "v", "x",
+            "z", // consonants
+            "\u{0261}", "ʁ", "ʃ", "ʒ", "ç", "ŋ", "ɲ", "ʔ", "\u{02D0}", // ɡ (IPA), ː
+        ];
+        let dir = tempfile::tempdir().unwrap().keep();
+        let mut s = String::new();
+        for (i, sym) in syms.iter().enumerate() {
+            writeln!(s, "{sym} {i}").expect("in-memory write");
+        }
+        std::fs::write(dir.join("tokens.txt"), s).unwrap();
+        dir.join("tokens.txt")
+    }
+
+    /// The measured v0.3.1 German lexicon symbols that drive the ladder
+    /// rules — one case per rule, counts in the plan's inventory table.
+    #[test]
+    fn vocab_ladder_resolves_german_symbol_inventory() {
+        let tokens = thorsten_vocab();
+        let mut map = VocabPhonemeMap::for_language(&tokens).unwrap();
+
+        // rule 1: identity
+        assert_eq!(map.map_symbol("haus-not-a-symbol").map(|_| ()), None); // sanity: unmappable
+        assert_eq!(map.map_symbol("ʃ").unwrap(), vec!["ʃ"]);
+        // rule 2: ASCII g → IPA ɡ (92,996 occurrences in deu)
+        assert_eq!(map.map_symbol("g").unwrap(), vec!["\u{0261}"]);
+        // rule 3: tie-split p͡f → p f (7,910 occurrences)
+        assert_eq!(map.map_symbol("p\u{0361}f").unwrap(), vec!["p", "f"]);
+        // rule 3 + 5 chained: t͡s̯ → t s (tie-split, then offglide strip)
+        assert_eq!(
+            map.map_symbol("t\u{0361}s\u{032F}").unwrap(),
+            vec!["t", "s"]
+        );
+        // rule 4: length split uː → u ː (346,964 occurrences)
+        assert_eq!(map.map_symbol("u\u{02D0}").unwrap(), vec!["u", "\u{02D0}"]);
+        // rule 4 + 5: ɡ̥ː → ɡ ː (strip voiceless mark, then split)
+        assert_eq!(
+            map.map_symbol("\u{0261}\u{0325}\u{02D0}").unwrap(),
+            vec!["\u{0261}", "\u{02D0}"]
+        );
+        // rule 5: offglide breve — aʊ̯ tries aʊ (not a token), char-splits
+        assert_eq!(
+            map.map_symbol("a\u{028A}\u{032F}").unwrap(),
+            vec!["a", "\u{028A}"]
+        );
+        // rule 6: NFD — precomposed ãː / ä / ü / õ strip to base + marks
+        assert_eq!(
+            map.map_symbol("\u{00E3}\u{02D0}").unwrap(),
+            vec!["a", "\u{02D0}"]
+        );
+        assert_eq!(map.map_symbol("\u{00E4}").unwrap(), vec!["a"]);
+        assert_eq!(map.map_symbol("\u{00FC}").unwrap(), vec!["u"]);
+        assert_eq!(
+            map.map_symbol("\u{00F5}\u{02D0}").unwrap(),
+            vec!["o", "\u{02D0}"]
+        );
+        // rule 7: stress IS in this vocab → kept; bare stress in a
+        // vocab without it → dropped (checked in the next test)
+        assert_eq!(map.map_symbol("\u{02C8}").unwrap(), vec!["\u{02C8}"]);
+        // rule 8 / unmappable: ɝ (English rhotic, the one deu loanword)
+        assert!(map.map_symbol("\u{025D}").is_none());
+        // memoization: repeated symbols resolve consistently
+        assert_eq!(map.map_symbol("g").unwrap(), vec!["\u{0261}"]);
+    }
+
+    /// The probe sentence shape: a full word from the bundle converts.
+    #[test]
+    fn vocab_ladder_maps_a_bundle_word() {
+        let tokens = thorsten_vocab();
+        let mut map = VocabPhonemeMap::for_language(&tokens).unwrap();
+        // haus → h aʊ̯ s  ⇒  h a ʊ s
+        let seq: Vec<String> = ["h", "a\u{028A}\u{032F}", "s"]
+            .iter()
+            .flat_map(|s| map.map_symbol(s).unwrap())
+            .collect();
+        assert_eq!(seq, vec!["h", "a", "\u{028A}", "s"]);
+    }
+
+    /// Stress marks absent from the vocabulary are dropped, not fatal.
+    #[test]
+    fn vocab_ladder_drops_uncarried_stress_marks() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join("tokens.txt"), "a 0\nb 1\n").unwrap();
+        let mut map = VocabPhonemeMap::for_language(&dir.join("tokens.txt")).unwrap();
+        assert_eq!(map.map_symbol("\u{02C8}"), Some(Vec::new()));
+        assert_eq!(map.map_symbol("\u{02C8}a"), Some(vec!["a".to_string()]));
+    }
+
+    /// A vocabulary carrying the tie-stripped whole (`pf` as a token)
+    /// prefers it over the split.
+    #[test]
+    fn vocab_ladder_prefers_tie_stripped_whole_token() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join("tokens.txt"), "p 0\nf 1\npf 2\n").unwrap();
+        let mut map = VocabPhonemeMap::for_language(&dir.join("tokens.txt")).unwrap();
+        assert_eq!(
+            map.map_symbol("p\u{0361}f").unwrap(),
+            vec!["pf".to_string()]
+        );
+    }
+
+    /// Empty vocabulary refuses construction (same rule as English).
+    #[test]
+    fn vocab_ladder_refuses_empty_vocabulary() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join("tokens.txt"), "\n\n").unwrap();
+        assert!(VocabPhonemeMap::for_language(&dir.join("tokens.txt")).is_err());
+    }
+
+    /// Bundle lexicon conversion end-to-end on a mini file: written
+    /// entries carry `word||mapped phones`, unmappable words are skipped.
+    #[test]
+    fn bundle_lexicon_conversion_end_to_end() {
+        let tokens = thorsten_vocab();
+        let dir = tokens.parent().unwrap();
+        let bundle = dir.join("mini-bundle.txt");
+        std::fs::write(
+            &bundle,
+            // word<TAB>phones — the bundle format (tab separator)
+            "haus\th a\u{028A}\u{032F} s\n\
+             gummi\t\u{0261} \u{028A} m i\u{02D0}\n\
+             suessreserve\ts y\u{02D0} s \u{025D} e\u{02D0} v \u{0259}\n",
+        )
+        .unwrap();
+        let out = dir.join("out-lexicon.txt");
+        let mut map = VocabPhonemeMap::for_language(&tokens).unwrap();
+        let (written, skipped) = generate_lexicon_txt(&bundle, &mut map, &out).unwrap();
+        assert_eq!((written, skipped), (2, 1)); // ɝ word skipped
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(content.contains("haus||h a \u{028A} s"));
+        assert!(!content.contains("suessreserve"));
+    }
+
+    // ── ensure_compat_lexicon (#82 Phase 2) ──
+
+    /// Generation into a writable model dir + the already-has-lexicon
+    /// no-op. Uses ensure_compat_lexicon_from with an explicit bundle
+    /// path — the env-var discovery layer would race across parallel
+    /// tests.
+    #[test]
+    fn compat_lexicon_generates_into_model_dir() {
+        let tmp = tempfile::tempdir().unwrap().keep();
+        let bundle = tmp.join("bundle-de.txt");
+        std::fs::write(
+            &bundle,
+            "haus\th a\u{028A}\u{032F} s\ngummi\t\u{0261} \u{028A} m i\u{02D0}\n",
+        )
+        .unwrap();
+        let model = tmp.join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::copy(thorsten_vocab(), model.join("tokens.txt")).unwrap();
+
+        let res = ensure_compat_lexicon_from(&model, &bundle, &tmp, "test-model")
+            .unwrap()
+            .expect("generated");
+        assert_eq!((res.written, res.skipped), (2, 0));
+        assert_eq!(res.path, model.join("lexicon.txt"));
+        let content = std::fs::read_to_string(&res.path).unwrap();
+        assert!(content.contains("haus||h a \u{028A} s"));
+        // no temp litter
+        assert!(!std::fs::read_dir(&model)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp")));
+        // second call: already has a lexicon → no-op
+        assert!(
+            ensure_compat_lexicon_from(&model, &bundle, &tmp, "test-model")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// The cache layouts resolve in preference order: flat `<key>/`
+    /// (crate 0.3.0 caches BOTH archives flat) then `expanded/<key>/`.
+    #[test]
+    fn bundle_lexicon_candidates_prefer_flat_layout() {
+        let cache = std::path::Path::new("/cache");
+        let cands = bundle_lexicon_candidates(cache, "deu");
+        assert_eq!(cands[0], cache.join("deu").join("lexicon.txt"));
+        assert_eq!(
+            cands[1],
+            cache.join("expanded").join("deu").join("lexicon.txt")
+        );
+    }
+
+    /// Read-only model dir → the fallback dir under the provided root,
+    /// and the returned path is outside the model dir (the caller must
+    /// pass it to the config). Skipped when running as root (root
+    /// ignores directory permissions).
+    #[test]
+    fn compat_lexicon_falls_back_when_model_dir_readonly() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap().keep();
+        let model = tmp.join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::copy(thorsten_vocab(), model.join("tokens.txt")).unwrap();
+        let bundle = tmp.join("bundle-de.txt");
+        std::fs::write(&bundle, "haus\th a\u{028A}\u{032F} s\n").unwrap();
+
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // root bypasses mode bits: detect and skip
+        let probe = model.join(".write-probe");
+        let is_root = std::fs::write(&probe, b"").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        let res = if is_root {
+            None
+        } else {
+            ensure_compat_lexicon_from(&model, &bundle, &tmp, "m").unwrap()
+        };
+        std::fs::set_permissions(&model, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Some(res) = res else { return };
+        assert!(!res.path.starts_with(&model), "must land outside");
+        assert_eq!(
+            res.path,
+            tmp.join("lexicons-gen").join("m").join("lexicon.txt")
+        );
+        assert!(res.path.is_file());
+    }
+
+    /// A bundle whose nothing converts (wrong-language) → zero-entry
+    /// refusal, nothing written, temp cleaned.
+    #[test]
+    fn compat_lexicon_refuses_zero_entry_output() {
+        let tmp = tempfile::tempdir().unwrap().keep();
+        let bundle = tmp.join("bundle-wrong.txt");
+        std::fs::write(&bundle, "zzz x\u{025D} y\u{025D}\n").unwrap();
+        let model = tmp.join("model");
+        std::fs::create_dir_all(&model).unwrap();
+        std::fs::copy(thorsten_vocab(), model.join("tokens.txt")).unwrap();
+
+        let err = ensure_compat_lexicon_from(&model, &bundle, &tmp, "m").unwrap_err();
+        assert!(err.0.contains("0 entries"), "got: {err}");
+        assert!(!model.join("lexicon.txt").exists());
+        assert!(!std::fs::read_dir(&model)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().ends_with(".tmp")));
+    }
+
+    // ── Real-bundle coverage (the probe's rates, pinned) ──
+    //
+    // The macOS probe converted all 277,912 base entries; the prototype
+    // ladder resolves de 277,912/0 and deu 333,944/1 (süßreserve carries
+    // ɝ). These tests re-run the FULL bundles against the real thorsten
+    // vocabulary:
+    //
+    //   cargo test --features sherpaonnx --lib -- --ignored sherpa_lexicon \
+    //     SHERPA_TEST_THORSTEN_TOKENS=/path/tokens.txt \
+    //     SHERPA_TEST_DE_LEXICON=.../de/lexicon.txt \
+    //     SHERPA_TEST_DEU_LEXICON=.../deu/lexicon.txt
+    //
+    // CI provisions the files in Phase 4 (plan: both bundles + model).
+
+    fn env_file(var: &str) -> Option<std::path::PathBuf> {
+        std::env::var_os(var)
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+    }
+
+    #[test]
+    #[ignore = "needs the real thorsten tokens.txt + base de bundle (env: SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DE_LEXICON)"]
+    fn real_coverage_base_de_bundle() {
+        let (Some(tokens), Some(bundle)) = (
+            env_file("SHERPA_TEST_THORSTEN_TOKENS"),
+            env_file("SHERPA_TEST_DE_LEXICON"),
+        ) else {
+            eprintln!("skipping: env vars not set");
+            return;
+        };
+        let out = tempfile::tempdir().unwrap().keep().join("lexicon.txt");
+        let mut map = VocabPhonemeMap::for_language(&tokens).unwrap();
+        let (written, skipped) = generate_lexicon_txt(&bundle, &mut map, &out).unwrap();
+        assert_eq!((written, skipped), (277_912, 0), "the probe's rate, exact");
+    }
+
+    #[test]
+    #[ignore = "needs the real thorsten tokens.txt + expanded deu bundle (env: SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DEU_LEXICON)"]
+    fn real_coverage_expanded_deu_bundle() {
+        let (Some(tokens), Some(bundle)) = (
+            env_file("SHERPA_TEST_THORSTEN_TOKENS"),
+            env_file("SHERPA_TEST_DEU_LEXICON"),
+        ) else {
+            eprintln!("skipping: env vars not set");
+            return;
+        };
+        let out = tempfile::tempdir().unwrap().keep().join("lexicon.txt");
+        let mut map = VocabPhonemeMap::for_language(&tokens).unwrap();
+        let (written, skipped) = generate_lexicon_txt(&bundle, &mut map, &out).unwrap();
+        // süßreserve carries ɝ — the single unmappable entry
+        assert_eq!((written, skipped), (333_944, 1));
     }
 }
