@@ -386,8 +386,8 @@ uint32_t tts_get_last_error_code(struct tts_ctx *ctx);
 char *tts_get_last_error_detail_json(struct tts_ctx *ctx);
 
 /**
- * Free a string returned by [`tts_get_last_error_detail_json`] or
- * [`tts_get_engine_setups_json`].
+ * Free a string returned by [`tts_get_last_error_detail_json`],
+ * [`tts_get_engine_setups_json`], or [`tts_get_sherpa_models_json`].
  *
  * # Safety
  *
@@ -406,6 +406,16 @@ void tts_free_string(char *s);
  * success; returns `"[]"` when no engines are compiled in.
  */
 char *tts_get_engine_setups_json(void);
+
+/**
+ * Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
+ *
+ * This uses the build's bundled registry snapshot and requires no engine or network
+ * connection. Caller must free the returned string with [`tts_free_string`].
+ * Returns null on failure, including builds without the `sherpaonnx` feature.
+ * Read the global error with [`tts_get_last_error_detail_json`] and a null context.
+ */
+char *tts_get_sherpa_models_json(void);
 
 /**
  * Verify the context's credentials with an explicit "unverified"
@@ -460,10 +470,25 @@ int32_t tts_synth_to_bytes(struct tts_ctx *ctx,
                            uintptr_t *out_len);
 
 /**
- * Free a byte buffer returned by [`tts_synth_to_bytes`].
+ * Synthesize text to a playable WAV file without starting playback.
+ * Supported by cloud and Sherpa-ONNX engines. Writes a heap-allocated
+ * buffer to `*out_bytes` and its length to `*out_len`.
+ * Caller must free with [`tts_free_bytes`].
+ * Returns 0 on success, -1 on failure.
  *
  * # Safety
- * `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
+ * `ctx` must be valid. `out_bytes` and `out_len` must be non-null.
+ */
+int32_t tts_synth_to_wav(struct tts_ctx *ctx,
+                         const char *text,
+                         uint8_t **out_bytes,
+                         uintptr_t *out_len);
+
+/**
+ * Free a buffer returned by [`tts_synth_to_bytes`] or [`tts_synth_to_wav`].
+ *
+ * # Safety
+ * `bytes` must be from one of these functions with the matching `len`.
  */
 void tts_free_bytes(uint8_t *bytes, uintptr_t len);
 

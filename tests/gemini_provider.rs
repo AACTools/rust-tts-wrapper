@@ -185,6 +185,40 @@ fn gemini_happy_path_delivers_pcm_and_boundaries() {
 }
 
 #[test]
+fn ffi_wav_synthesis_uses_the_decoded_sample_rate() {
+    use base64::Engine;
+    use rust_tts_wrapper::{tts_create, tts_destroy, tts_free_bytes, tts_synth_to_wav};
+    use std::ffi::CString;
+
+    let expected = tiny_wav(&[0, 1234, -2345, 0], 44_100);
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&expected);
+    let (port, handle) = spawn_mock(interaction_json_with_audio(&b64));
+    let credentials = CString::new(
+        serde_json::json!({
+            "apiKey": "test-key",
+            "synthUrl": format!("http://127.0.0.1:{port}/interactions")
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let ctx = tts_create(c"gemini".as_ptr(), credentials.as_ptr());
+    assert!(!ctx.is_null(), "Gemini context");
+    let mut buffer = std::ptr::null_mut();
+    let mut length = 0;
+    let rc = tts_synth_to_wav(ctx, c"Hello".as_ptr(), &raw mut buffer, &raw mut length);
+    tts_destroy(ctx);
+    handle.join().expect("mock thread");
+    assert_eq!(rc, 0);
+    assert!(!buffer.is_null());
+    assert_eq!(length, expected.len());
+    let wav = unsafe { std::slice::from_raw_parts(buffer, length) }.to_vec();
+    tts_free_bytes(buffer, length);
+    assert_eq!(&wav[..44], &expected[..44]);
+    assert!(wav[44..].iter().any(|byte| *byte != 0));
+}
+
+#[test]
 fn gemini_no_audio_block_is_an_error_with_detail() {
     // In-band error payload: the API's message must reach the error text.
     let body =

@@ -1,7 +1,9 @@
 //! Sherpa-ONNX offline TTS engine with model registry.
 
 use crate::boundaries::{EstimateFirer, EstimatePlan};
-use crate::engine::TtsEngine;
+use crate::engine::{
+    pcm16_mono_to_wav, OnAudioCallback, OnBoundaryCallback, OnMarkCallback, TtsEngine,
+};
 use crate::types::{
     Gender, LanguageCode, SherpaLanguage, SherpaModelInfo, TtsError, TtsResult, Voice,
 };
@@ -337,19 +339,18 @@ fn load_models() -> HashMap<String, SherpaModelInfo> {
         .collect()
 }
 
-impl TtsEngine for SherpaOnnxEngine {
-    #[allow(clippy::too_many_lines)]
-    fn speak(
+impl SherpaOnnxEngine {
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn synthesize(
         &self,
         text: &str,
         voice: Option<&str>,
         rate: f32,
         pitch: f32,
         volume: f32,
-        mut on_audio: Option<crate::engine::OnAudioCallback>,
-        mut on_boundary: Option<crate::engine::OnBoundaryCallback>,
-        _on_mark: Option<crate::engine::OnMarkCallback>,
-    ) -> TtsResult<()> {
+        mut on_audio: Option<OnAudioCallback>,
+        mut on_boundary: Option<OnBoundaryCallback>,
+    ) -> TtsResult<u32> {
         if self.loaded_model_id.is_empty() {
             return Err(TtsError(
                 "No SherpaOnnx modelId configured. Pass modelId in credentials JSON. \
@@ -606,12 +607,11 @@ impl TtsEngine for SherpaOnnxEngine {
         if wants_callback {
             let plan = on_boundary.is_some().then(|| EstimatePlan::build(text));
 
-            // SAFETY (stash): the raw pointers are only dereferenced inside
-            // the generate callback, which sherpa-onnx calls synchronously
-            // on this thread between the stash and the clear below, while
-            // `on_audio`/`on_boundary` are still borrowed. Synthesis on a
-            // given engine instance is serialised by the `tts_instance`
-            // mutex held for the whole call.
+            // SAFETY (stash): the raw pointers are only dereferenced while
+            // delivering audio on this thread, between the stash and clear
+            // below, while `on_audio`/`on_boundary` are still borrowed.
+            // Sherpa calls back synchronously, and `tts_instance` serialises
+            // synthesis on a given engine instance for the whole call.
             // ptr→ptr transmute + explicit borrow-to-pointer are the
             // standard lifetime-erasure idioms for synchronous callback
             // stashing; the safety argument is documented above.
@@ -645,56 +645,60 @@ impl TtsEngine for SherpaOnnxEngine {
             let firer = plan.map(|p| Arc::new(Mutex::new(EstimateFirer::new(p, time_scale))));
             let firer_for_cb = firer.clone();
 
-            // A `None` result means the engine rejected the config outright;
-            // cancellation mid-stream still returns Some(audio-so-far),
-            // which we ignore — every batch was already streamed.
-            let result = tts.generate_with_config(
-                text,
-                &gen_config,
-                Some(move |batch: &[f32], _progress: f32| -> bool {
-                    if CANCEL_REQUESTED.load(Ordering::SeqCst) {
-                        return false;
-                    }
-                    let processed = apply_volume_and_pitch(batch, volume_factor, pitch_factor);
-                    let pcm = samples_to_le_bytes(&processed);
-                    STREAM_AUDIO_CB.with(|c| {
-                        if let Some(ptr) = *c.borrow() {
-                            // SAFETY (stash): see the thread-local docs.
-                            // Chunk to keep the documented 8 KB multi-
-                            // callback delivery shape.
-                            for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
-                                unsafe { (*ptr)(chunk) };
-                            }
+            let delivered = Arc::new(AtomicBool::new(false));
+            let delivered_for_cb = Arc::clone(&delivered);
+            let deliver_batch = move |batch: &[f32], _progress: f32| -> bool {
+                if CANCEL_REQUESTED.load(Ordering::SeqCst) {
+                    return false;
+                }
+                if batch.is_empty() {
+                    return true;
+                }
+                let processed = apply_volume_and_pitch(batch, volume_factor, pitch_factor);
+                let pcm = samples_to_le_bytes(&processed);
+                STREAM_AUDIO_CB.with(|c| {
+                    if let Some(ptr) = *c.borrow() {
+                        // SAFETY (stash): see the thread-local docs.
+                        // Keep the documented 8 KB callback delivery shape.
+                        for chunk in pcm.chunks(STREAMING_CHUNK_SIZE) {
+                            unsafe { (*ptr)(chunk) };
                         }
-                    });
-                    if let Some(f) = firer_for_cb.as_ref() {
-                        if let Ok(mut guard) = f.lock() {
-                            guard.on_samples(
-                                batch.len() as u64,
-                                Some(sample_rate_out),
-                                &mut |ev| {
-                                    STREAM_BOUNDARY_CB.with(|c| {
-                                        if let Some(ptr) = *c.borrow() {
-                                            // SAFETY (stash): see above.
-                                            unsafe {
-                                                (*ptr)(
-                                                    &ev.word,
-                                                    ev.start_s,
-                                                    ev.end_s,
-                                                    ev.char_offset,
-                                                    ev.char_len,
-                                                    true, // wpm estimates
-                                                );
-                                            }
-                                        }
-                                    });
-                                },
-                            );
-                        }
+                        delivered_for_cb.store(true, Ordering::Relaxed);
                     }
-                    !CANCEL_REQUESTED.load(Ordering::SeqCst)
-                }),
-            );
+                });
+                if let Some(f) = firer_for_cb.as_ref() {
+                    if let Ok(mut guard) = f.lock() {
+                        guard.on_samples(batch.len() as u64, Some(sample_rate_out), &mut |ev| {
+                            STREAM_BOUNDARY_CB.with(|c| {
+                                if let Some(ptr) = *c.borrow() {
+                                    // SAFETY (stash): see above.
+                                    unsafe {
+                                        (*ptr)(
+                                            &ev.word,
+                                            ev.start_s,
+                                            ev.end_s,
+                                            ev.char_offset,
+                                            ev.char_len,
+                                            true, // wpm estimates
+                                        );
+                                    }
+                                }
+                            });
+                        });
+                    }
+                }
+                !CANCEL_REQUESTED.load(Ordering::SeqCst)
+            };
+            let result = tts.generate_with_config(text, &gen_config, Some(deliver_batch.clone()));
+            // Kitten returns audio without invoking the progress callback.
+            // Deliver that audio once, unless streaming or cancellation
+            // already took place. The same delivery path applies prosody
+            // and advances word boundaries for this final batch.
+            if !delivered.load(Ordering::Relaxed) {
+                if let Some(audio) = result.as_ref() {
+                    deliver_batch(audio.samples(), 1.0);
+                }
+            }
 
             STREAM_AUDIO_CB.with(|c| *c.borrow_mut() = None);
             STREAM_BOUNDARY_CB.with(|c| *c.borrow_mut() = None);
@@ -752,7 +756,45 @@ impl TtsEngine for SherpaOnnxEngine {
             }
         }
 
+        Ok(u32::try_from(tts.sample_rate()).unwrap_or(0))
+    }
+}
+
+impl TtsEngine for SherpaOnnxEngine {
+    fn speak(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+        on_audio: Option<OnAudioCallback>,
+        on_boundary: Option<OnBoundaryCallback>,
+        _on_mark: Option<OnMarkCallback>,
+    ) -> TtsResult<()> {
+        self.synthesize(text, voice, rate, pitch, volume, on_audio, on_boundary)?;
         Ok(())
+    }
+
+    fn synth_to_wav(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+    ) -> TtsResult<Vec<u8>> {
+        let mut pcm = Vec::new();
+        let sample_rate = self.synthesize(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            Some(&mut |chunk| pcm.extend_from_slice(chunk)),
+            None,
+        )?;
+        pcm16_mono_to_wav(&pcm, Some(sample_rate))
     }
 
     fn speak_sync(

@@ -1,0 +1,42 @@
+name: Apple SwiftPM
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/apple-swiftpm.yml
+      - Cargo.toml
+      - Cargo.lock
+      - Package.swift
+      - build.rs
+      - cbindgen.toml
+      - bindings/swift/**
+      - extern/**
+      - include/**
+      - scripts/apple/**
+      - scripts/build-ios-sherpa.sh
+      - src/**
+
+permissions:
+  contents: read
+
+jobs:
+  xcframework:
+    runs-on: macos-latest
+    env:
+      RUST_TTS_USE_LOCAL_XCFRAMEWORK: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Apple XCFramework
+        run: scripts/apple/build-xcframework.sh
+      - name: Verify the C header
+        run: diff include/tts_wrapper.h bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h
+      - name: Build a downstream package for macOS, iOS, and iOS Simulator
+        run: scripts/apple/smoke-test.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: apple-swiftpm
+          path: target/apple/RustTtsNative.xcframework.zip
+          if-no-files-found: error
+          compression-level: 0

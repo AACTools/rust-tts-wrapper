@@ -3,6 +3,8 @@
 
 use super::*;
 
+pub(crate) const QWEN_PCM_SAMPLE_RATE: u32 = 24_000;
+
 /// Qwen cloud TTS (Alibaba Cloud Model Studio / DashScope) via the
 /// duplex WebSocket "tts_v2" protocol shared by Qwen-Audio-TTS and
 /// CosyVoice models.
@@ -250,7 +252,7 @@ pub(crate) fn qwen_run_task_json(
         "text_type": "PlainText",
         "voice": voice,
         "format": "pcm",
-        "sample_rate": 24_000,
+        "sample_rate": QWEN_PCM_SAMPLE_RATE,
         "volume": volume_int,
         "rate": rate.clamp(0.5, 2.0),
         "pitch": pitch.clamp(0.5, 2.0),

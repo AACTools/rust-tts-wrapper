@@ -44,7 +44,9 @@ include = [
   "tts_get_last_error_detail_json",
   "tts_free_string",
   "tts_get_engine_setups_json",
+  "tts_get_sherpa_models_json",
   "tts_check_credentials",
   "tts_synth_to_bytes",
+  "tts_synth_to_wav",
   "tts_free_bytes",
 ]

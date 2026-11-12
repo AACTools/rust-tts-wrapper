@@ -42,6 +42,26 @@ final class RustTtsWrapperParityTests: XCTestCase {
         XCTAssertTrue(google.requiredAny.contains { $0.contains("apiKey") && $0.contains("keyFilePath") })
     }
 
+    func testEmbeddedSherpaModelsJSON() throws {
+        let supportsSherpa = try TtsClient.listEngines().contains { $0.id == "sherpaonnx" }
+        guard supportsSherpa else {
+            XCTAssertThrowsError(try TtsClient.sherpaModelsJSON()) { error in
+                let ttsError = error as? TtsError
+                XCTAssertEqual(ttsError?.code, TtsErrorCode.engineNotAvailable.rawValue)
+                XCTAssertEqual(ttsError?.engineId, "sherpaonnx")
+            }
+            return
+        }
+
+        let json = try TtsClient.sherpaModelsJSON()
+        let registry = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: [String: Any]])
+        let model = try XCTUnwrap(registry["inflect-en-nano-v2"])
+        XCTAssertEqual(model["id"] as? String, "inflect-en-nano-v2")
+        XCTAssertEqual(model["license"] as? String, "Apache-2.0")
+        XCTAssertNotNil(model["sha256"] as? String)
+        XCTAssertNotNil(model["url"] as? String)
+    }
+
     // --- GH #69: structured errors + tri-state credentials -------------
 
     func testCreateFailureCarriesEngineNotAvailable() {

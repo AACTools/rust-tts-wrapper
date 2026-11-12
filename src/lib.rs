@@ -1455,8 +1455,8 @@ pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_ch
     .unwrap_or(ptr::null_mut())
 }
 
-/// Free a string returned by [`tts_get_last_error_detail_json`] or
-/// [`tts_get_engine_setups_json`].
+/// Free a string returned by [`tts_get_last_error_detail_json`],
+/// [`tts_get_engine_setups_json`], or [`tts_get_sherpa_models_json`].
 ///
 /// # Safety
 ///
@@ -1483,6 +1483,43 @@ pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let json = crate::engine_schema::engine_setups_json();
         CString::new(json).map_or(ptr::null_mut(), CString::into_raw)
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
+///
+/// This uses the build's bundled registry snapshot and requires no engine or network
+/// connection. Caller must free the returned string with [`tts_free_string`].
+/// Returns null on failure, including builds without the `sherpaonnx` feature.
+/// Read the global error with [`tts_get_last_error_detail_json`] and a null context.
+#[no_mangle]
+pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(feature = "sherpaonnx")]
+        {
+            let Ok(json) = CString::new(sherpa_onnx_models::MODELS_JSON) else {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::EngineFailure,
+                    Some("sherpaonnx"),
+                    None,
+                    "The embedded Sherpa-ONNX model registry contains an invalid NUL byte",
+                ));
+                return ptr::null_mut();
+            };
+            json.into_raw()
+        }
+
+        #[cfg(not(feature = "sherpaonnx"))]
+        {
+            set_error_detail(ErrorDetail::new(
+                TtsErrorCode::EngineNotAvailable,
+                Some("sherpaonnx"),
+                None,
+                "The Sherpa-ONNX model registry requires the sherpaonnx feature",
+            ));
+            ptr::null_mut()
+        }
     }))
     .unwrap_or(ptr::null_mut())
 }
@@ -1612,6 +1649,34 @@ pub extern "C" fn tts_synth_to_bytes(
     out_bytes: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
+    synth_to_buffer(ctx, text, out_bytes, out_len, false)
+}
+
+/// Synthesize text to a playable WAV file without starting playback.
+/// Supported by cloud and Sherpa-ONNX engines. Writes a heap-allocated
+/// buffer to `*out_bytes` and its length to `*out_len`.
+/// Caller must free with [`tts_free_bytes`].
+/// Returns 0 on success, -1 on failure.
+///
+/// # Safety
+/// `ctx` must be valid. `out_bytes` and `out_len` must be non-null.
+#[no_mangle]
+pub extern "C" fn tts_synth_to_wav(
+    ctx: *mut tts_ctx,
+    text: *const c_char,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    synth_to_buffer(ctx, text, out_bytes, out_len, true)
+}
+
+fn synth_to_buffer(
+    ctx: *mut tts_ctx,
+    text: *const c_char,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+    wav: bool,
+) -> i32 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if ctx.is_null() || text.is_null() || out_bytes.is_null() || out_len.is_null() {
             return -1;
@@ -1639,7 +1704,12 @@ pub extern "C" fn tts_synth_to_bytes(
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let engine = &ctx_ref.engine;
-        match engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume) {
+        let result = if wav {
+            engine.synth_to_wav(&text_str, voice.as_deref(), rate, pitch, volume)
+        } else {
+            engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume)
+        };
+        match result {
             Ok(data) => {
                 if data.is_empty() {
                     unsafe {
@@ -1673,10 +1743,10 @@ pub extern "C" fn tts_synth_to_bytes(
     .unwrap_or(-1)
 }
 
-/// Free a byte buffer returned by [`tts_synth_to_bytes`].
+/// Free a buffer returned by [`tts_synth_to_bytes`] or [`tts_synth_to_wav`].
 ///
 /// # Safety
-/// `bytes` must be from `tts_synth_to_bytes` with the matching `len`.
+/// `bytes` must be from one of these functions with the matching `len`.
 #[no_mangle]
 pub extern "C" fn tts_free_bytes(bytes: *mut u8, len: usize) {
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

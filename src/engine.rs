@@ -1,6 +1,6 @@
 //! Core TTS engine trait.
 
-use crate::types::{SpeakOptions, TtsResult, Voice, WordBoundary};
+use crate::types::{SpeakOptions, TtsError, TtsResult, Voice, WordBoundary};
 use std::fmt;
 
 /// Callback for streaming audio chunks.
@@ -183,6 +183,40 @@ fn extract_name_attr(tag: &str) -> Option<String> {
     None
 }
 
+/// Encode an utterance as 16-bit mono PCM in a RIFF/WAVE container.
+#[cfg(any(feature = "cloud", feature = "sherpaonnx"))]
+pub(crate) fn pcm16_mono_to_wav(pcm: &[u8], sample_rate: Option<u32>) -> TtsResult<Vec<u8>> {
+    let byte_rate = sample_rate
+        .filter(|rate| *rate > 0)
+        .and_then(|rate| rate.checked_mul(2))
+        .ok_or_else(|| TtsError("Synthesis did not report a valid audio sample rate".into()))?;
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
+        return Err(TtsError(
+            "Synthesis did not return complete PCM16 samples".into(),
+        ));
+    }
+    let data_len = u32::try_from(pcm.len())
+        .ok()
+        .filter(|len| *len <= u32::MAX - 36)
+        .ok_or_else(|| TtsError("Synthesized audio exceeds the WAV size limit".into()))?;
+
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&(byte_rate / 2).to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block alignment
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    Ok(wav)
+}
+
 /// Trait that every TTS engine must implement.
 ///
 /// Mirrors Swift's `TTSClient` protocol.
@@ -314,6 +348,23 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
             None,
         )?;
         Ok(buf)
+    }
+
+    /// Synthesize a complete WAV file without starting playback.
+    ///
+    /// Engines that can report the actual audio format override this method.
+    fn synth_to_wav(
+        &self,
+        _text: &str,
+        _voice: Option<&str>,
+        _rate: f32,
+        _pitch: f32,
+        _volume: f32,
+    ) -> TtsResult<Vec<u8>> {
+        Err(TtsError(format!(
+            "WAV synthesis is not supported by engine '{}'",
+            self.engine_id()
+        )))
     }
 
     /// Synthesize with [`SpeakOptions`].

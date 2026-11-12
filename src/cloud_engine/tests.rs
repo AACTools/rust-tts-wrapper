@@ -49,7 +49,7 @@ impl std::io::Read for DribbleReader {
 pub(crate) fn streaming_decode_matches_buffered_decode() {
     let mp3 = make_silent_mp3(20);
     // Reference: whole-buffer mono decode.
-    let expected = decode_mp3_to_pcm16_mono(&mp3);
+    let (expected, decoded_rate) = decode_mp3_to_pcm16_mono(&mp3);
     assert!(!expected.is_empty(), "reference decode produced audio");
 
     let reader = DribbleReader {
@@ -59,13 +59,15 @@ pub(crate) fn streaming_decode_matches_buffered_decode() {
     };
     let mut collected: Vec<u8> = Vec::new();
     let mut deliveries = 0usize;
-    let total = stream_body_to_on_audio(reader, false, 24_000, None, &mut |ev| {
+    let (total, sample_rate) = stream_body_to_on_audio(reader, false, 24_000, None, &mut |ev| {
         if let StreamEvt::Audio(chunk) = ev {
             collected.extend_from_slice(chunk);
             deliveries += 1;
         }
     })
     .expect("stream");
+    assert_eq!(sample_rate, Some(44_100));
+    assert_eq!(sample_rate, decoded_rate);
     assert_eq!(total, collected.len());
     assert_eq!(collected, expected, "byte-identical to buffered decode");
     assert!(deliveries > 1, "expected incremental delivery");
@@ -80,12 +82,13 @@ pub(crate) fn streaming_pcm_passthrough_preserves_bytes() {
         piece: 4096,
     };
     let mut collected: Vec<u8> = Vec::new();
-    let total = stream_body_to_on_audio(reader, true, 24_000, None, &mut |ev| {
+    let (total, sample_rate) = stream_body_to_on_audio(reader, true, 24_000, None, &mut |ev| {
         if let StreamEvt::Audio(chunk) = ev {
             collected.extend_from_slice(chunk);
         }
     })
     .expect("stream");
+    assert_eq!(sample_rate, Some(24_000));
     assert_eq!(total, pcm.len());
     assert_eq!(collected, pcm);
 }
@@ -1613,9 +1616,9 @@ pub(crate) fn test_looks_like_mp3_raw_pcm_is_false() {
 #[test]
 pub(crate) fn test_decode_mp3_garbage_returns_empty_without_panicking() {
     // Empty / non-MP3 input must not panic and must yield no PCM.
-    assert_eq!(decode_mp3_to_pcm16_mono(&[]).first(), None);
+    assert_eq!(decode_mp3_to_pcm16_mono(&[]).0.first(), None);
     assert_eq!(
-        decode_mp3_to_pcm16_mono(b"definitely not mp3").first(),
+        decode_mp3_to_pcm16_mono(b"definitely not mp3").0.first(),
         None
     );
 }
@@ -2456,8 +2459,9 @@ pub(crate) fn test_gemini_wav_decode_roundtrip() {
     // Real decode path: a valid WAV fixture must survive
     // symphonia → PCM16 (regression guard for the wav/pcm features).
     let samples: Vec<i16> = (0..480).map(|i| (i * 37 % 3000) as i16).collect();
-    let wav = tiny_wav(&samples, 24_000);
-    let pcm = decode_audio_to_pcm16_mono(&wav, "wav");
+    let wav = tiny_wav(&samples, 44_100);
+    let (pcm, sample_rate) = decode_audio_to_pcm16_mono(&wav, "wav");
+    assert_eq!(sample_rate, Some(44_100));
     assert_eq!(pcm.len(), samples.len() * 2, "16-bit mono out");
     for (i, s) in samples.iter().enumerate() {
         let out = i16::from_le_bytes([pcm[i * 2], pcm[i * 2 + 1]]);
