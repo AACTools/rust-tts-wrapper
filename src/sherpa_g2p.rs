@@ -180,42 +180,35 @@ impl G2pFrontend {
         for sentence in split_sentences(text) {
             let mut codepoints: Vec<i32> = Vec::new();
             for token in sentence.split_whitespace() {
-                // digit expansion tests the WORD CORE (punctuation
-                // stays attached: "42." expands to "zweiundvierzig."
-                // so the pause token survives — testing the raw token
-                // made sentence-final numbers speak English letter
-                // names via the rule fallback)
-                // digit expansion tests the WORD CORE (punctuation
-                // stays attached: "42." expands to "zweiundvierzig."
-                // so the pause token survives). Covers decimals
-                // ("1,5"), strict thousands ("3.500") and
-                // 0..=999_999_999; anything else the normalizer
-                // rejects DROPS with a count — never the English rule
-                // fallback (the loop reviews caught both, live)
+                // Numeric tokens (#82 loop reviews, live-verified): a
+                // token whose word CORE STARTS with a digit must expand
+                // to German or DROP — never reach the fallback chain,
+                // which spells alphanumeric junk in ENGLISH ("1e9" →
+                // "wʌniːnaɪn"). Covered: plain/strict-thousands/
+                // decimal numerals (digits_to_german) and
+                // digits+alphabetic-suffix forms ("1920er" → the
+                // German number + "er", a normal word for the
+                // dictionary/WFST). Letter-leading mixes ("b2b") stay
+                // ordinary words. Leading zeros collapse ("007" →
+                // "sieben") — accepted for quantities, noted for codes.
                 let expanded: String;
-                let token = match floravox_g2p::word_core(token).and_then(|core| {
-                    if core.chars().any(|c| c.is_ascii_digit())
-                        && core
-                            .chars()
-                            .all(|c| c.is_ascii_digit() || c == ',' || c == '.')
-                    {
-                        digits_to_german(core)
-                    } else {
-                        None
-                    }
-                }) {
-                    Some(german) => {
+                let token = {
+                    let core = floravox_g2p::word_core(token).unwrap_or_default();
+                    if core.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                        let Some(german) =
+                            digits_to_german(core).or_else(|| digits_plus_suffix(core))
+                        else {
+                            // unhandled numeric ("1e9", ">999_999_999",
+                            // malformed separators): drop, counted
+                            dropped += 1;
+                            words += 1;
+                            continue;
+                        };
                         expanded = reattach_punct(token, &german);
                         expanded.as_str()
+                    } else {
+                        token
                     }
-                    None if looks_numeric(token) => {
-                        // numeric but unhandled (e.g. >999_999_999,
-                        // malformed separators): drop, counted
-                        dropped += 1;
-                        words += 1;
-                        continue;
-                    }
-                    None => token,
                 };
                 words += 1;
                 // NFC first (decomposed input composes to the key form),
@@ -284,20 +277,6 @@ fn reattach_punct(original: &str, expanded_core: &str) -> String {
     out
 }
 
-/// Does this token look numeric enough that the normalizer SHOULD have
-/// handled it? (digits with , . separators and edge punctuation) — used
-/// to drop unhandled numerics with a count instead of spelling them.
-fn looks_numeric(token: &str) -> bool {
-    let core: Vec<char> = token.chars().skip_while(|c| !c.is_ascii_digit()).collect();
-    let trimmed: String = core
-        .into_iter()
-        .take_while(|c| c.is_ascii_digit() || matches!(c, ',' | '.'))
-        .collect();
-    !trimmed.is_empty()
-        && trimmed.chars().next().is_some_and(|c| c.is_ascii_digit())
-        && trimmed.chars().filter(char::is_ascii_digit).count() >= 2
-}
-
 /// Split text into sentences on the #4075 delimiter set (`. ! ? ; :`
 /// plus newlines), with two refinements: a `.` BETWEEN digits is a
 /// decimal/thousands separator, not a sentence end ("1.5", "3.500"),
@@ -346,16 +325,18 @@ fn split_sentences(text: &str) -> Vec<String> {
 /// letting the rule fallback spell English letter names into a German
 /// stream (the loop-2 review caught exactly that, live).
 fn digits_to_german(token: &str) -> Option<String> {
-    // decimal form: integer part, comma, digits ("1,5" / "1,58")
+    // decimal form: integer part (optionally thousands-dotted, strict
+    // groups — the canonical German money shape "3.500,50"), comma,
+    // digits ("1,5" / "1,58" / "3.500,50")
     if let Some((int_part, frac)) = token.split_once(',') {
-        let valid = !frac.is_empty()
-            && frac.chars().all(|c| c.is_ascii_digit())
-            && !int_part.is_empty()
-            && int_part.chars().all(|c| c.is_ascii_digit());
-        if !valid {
+        let frac_ok = !frac.is_empty() && frac.chars().all(|c| c.is_ascii_digit());
+        let int_ok = !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit() || c == '.')
+            && digits_to_german(int_part).is_some();
+        if !frac_ok || !int_ok {
             return None;
         }
-        let mut out = integer_to_german(int_part)?;
+        let mut out = digits_to_german(int_part)?;
         out.push_str("komma");
         for c in frac.chars() {
             out.push_str(&integer_to_german(&c.to_string())?);
@@ -388,6 +369,31 @@ fn digits_to_german(token: &str) -> Option<String> {
     }
     let plain: String = token.chars().filter(|c| *c != '.').collect();
     integer_to_german(&plain)
+}
+
+/// Digits + a short alphabetic suffix ("1920er", "50er", "1ste"):
+/// expand the numeric part and keep the suffix, producing a normal
+/// alphabetic word ("neunzehnhundertzwanziger") that the dictionary
+/// or WFST pronounces German-ly. `None` when the shape does not match
+/// (mixed alphanumerics like "1e9" — those drop).
+fn digits_plus_suffix(core: &str) -> Option<String> {
+    let idx = core
+        .char_indices()
+        .find(|(_, c)| c.is_ascii_alphabetic())
+        .map(|(i, _)| i)
+        .filter(|&i| i > 0)?;
+    let (num, suffix) = core.split_at(idx);
+    // suffix: short and purely alphabetic ("er", "ste"); the numeric
+    // part must be a valid numeral in its own right. "1e9" fails here
+    // (suffix "e9" is not alphabetic) and drops upstream.
+    if suffix.len() > 4 || !suffix.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(format!(
+        "{}{}",
+        digits_to_german(num)?,
+        suffix.to_lowercase()
+    ))
 }
 
 /// 0..=999_999_999 in German words (thousands dots stripped by the
@@ -767,6 +773,83 @@ mod tests {
         };
         assert!(matches!(err, FrontendError::MultiCharVocabulary(_)));
         assert!(err.to_string().contains("multi-character"));
+    }
+
+    #[test]
+    fn numeric_boundary_never_reaches_the_english_fallback() {
+        let d = |t: &str| digits_to_german(t).expect("in range");
+        // the canonical German money format composes: thousands dots
+        // + Komma decimals
+        // post-comma digits read INDIVIDUALLY (German convention)
+        assert_eq!(d("3.500,50"), "dreitausendfünfhundertkommafünfnull");
+        assert_eq!(d("0,5"), "nullkommafünf");
+        // digits + short alphabetic suffix → a normal German word
+        assert_eq!(
+            digits_plus_suffix("1920er").map(|w| w.contains("er")),
+            Some(true)
+        );
+        // the FULL quantity form is used ("eintausendneunhundert…"),
+        // not the idiomatic year form ("neunzehnhundert…") — never
+        // wrong, just formal; year idioms are a Phase 4 corpus question
+        assert_eq!(
+            digits_plus_suffix("1920er"),
+            Some("eintausendneunhundertzwanziger".to_string())
+        );
+        // mixed alphanumerics and out-of-range numerals are None → drop
+        assert!(digits_to_german("1e9").is_none());
+        assert!(digits_plus_suffix("1e9").is_none()); // "e9" is not a suffix
+        assert!(digits_to_german("1000000000").is_none());
+        // leading zeros collapse (documented: fine for quantities)
+        assert_eq!(d("007"), "sieben");
+    }
+
+    #[test]
+    fn phonemize_drops_unhandled_numerics_and_expands_suffix_forms() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        // the mini dictionary gains the suffix-expanded word
+        floravox_g2p::LexiconWriter::new(dir.join("mini"))
+            .write(vec![
+                ("haus".into(), "h aʊ̯ s".into()),
+                ("tag".into(), "t aː k".into()),
+                ("zweiundvierzig".into(), "ts v aɪ̯ ç ɪ ç".into()),
+                ("eintausendneunhundertzwanziger".into(), "n o ʏ n".into()),
+                (
+                    "dreitausendfünfhundertkommafünfnull".into(),
+                    "d ʁ aɪ".into(),
+                ),
+            ])
+            .expect("write mini lexicon");
+        let tokens = mini_tokens(&dir);
+        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+
+        // "1920er" expands then resolves via the dictionary
+        let r = fe.phonemize("Haus 1920er Tag");
+        assert_eq!((r.words, r.dropped), (3, 0));
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        assert!(
+            sentence.contains('ʏ') || sentence.contains('ɔ'),
+            "{sentence}"
+        );
+
+        // money format speaks
+        let r = fe.phonemize("Haus 3.500,50 Tag");
+        assert_eq!(r.dropped, 0, "money format must speak");
+
+        // "1e9" drops with a count — never English phones
+        let r = fe.phonemize("Haus 1e9 Tag");
+        assert_eq!(r.dropped, 1);
+        assert_eq!(r.sentences.len(), 1);
+
+        // letter-leading digit mixes stay on the WORD path (never the
+        // numeric-drop path): with the real bundle the WFST pronounces
+        // them; in this WFST-less fixture the rule fallback may spell
+        // them — either way the sentence survives
+        let r = fe.phonemize("Haus b2b Tag");
+        assert_eq!(r.sentences.len(), 1);
+        assert!(!r.sentences[0].is_empty());
     }
 
     #[test]

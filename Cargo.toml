@@ -212,8 +212,6 @@ cbindgen = "0.29"
 
 [dev-dependencies]
 tempfile = "3"
-# live-test manifest staging (the German G2P test reads the bundle sha)
-serde_json = "1"
 
 [profile.release]
 lto = true
