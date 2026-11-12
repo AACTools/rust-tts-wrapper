@@ -69,26 +69,44 @@ fn model_present(id: &str) -> bool {
 //   SHERPA_DE_BUNDLE_DIR=/path/to/voicegarden-lexicons/de \
 //   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- --ignored german
 
-#[cfg(feature = "sherpa-g2p")]
+#[cfg(all(unix, feature = "sherpa-g2p"))]
 #[test]
-#[ignore = "live: needs thorsten model + de bundle (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR)"]
+#[ignore = "live: needs thorsten model + de bundle + manifest (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR, SHERPA_DE_MANIFEST)"]
 fn vits_piper_german_g2p_synthesizes() {
     use std::path::PathBuf;
-    let (Some(model_dir), Some(bundle_dir)) = (
+    let (Some(model_dir), Some(bundle_dir), Some(manifest)) = (
         std::env::var_os("SHERPA_DE_MODEL_DIR").map(PathBuf::from),
         std::env::var_os("SHERPA_DE_BUNDLE_DIR").map(PathBuf::from),
+        std::env::var_os("SHERPA_DE_MANIFEST").map(PathBuf::from),
     ) else {
-        eprintln!("skipping: SHERPA_DE_MODEL_DIR / SHERPA_DE_BUNDLE_DIR not set");
+        eprintln!(
+            "skipping: SHERPA_DE_MODEL_DIR / SHERPA_DE_BUNDLE_DIR / SHERPA_DE_MANIFEST not set"
+        );
         return;
     };
     assert!(model_dir.join("tokens.txt").is_file(), "model dir");
     assert!(bundle_dir.join("de.fst").is_file(), "bundle dir");
 
-    // stage a provisioned cache (stamp + symlink) so no network is hit
+    // stage a provisioned cache: the manifest + the de bundle with the
+    // REAL sha stamp (the engine's provisioning verifies stamp ==
+    // manifest sha, so a placeholder would trigger a network fetch)
+    let de_sha: String = {
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        m["languages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["lang"] == "de")
+            .and_then(|l| l["sha256"].as_str())
+            .expect("de entry in the manifest")
+            .to_string()
+    };
     let cache = tempfile::tempdir().unwrap();
+    std::fs::copy(&manifest, cache.path().join("lexicons.json")).unwrap();
     let bundle_cache = cache.path().join("de");
     std::os::unix::fs::symlink(&bundle_dir, &bundle_cache).unwrap();
-    std::fs::write(bundle_cache.join(".sha256"), b"test-stamp").unwrap();
+    std::fs::write(bundle_cache.join(".sha256"), de_sha.as_bytes()).unwrap();
     // stage the model under its registry id name
     let parent = cache.path().join("models");
     std::fs::create_dir_all(&parent).unwrap();

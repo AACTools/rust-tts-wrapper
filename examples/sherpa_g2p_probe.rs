@@ -51,34 +51,38 @@ fn main() {
     println!("text:   {text}");
 
     // ── A: lexicon front-end (converted lexicon.txt beside the model) ──
-    match ensure_compat_lexicon_from(
+    let a_lexicon = match ensure_compat_lexicon_from(
         &model_dir,
         &bundle_dir.join("lexicon.txt"),
         &out_dir,
         "probe",
     ) {
-        Ok(Some(res)) => println!(
-            "A: generated compat lexicon — {} entries ({} skipped) at {}",
-            res.written,
-            res.skipped,
-            res.path.display()
-        ),
-        Ok(None) => println!("A: model dir already has a lexicon"),
+        Ok(Some(res)) => {
+            println!(
+                "A: generated compat lexicon — {} entries ({} skipped) at {}",
+                res.written,
+                res.skipped,
+                res.path.display()
+            );
+            res.path
+        }
+        Ok(None) => {
+            println!("A: model dir already has a lexicon");
+            model_dir.join("lexicon.txt")
+        }
         Err(e) => {
             eprintln!("A: lexicon generation failed: {e}");
             std::process::exit(1);
         }
-    }
-    let wav = synthesize(
-        &model,
-        &tokens,
-        Some(model_dir.join("lexicon.txt")),
-        &text,
-        None,
-    );
+    };
+    let (wav, rate) = synthesize(&model, &tokens, Some(a_lexicon), &text, None);
     let a_path = out_dir.join("ab_text.wav");
-    write_wav(&a_path, &wav, 22_050);
-    println!("A: {} ({} samples)", a_path.display(), wav.len());
+    write_wav(&a_path, &wav, rate);
+    println!(
+        "A: {} ({} samples @ {rate} Hz)",
+        a_path.display(),
+        wav.len()
+    );
 
     // ── B: wrapper G2P → phoneme_codepoints ──
     let mut frontend = G2pFrontend::open(&bundle_dir, "de", &tokens).expect("G2P front-end");
@@ -101,10 +105,14 @@ fn main() {
     }
     std::fs::write(out_dir.join("ab_codepoints.txt"), &stream).expect("write stream");
 
-    let wav = synthesize(&model, &tokens, None, "", Some(result.sentences));
+    let (wav, rate) = synthesize(&model, &tokens, None, "", Some(result.sentences));
     let b_path = out_dir.join("ab_codepoints.wav");
-    write_wav(&b_path, &wav, 22_050);
-    println!("B: {} ({} samples)", b_path.display(), wav.len());
+    write_wav(&b_path, &wav, rate);
+    println!(
+        "B: {} ({} samples @ {rate} Hz)",
+        b_path.display(),
+        wav.len()
+    );
 
     println!("\nListen to both; they should sound equivalent (B may differ slightly on OOV words — it SPEAKS them, A drops them).");
 }
@@ -117,13 +125,14 @@ fn find_onnx(dir: &Path) -> Option<PathBuf> {
         .find(|p| p.extension().is_some_and(|e| e == "onnx"))
 }
 
+/// Returns `(samples, sample_rate)` — the rate comes from the model.
 fn synthesize(
     model: &Path,
     tokens: &Path,
     lexicon: Option<PathBuf>,
     text: &str,
     codepoints: Option<Vec<Vec<i32>>>,
-) -> Vec<f32> {
+) -> (Vec<f32>, i32) {
     let config = sherpa_onnx::OfflineTtsConfig {
         model: sherpa_onnx::OfflineTtsModelConfig {
             vits: sherpa_onnx::OfflineTtsVitsModelConfig {
@@ -146,13 +155,14 @@ fn synthesize(
     let audio = tts
         .generate_with_config(text, &gen, None::<&mut dyn FnMut(&[f32], f32) -> bool>)
         .expect("audio");
-    audio.samples().to_vec()
+    (audio.samples().to_vec(), audio.sample_rate())
 }
 
 /// Minimal 16-bit mono WAV writer (the probe's output shape).
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) {
+fn write_wav(path: &Path, samples: &[f32], sample_rate: i32) {
     use std::io::Write as _;
+    let sample_rate = sample_rate.max(1) as u32; // wav header is u32
     let mut pcm = Vec::with_capacity(samples.len() * 2);
     for s in samples {
         // clamped to ±1 first, so the truncating cast only rounds

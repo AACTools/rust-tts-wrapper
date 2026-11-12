@@ -77,7 +77,8 @@ rustc-link-lib = [
 TOML
 
 export IPHONEOS_DEPLOYMENT_TARGET=${IPHONEOS_DEPLOYMENT_TARGET:-15.0}
-# sherpa-g2p (#82): non-English piper G2P front-end (see
-# scripts/apple/build-xcframework.sh for the note)
+# sherpa-g2p (#82): non-English piper G2P front-end. NOTE: floravox-g2p
+# 0.8.8 pulls ort unconditionally — see the caution in
+# scripts/apple/build-xcframework.sh before merging Phase 3.
 cargo rustc --config "$scratch/sherpa.toml" --target "$target" "$@" \
   --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --crate-type staticlib

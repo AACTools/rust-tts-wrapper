@@ -72,11 +72,14 @@ omnivoice-local = ["dep:hound", "ssml-expand"]
 sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization"]
 # #82 wrapper-side G2P front-end for non-English piper (the
 # phoneme_codepoints path): voicegarden bundle fetch + FST chain.
-# Deliberately independent of floravox-lexicons (no Floravox engine,
-# no second ONNX runtime — floravox-g2p is FST-only here). The
-# `floravox-g2p/misaki` feature is its minimum compilable surface
-# (0.8.8's lib.rs references misaki unconditionally); the misaki G2P
-# itself is never invoked by this path.
+# Independent of floravox-lexicons (no Floravox engine). CAUTION: the
+# published floravox-g2p 0.8.8 (newest on crates.io) pulls ort
+# UNCONDITIONALLY as a target dep — a second ONNX runtime ships beside
+# sherpa-onnx-sys's on Apple staticlib builds. The XCFramework build
+# must be validated on a Mac BEFORE merging Phase 3 (tracked in the PR
+# checklist); the misaki feature is 0.8.8's minimum compilable surface
+# (its lib.rs references misaki unconditionally) and is never invoked
+# by this path.
 sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p", "floravox-g2p/misaki"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
@@ -209,6 +212,8 @@ cbindgen = "0.29"
 
 [dev-dependencies]
 tempfile = "3"
+# live-test manifest staging (the German G2P test reads the bundle sha)
+serde_json = "1"
 
 [profile.release]
 lto = true

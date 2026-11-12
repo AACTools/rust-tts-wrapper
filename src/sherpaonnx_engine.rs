@@ -132,10 +132,14 @@ pub struct SherpaOnnxEngine {
     /// retryable, but not re-attempted on every utterance while offline.
     #[cfg(feature = "sherpa-g2p")]
     g2p_last_attempt: Mutex<Option<std::time::Instant>>,
-    /// One-shot latch for G2P front-end failure logs (same anti-spam
-    /// rule as `compat_log_once`).
+    /// One-shot latches for the two DISTINCT G2P failure conditions
+    /// (a shared latch would silence the second after the first fired).
     #[cfg(feature = "sherpa-g2p")]
-    g2p_log_once: std::sync::atomic::AtomicBool,
+    g2p_provision_fail_logged: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "sherpa-g2p")]
+    g2p_all_dropped_logged: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "sherpa-g2p")]
+    g2p_dropped_words_logged: std::sync::atomic::AtomicBool,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -285,7 +289,11 @@ impl SherpaOnnxEngine {
             #[cfg(feature = "sherpa-g2p")]
             g2p_last_attempt: Mutex::new(None),
             #[cfg(feature = "sherpa-g2p")]
-            g2p_log_once: std::sync::atomic::AtomicBool::new(false),
+            g2p_provision_fail_logged: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "sherpa-g2p")]
+            g2p_all_dropped_logged: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "sherpa-g2p")]
+            g2p_dropped_words_logged: std::sync::atomic::AtomicBool::new(false),
             tts_instance: Mutex::new(None),
         }
     }
@@ -340,7 +348,7 @@ impl SherpaOnnxEngine {
                     *g2p = Some(fe);
                 }
                 Err(e) => {
-                    if !self.g2p_log_once.swap(true, Ordering::Relaxed) {
+                    if !self.g2p_provision_fail_logged.swap(true, Ordering::Relaxed) {
                         eprintln!(
                             "sherpa: G2P front-end unavailable for '{}' (bundle '{}'): {e} \
                              — retrying on a later utterance; the text path is used meanwhile",
@@ -354,7 +362,9 @@ impl SherpaOnnxEngine {
         let fe = g2p.as_mut().expect("just initialised");
         match fe.phonemize(text) {
             r if !r.sentences.is_empty() => {
-                if r.dropped > 0 {
+                // latched: a permanently unmappable word would log on
+                // every utterance otherwise (the codebase's once rule)
+                if r.dropped > 0 && !self.g2p_dropped_words_logged.swap(true, Ordering::Relaxed) {
                     eprintln!(
                         "sherpa: G2P dropped {}/{} words (unmappable after OOV fallback)",
                         r.dropped, r.words
@@ -366,7 +376,7 @@ impl SherpaOnnxEngine {
                 // everything dropped (or empty text): sherpa treats
                 // empty codepoints as "use the text argument", so fall
                 // back explicitly — do not synthesize silence
-                if r.dropped > 0 && !self.g2p_log_once.swap(true, Ordering::Relaxed) {
+                if r.dropped > 0 && !self.g2p_all_dropped_logged.swap(true, Ordering::Relaxed) {
                     eprintln!(
                         "sherpa: G2P dropped every word ({}/{}); using the text path",
                         r.dropped, r.words
@@ -805,8 +815,9 @@ impl SherpaOnnxEngine {
                 speed: rate.max(0.1),
                 // #82: pre-phonemized input replaces the text path when
                 // the front-end produced sentences (mutually exclusive
-                // with `text` at the sherpa level)
-                phoneme_codepoints: phoneme_codepoints.clone(),
+                // with `text` at the sherpa level); moved in — tts_text
+                // captured is_some() already
+                phoneme_codepoints,
                 ..Default::default()
             }
         };

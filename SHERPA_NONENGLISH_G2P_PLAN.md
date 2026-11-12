@@ -281,19 +281,34 @@ New `src/sherpa_g2p.rs` (feature `sherpa-g2p`), mirroring
   The WFST opens LAZILY on the first dictionary miss — its cost is
   bundle-dependent (see the bake-off numbers below) and is not paid for
   dictionary-only sentences on iOS.
-- **Provisioning, not first-speak fetching**: the bundle is fetched and
-  checksum-verified during model setup (engine construction with the model
-  present / the model-download flow), so the first utterance works offline.
-  A failed fetch must be RETRYABLE — do not cache the failure (the
-  `OnceLock<Option<…>>` pattern in `floravox_engine` caches a miss forever;
-  store the state so the next construction retries) — and construction
-  fails soft to the plain text path with a logged reason.
+- **Provisioning, not first-speak fetching** — **implemented with a
+  deviation**: provisioning runs at the FIRST synthesize, not in the
+  constructor (constructors stay I/O-free — a stronger invariant than
+  "fetch at setup"; there is no model-setup hook on this engine). The
+  fetch (13–19 MB, crate-side 30 s connect timeout, no read timeout)
+  happens off the audio path only in the sense that it precedes the
+  tts lock; a slow fetch delays the first utterance. Failures are
+  RETRYABLE (throttled to one attempt/minute; no cached misses) and
+  the utterance falls back to the text path — for an espeak-orphaned
+  model offline that means the pre-#82 behavior (no audio), not a
+  regression. Pre-seeding the cache (`VOICEGARDEN_LEXICON_DIR` + the
+  `.sha256` stamp matching the manifest) makes the first utterance
+  fully offline; the stamp check verifies content against the
+  manifest sha, so stale bundles refresh.
+- The WFST opens LAZILY on the first dictionary miss — its cost is
+  bundle-dependent (see the bake-off numbers below) and is not paid for
+  dictionary-only sentences on iOS.
 - **Lookup normalization** mirrors sherpa's post-#4075 `NormalizeLexiconKey`:
   NFC → Unicode lowercase → NFC. Measured: all bundle keys are already
   lowercase (`Haus` is stored `haus`), so lowercased queries match directly;
   NFC composes decomposed input the same way sherpa now does.
 - **Sentence splitting** on `. ! ? ; :` and newlines (#4075's set) —
-  each sentence becomes one `Vec<i32>`.
+  each sentence becomes one `Vec<i32>`. Punctuation flattening note:
+  floravox's `punct_phonemes` maps `!?`→`.` and `;:`→`,` (the piper
+  pause convention), while sherpa's lexicon path emits `!?;:` literally
+  when the vocabulary carries them (thorsten's does). Whether literal
+  passthrough sounds better is a Phase 4 ear-check decision; the
+  current flattening is deliberate and tested.
 - **Validation**: every mapped symbol must be a single Unicode codepoint
   present in `tokens.txt` (the codepoint path cannot address multi-char
   tokens). Any failure → the model uses the plain-text path with a loud
@@ -422,9 +437,16 @@ floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
   (line 19) and `scripts/build-ios-sherpa.sh` (line 81) change to
   `--features cloud,sherpaonnx,sherpa-g2p`. Check `.github/workflows` and
   `Package.swift` for any other place the Apple feature set is spelled out.
-- `floravox-g2p` WITHOUT the `onnx` feature — FST lexicon + Phonetisaurus
-  only, no second ONNX runtime in the binary (the macOS CoreML/BNNS clash
-  noted in Cargo.toml).
+- ~~`floravox-g2p` WITHOUT the `onnx` feature — no second ONNX
+  runtime~~ **corrected by implementation**: floravox-g2p 0.8.8 (the
+  newest published version) depends on ort UNCONDITIONALLY as a target
+  dependency — the `onnx` feature only toggles its byt5 module. A
+  second ONNX runtime therefore ships beside sherpa-onnx-sys's in
+  static builds (Apple `--crate-type staticlib`). Until a
+  floravox-g2p release makes ort optional, the Apple XCFramework build
+  (link, binary size, duplicate onnxruntime symbols) is a REQUIRED
+  Mac validation before Phase 3 merges — the macOS CoreML/BNNS clash
+  documented in this repo's Cargo.toml is exactly the risk.
 - `voicegarden-lexicons` vendors its own older `floravox-g2p`; only paths
   cross that boundary (same note as `floravox_engine.rs`).
 

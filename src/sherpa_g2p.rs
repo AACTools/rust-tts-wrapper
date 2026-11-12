@@ -42,9 +42,7 @@ use crate::sherpa_lexicon::{read_tokens_txt_public, VocabPhonemeMap};
 /// utterances that never meet an OOV word.
 struct LazyWfst {
     path: PathBuf,
-    /// Mutex (not OnceLock's shared ref): the OovFallback trait hands
-    /// out &mut, and the lock is uncontended in practice (OOV is rare).
-    state: OnceLock<std::sync::Mutex<WfstState>>,
+    state: OnceLock<WfstState>,
 }
 
 enum WfstState {
@@ -65,14 +63,16 @@ impl LazyWfst {
 
 impl OovFallback for LazyWfst {
     fn fallback(&mut self, word: &str) -> Vec<String> {
-        let state = self.state.get_or_init(|| {
-            std::sync::Mutex::new(match PhonetisaurusG2p::open(&self.path) {
+        if self.state.get().is_none() {
+            let _ = self.state.set(match PhonetisaurusG2p::open(&self.path) {
                 Ok(g) => WfstState::Loaded(g),
                 Err(_) => WfstState::Failed(RuleFallback::default()),
-            })
-        });
-        let mut guard = state.lock().unwrap();
-        match &mut *guard {
+            });
+        }
+        // &mut self ⇒ get_mut is lock-free (the Mutex is only needed
+        // if the state were shared; it is not — this keeps OnceLock's
+        // poisoning semantics out of the OOV path)
+        match self.state.get_mut().expect("just initialised") {
             WfstState::Loaded(g) => g.fallback(word),
             WfstState::Failed(r) => r.fallback(word),
         }
@@ -180,12 +180,20 @@ impl G2pFrontend {
         for sentence in split_sentences(text) {
             let mut codepoints: Vec<i32> = Vec::new();
             for token in sentence.split_whitespace() {
+                // digit expansion tests the WORD CORE (punctuation
+                // stays attached: "42." expands to "zweiundvierzig."
+                // so the pause token survives — testing the raw token
+                // made sentence-final numbers speak English letter
+                // names via the rule fallback)
                 let expanded: String;
-                let token = if token.chars().all(|c| c.is_ascii_digit()) && !token.is_empty() {
-                    expanded = digits_to_german(token);
-                    expanded.as_str()
-                } else {
-                    token
+                let token = match floravox_g2p::word_core(token)
+                    .filter(|core| !core.is_empty() && core.chars().all(|c| c.is_ascii_digit()))
+                {
+                    Some(core) => {
+                        expanded = reattach_punct(token, &digits_to_german(core));
+                        expanded.as_str()
+                    }
+                    None => token,
                 };
                 words += 1;
                 // NFC first (decomposed input composes to the key form),
@@ -230,6 +238,24 @@ impl G2pFrontend {
             dropped,
         }
     }
+}
+
+/// Rebuild a token around an expanded core: the non-alphanumeric edges
+/// of the original (the punctuation `word_core` stripped) are reattached
+/// so `punct_phonemes` still sees them ("42." → "zweiundvierzig.").
+fn reattach_punct(original: &str, expanded_core: &str) -> String {
+    let chars: Vec<char> = original.chars().collect();
+    let first = chars.iter().position(|c| c.is_alphanumeric());
+    let last = chars.iter().rposition(|c| c.is_alphanumeric());
+    let mut out = String::with_capacity(expanded_core.len() + 4);
+    if let (Some(f), Some(l)) = (first, last) {
+        out.extend(chars[..f].iter());
+        out.push_str(expanded_core);
+        out.extend(chars[l + 1..].iter());
+    } else {
+        out.push_str(expanded_core);
+    }
+    out
 }
 
 /// Split text into sentences on the #4075 delimiter set (`. ! ? ; :`
@@ -359,39 +385,55 @@ fn under_hundred(
 // Provisioning (model setup time; never inside the audio path)
 // ──────────────────────────────────────────────────────────────────
 
-/// Is the bundle for `key` already provisioned in the lexicon cache?
-/// The crate's own cache-hit contract: the `.sha256` stamp plus both
-/// FST halves present under `<cache>/<key>/` (both archives cache
-/// flat in the pinned crate).
-#[must_use]
-pub fn provisioned_bundle_dir(key: &str) -> Option<PathBuf> {
-    let dir = voicegarden_lexicons::default_cache_dir().join(key);
-    let stamp_ok = std::fs::read_to_string(dir.join(".sha256")).is_ok();
-    let fst_ok = dir.join(format!("{key}.fst")).exists();
-    let pho_ok = dir.join(format!("{key}.pho")).exists();
-    (stamp_ok && fst_ok && pho_ok).then_some(dir)
-}
-
-/// Provision (fetch when not cached) the bundle named by an allowlist
-/// row: construct EXACTLY the row's archive — the crate matches
-/// entries on `lang`/`bcp47`, so the expanded archive asked for "de"
-/// would silently resolve `deu` (the Phase 1 archive trap). Fetch
-/// verifies the manifest sha256 against the downloaded bytes and
-/// re-uses the cache on subsequent calls.
+/// Provision (fetch when stale or absent) the bundle named by an
+/// allowlist row. The cache check mirrors the crate's own contract
+/// EXACTLY: the `.sha256` stamp must match the manifest's sha (not
+/// merely exist — a stale bundle from an older release must refresh),
+/// plus both FST halves present under `<cache>/<key>/` (both archives
+/// cache flat in the pinned crate). Constructs EXACTLY the row's
+/// archive — the crate matches entries on `lang`/`bcp47`, so the
+/// expanded archive asked for "de" would silently resolve `deu` (the
+/// Phase 1 archive trap); with the pinned archive, a wrong key is an
+/// error, not a wrong bundle.
+///
+/// The archive's manifest itself is network-fetched once and then
+/// cached at `<cache>/lexicons.json` (offline installs fall back to
+/// that file), so an offline machine with a provisioned bundle never
+/// touches the network here.
 ///
 /// # Errors
 /// A one-line message (network, checksum, manifest); the engine logs
 /// it once and retries on a later utterance (throttled).
 pub fn provision_bundle(archive: Archive, key: &str) -> Result<PathBuf, String> {
-    if let Some(dir) = provisioned_bundle_dir(key) {
-        return Ok(dir);
-    }
-    let fetched = match archive {
+    let pinned = match archive {
         Archive::Base => voicegarden_lexicons::LexiconArchive::default_archive(),
         Archive::Expanded => voicegarden_lexicons::LexiconArchive::default_expanded(),
     }
     .map_err(|e| format!("lexicon archive: {e}"))?;
-    let bundle = fetched
+    provision_from(&pinned, &voicegarden_lexicons::default_cache_dir(), key)
+}
+
+/// The cache-hit / fetch decision against an explicit archive + cache
+/// (tests drive this with a local-dir base so the whole decision is
+/// provable offline).
+fn provision_from(
+    pinned: &voicegarden_lexicons::LexiconArchive,
+    cache: &std::path::Path,
+    key: &str,
+) -> Result<PathBuf, String> {
+    let entry = pinned
+        .entry(key)
+        .ok_or_else(|| format!("no '{key}' bundle in the archive manifest"))?;
+    let dir = cache.join(key);
+    let stamp_matches =
+        std::fs::read_to_string(dir.join(".sha256")).ok().as_deref() == Some(entry.sha256.as_str());
+    if stamp_matches
+        && dir.join(format!("{key}.fst")).exists()
+        && dir.join(format!("{key}.pho")).exists()
+    {
+        return Ok(dir);
+    }
+    let bundle = pinned
         .fetch(key)
         .map_err(|e| format!("fetching bundle '{key}': {e}"))?;
     Ok(bundle.dir)
@@ -508,7 +550,7 @@ mod tests {
     }
 
     #[test]
-    fn frontend_expands_digit_tokens() {
+    fn frontend_expands_digit_tokens_with_attached_punctuation() {
         let dir = tempfile::tempdir().unwrap().keep();
         mini_bundle(&dir);
         let tokens = mini_tokens(&dir);
@@ -517,12 +559,27 @@ mod tests {
         // 42 → zweiundvierzig (in the mini dictionary)
         let r = fe.phonemize("42");
         assert_eq!(r.dropped, 0);
-        assert_eq!(r.sentences.len(), 1);
         let sentence: String = r.sentences[0]
             .iter()
-            .map(|&cp| char::from_u32(cp as u32).unwrap())
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
             .collect();
         assert!(sentence.contains('ç'), "zweiundvierzig phones: {sentence}");
+
+        // "42." — the word CORE expands, the pause token survives, and
+        // the sentence-final digits never reach the English rule
+        // fallback (the bug the loop-1 review caught live). Mini-dict
+        // words only ("Antwort" is not in the mini lexicon).
+        let r = fe.phonemize("Haus 42.");
+        assert_eq!(r.dropped, 0, "every word resolves");
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        assert!(
+            sentence.contains('ç'),
+            "digits spoken in German: {sentence}"
+        );
+        assert!(sentence.ends_with('.'), "pause token survives: {sentence}");
     }
 
     #[test]
@@ -534,11 +591,17 @@ mod tests {
             .expect("write mini lexicon");
         let tokens = mini_tokens(&dir);
         let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
-        // decomposed input (s c h o + U+0308 n) composes to the key form
+        // decomposed input (s c h o + U+0308 n) composes to the key
+        // form — assert the STREAM, not just the drop count (the rule
+        // fallback also yields zero drops; the stream pins rule 1)
         let decomposed = "scho\u{0308}n";
         assert_ne!(decomposed, "schön"); // sanity: really decomposed
         let r = fe.phonemize(decomposed);
-        assert_eq!(r.dropped, 0, "decomposed input must compose and resolve");
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        assert_eq!(sentence, "ʃe\u{02D0}n");
     }
 
     #[test]
@@ -555,21 +618,37 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_stamp_check_requires_the_full_contract() {
+    fn provisioning_stamp_must_match_the_manifest_sha() {
+        // a local-dir archive base with a mini manifest: cache hits and
+        // stale-stamp refreshes are provable offline (no tarball is
+        // staged, so any fetch attempt fails loudly)
+        let base = tempfile::tempdir().unwrap().keep();
         let cache = tempfile::tempdir().unwrap().keep();
-        std::env::set_var("VOICEGARDEN_LEXICON_DIR", &cache);
-        // nothing → not provisioned
-        assert!(provisioned_bundle_dir("de").is_none());
-        // fst+pho but no stamp → not provisioned (the crate would
-        // re-download; so must we)
-        std::fs::create_dir_all(cache.join("de")).unwrap();
-        std::fs::write(cache.join("de").join("de.fst"), b"x").unwrap();
-        std::fs::write(cache.join("de").join("de.pho"), b"x").unwrap();
-        assert!(provisioned_bundle_dir("de").is_none());
-        // stamp completes the contract
-        std::fs::write(cache.join("de").join(".sha256"), b"abc").unwrap();
-        assert!(provisioned_bundle_dir("de").is_some());
-        std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
+        std::fs::write(
+            base.join("lexicons.json"),
+            r#"{"version":"t","languages":[{"lang":"de","name":"German","bcp47":"de",
+                "entries":1,"license":"MIT","source":"t","phonetisaurus":null,
+                "file":"de.tar.gz","sha256":"abc123"}]}"#,
+        )
+        .unwrap();
+        let base_str = base.display().to_string();
+        let archive = voicegarden_lexicons::LexiconArchive::new(base_str, &cache).expect("archive");
+
+        // wrong sha → refresh attempt → fetch fails (no tarball) → Err
+        let dir = cache.join("de");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("de.fst"), b"x").unwrap();
+        std::fs::write(dir.join("de.pho"), b"x").unwrap();
+        std::fs::write(dir.join(".sha256"), b"stale").unwrap();
+        assert!(
+            provision_from(&archive, &cache, "de").is_err(),
+            "stale stamp must refresh"
+        );
+
+        // matching sha + halves → cache hit with NO tarball present
+        std::fs::write(dir.join(".sha256"), b"abc123").unwrap();
+        let got = provision_from(&archive, &cache, "de").expect("cache hit");
+        assert_eq!(got, dir);
     }
 
     // ── real-bundle coverage (env-gated, like Phase 2's) ──
