@@ -1497,17 +1497,17 @@ pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
 pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(feature = "sherpaonnx")]
-        match CString::new(sherpa_onnx_models::MODELS_JSON) {
-            Ok(json) => json.into_raw(),
-            Err(_) => {
+        {
+            let Ok(json) = CString::new(sherpa_onnx_models::MODELS_JSON) else {
                 set_error_detail(ErrorDetail::new(
                     TtsErrorCode::EngineFailure,
                     Some("sherpaonnx"),
                     None,
                     "The embedded Sherpa-ONNX model registry contains an invalid NUL byte",
                 ));
-                ptr::null_mut()
-            }
+                return ptr::null_mut();
+            };
+            json.into_raw()
         }
 
         #[cfg(not(feature = "sherpaonnx"))]
