@@ -14,6 +14,7 @@ on:
       - extern/**
       - include/**
       - scripts/apple/**
+      - scripts/build-ios-sherpa.sh
       - src/**
 
 permissions:

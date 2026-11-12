@@ -29,6 +29,7 @@ import RustTtsWrapper
 
 let engines = try TtsClient.listEngines()
 precondition(engines.contains { $0.id == "openai" })
+precondition(engines.contains { $0.id == "sherpaonnx" })
 let client = try TtsClient(
     engineId: "openai",
     credentials: ["apiKey": "local-smoke-key"]

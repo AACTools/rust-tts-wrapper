@@ -40,6 +40,9 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("Accelerate"),
+                .linkedFramework("CoreFoundation"),
+                .linkedFramework("CoreML"),
+                .linkedFramework("Foundation"),
                 .linkedLibrary("c++")
             ]
         ),

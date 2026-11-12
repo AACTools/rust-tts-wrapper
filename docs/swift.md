@@ -5,7 +5,7 @@ Add the `RustTtsWrapper` product from
 Use a release tag that includes `RustTtsNative.xcframework.zip`.
 The Swift package supports macOS 13 and iOS 16 or later. The XCFramework
 includes Apple Silicon and Intel slices for macOS and iOS Simulator,
-and an arm64 slice for iOS devices.
+and an arm64 slice for iOS devices. It includes cloud providers and Sherpa-ONNX.
 
 ```swift
 import RustTtsWrapper

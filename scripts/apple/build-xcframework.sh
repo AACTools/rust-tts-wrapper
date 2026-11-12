@@ -16,11 +16,11 @@ targets=(
 )
 
 rustup target add "${targets[@]}"
-cargo_targets=()
-for target in "${targets[@]}"; do
-    cargo_targets+=(--target "$target")
+cargo build --release --no-default-features --features cloud,sherpaonnx \
+    --target aarch64-apple-darwin --target x86_64-apple-darwin
+for target in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+    scripts/build-ios-sherpa.sh "$target" release
 done
-cargo build --release --no-default-features --features cloud "${cargo_targets[@]}"
 
 scripts/apple/package-xcframework.sh target/apple \
     target/aarch64-apple-darwin/release/librust_tts_wrapper.a \
