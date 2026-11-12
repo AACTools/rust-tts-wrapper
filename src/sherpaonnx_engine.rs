@@ -119,6 +119,10 @@ pub struct SherpaOnnxEngine {
     /// generated lexicons when the model dir is read-only (iOS app
     /// bundles). Defaults to the model root.
     lexicon_cache: Option<PathBuf>,
+    /// One-shot latch for compat-generation failure logs: the synthesize
+    /// hook re-fires per utterance and a misprovisioned setup never
+    /// self-heals, so warn once per engine instance instead of spamming.
+    compat_log_once: std::sync::atomic::AtomicBool,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -262,6 +266,7 @@ impl SherpaOnnxEngine {
             reference_text,
             lexicon_compat,
             lexicon_cache,
+            compat_log_once: std::sync::atomic::AtomicBool::new(false),
             tts_instance: Mutex::new(None),
         }
     }
@@ -513,11 +518,29 @@ impl SherpaOnnxEngine {
                             compat_lexicon_path = Some(res.path);
                         }
                     }
-                    Ok(None) => {}
-                    Err(e) => eprintln!(
-                        "sherpa: compat lexicon generation failed for '{}': {e}",
-                        self.loaded_model_id
-                    ),
+                    // None here means the bundle is not cached (the
+                    // model dir had no lexicon and has tokens.txt, both
+                    // pre-checked): warn ONCE — the hook re-fires every
+                    // utterance and this never self-heals
+                    Ok(None) => {
+                        if !self.compat_log_once.swap(true, Ordering::Relaxed) {
+                            eprintln!(
+                                "sherpa: lexiconCompat: bundle '{}' not found in the \
+                                 lexicon cache — skipped. Provision the bundle or set \
+                                 VOICEGARDEN_LEXICON_DIR (fetching arrives with the \
+                                 sherpa-g2p feature, plan Phase 3).",
+                                bundle.key
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !self.compat_log_once.swap(true, Ordering::Relaxed) {
+                            eprintln!(
+                                "sherpa: compat lexicon generation failed for '{}': {e}",
+                                self.loaded_model_id
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1273,9 +1296,13 @@ fn should_auto_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool 
 
 /// Should the lexiconCompat generation run for this model? (#82 Phase 2)
 /// Allowlisted non-English VITS/piper-family models only — same family
-/// rule as the English auto path's vits branch. `lang_bundle` is whether
-/// the model's language resolved to an allowlist row (the caller has the
-/// registry metadata; this fn stays pure for the registry test).
+/// rule as the English auto path's vits branch. `"mms"` is deliberately
+/// absent: MMS models ship their own lexicon (the has-lexicon check
+/// short-circuits anyway) and the registry has no German MMS entry; if
+/// one ever appears, decide here rather than letting it silently skip.
+/// `lang_bundle` is whether the model's language resolved to an
+/// allowlist row (the caller has the registry metadata; this fn stays
+/// pure for the registry test).
 fn should_compat_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool {
     match model_type {
         "vits" | "unknown" | "" => {
@@ -3014,6 +3041,16 @@ mod tests {
         assert_eq!(parts.len(), 2, "{joined}");
         assert!(parts.contains(&d.join("lexicon.txt").to_str().unwrap()));
         assert!(parts.contains(&extra.to_str().unwrap()));
+        // sorted deterministically regardless of readdir order
+        let mut sorted = parts.clone();
+        sorted.sort_unstable();
+        assert_eq!(parts, sorted, "{joined}");
+
+        // dedup: extra pointing at the in-model lexicon collapses to one
+        let same = d.join("lexicon.txt");
+        let cfg = build_vits_config(&d, true, false, Some(&same));
+        let joined = cfg.lexicon.expect("present");
+        assert_eq!(joined.split(',').count(), 1, "{joined}");
     }
 
     #[test]

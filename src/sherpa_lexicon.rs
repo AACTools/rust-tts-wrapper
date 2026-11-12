@@ -218,25 +218,29 @@ fn homoglyph_sub(s: &str) -> String {
 
 /// A bundle phone symbol → model-token-sequence mapper driven entirely
 /// by the target vocabulary: no per-language tables. The ladder, per
-/// symbol (SHERPA_NONENGLISH_G2P_PLAN.md Phase 2, rules 1–8):
+/// symbol (SHERPA_NONENGLISH_G2P_PLAN.md Phase 2, rules 1–9; every
+/// candidate validates against the vocabulary before emitting, segments
+/// resolve recursively, resolutions are memoized):
 ///
 /// 1. NFC → exact vocabulary match (identity);
 /// 2. homoglyph substitution (`g` → `ɡ`), identity retry;
 /// 3. tie bars: the tie-stripped whole (`p͡f` → `pf`) if it is a token,
 ///    else split at the tie bars and resolve each segment recursively
 ///    (`p͡f` → `p` `f`; `t͡s̯` → `t` `s` via the segment ladder);
-/// 4. trailing length mark split (`uː` → `u` `ː`), base resolved
-///    recursively;
-/// 5. strip one strippable diacritic and recurse (offglide breve before
+/// 4. trailing length-mark split (`uː` → `u` `ː`; `kˑ` → `k` `ˑ`),
+///    base resolved recursively;
+/// 5. stress marks (checked before the diacritic strips so an in-vocab
+///    composite like `ˈs̯` keeps its parts): bare marks absent from the
+///    vocabulary map to nothing (dropped); stress-prefixed symbols
+///    retry without the prefix and KEEP the mark when the vocabulary
+///    carries it;
+/// 6. strip one strippable diacritic and recurse (offglide breve before
 ///    the rare ones);
-/// 6. NFD: precomposed letters (`ã ä ü õ`) decompose to base + combining
-///    mark; drop the combining marks and retry (`äː` → `a` `ː`);
-/// 7. stress marks: bare marks absent from the vocabulary map to nothing
-///    (dropped); stress-prefixed symbols retry without the prefix;
+/// 7. NFD: precomposed letters (`ã ä ü õ`) decompose to base + combining
+///    mark; drop the marks and retry (`äː` → `a` `ː`);
 /// 8. character split as the last resort (`aʊ̯` → `a` `ʊ` after the
 ///    breve strip);
-///
-/// Returns `None` when unmappable — the caller skips the word / entry.
+/// 9. else `None` — unmappable (the caller skips the word / entry).
 ///
 /// Resolutions are memoized per symbol: a lexicon repeats symbols
 /// heavily (92,996 `g`s), and the ladder allocates.
@@ -734,13 +738,8 @@ pub fn ensure_compat_lexicon(
     model_id: &str,
 ) -> Result<Option<CompatLexiconResult>, LexiconGenError> {
     let Some(bundle_lexicon) = discover_bundle_lexicon(bundle_key) else {
-        // an opted-in user must not get silence: say what is missing and
-        // where the bundle is expected (fetching arrives with the
-        // sherpa-g2p feature, plan Phase 3 — provisioning for now)
-        eprintln!(
-            "sherpa: lexiconCompat: bundle '{bundle_key}' not found in the lexicon cache — \
-             skipped. Provision the bundle or set VOICEGARDEN_LEXICON_DIR."
-        );
+        // silent here: the ENGINE logs this once (an opted-in user gets
+        // one clear line, not one per utterance — it never self-heals)
         return Ok(None);
     };
     ensure_compat_lexicon_from(model_dir, &bundle_lexicon, fallback_root, model_id)
@@ -777,8 +776,6 @@ pub fn ensure_compat_lexicon_from(
         return Ok(None);
     }
 
-    let mut map = VocabPhonemeMap::for_language(&tokens_path)?;
-
     // write into the model dir when possible, else the fallback dir
     // (a lexicon outside the model dir must be passed to the config
     // explicitly — it is not discovered automatically)
@@ -800,7 +797,8 @@ pub fn ensure_compat_lexicon_from(
     // the engine calls this on EVERY synthesize until the model dir has
     // its own lexicon: a read-only model dir lands here repeatedly, and
     // must reuse the fallback-dir lexicon instead of re-converting the
-    // whole bundle per utterance
+    // whole bundle per utterance (checked before the vocabulary parse —
+    // the reuse path should cost one stat, nothing else)
     let existing = target_dir.join("lexicon.txt");
     if existing.is_file() {
         return Ok(Some(CompatLexiconResult {
@@ -810,6 +808,8 @@ pub fn ensure_compat_lexicon_from(
             reused: true,
         }));
     }
+
+    let mut map = VocabPhonemeMap::for_language(&tokens_path)?;
 
     let n = COMPAT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = target_dir.join(format!("lexicon.txt.{}.{}.tmp", std::process::id(), n));
@@ -1218,7 +1218,8 @@ mod tests {
             "a", // vowels
             "b", "d", "f", "h", "j", "k", "l", "m", "n", "p", "s", "t", "v", "x",
             "z", // consonants
-            "\u{0261}", "ʁ", "ʃ", "ʒ", "ç", "ŋ", "ɲ", "ʔ", "\u{02D0}", // ɡ (IPA), ː
+            "\u{0261}", "ʁ", "ʃ", "ʒ", "ç", "ŋ", "ɲ", "ʔ", "\u{02D0}",
+            "\u{02D1}", // ɡ, ː, ˑ
         ];
         let dir = tempfile::tempdir().unwrap().keep();
         let mut s = String::new();
@@ -1274,6 +1275,27 @@ mod tests {
         // rule 7: stress IS in this vocab → kept; bare stress in a
         // vocab without it → dropped (checked in the next test)
         assert_eq!(map.map_symbol("\u{02C8}").unwrap(), vec!["\u{02C8}"]);
+        // rule 1 (NFC): decomposed input composes to the precomposed
+        // vocab entry when one exists (distinguishes rule 1's NFC from
+        // rule 7's strip — which yields the bare base instead)
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join("tokens.txt"), "\u{00E3} 0\nb 1\n").unwrap();
+        let mut m = VocabPhonemeMap::for_language(&dir.join("tokens.txt")).unwrap();
+        assert_eq!(m.map_symbol("a\u{0303}").unwrap(), vec!["\u{00E3}"]);
+        // rule 4: half-long (ˑ IS in the thorsten vocab — 28 deu
+        // occurrences attach to consonants and vowels)
+        assert_eq!(map.map_symbol("k\u{02D1}").unwrap(), vec!["k", "\u{02D1}"]);
+        // rule 6, rare marks: syllabic, voiceless, nasalized, lowered,
+        // dental, raised, pre-aspirated (≤60 occurrences each in deu)
+        assert_eq!(map.map_symbol("z\u{0329}").unwrap(), vec!["z"]);
+        assert_eq!(map.map_symbol("n\u{0329}").unwrap(), vec!["n"]);
+        assert_eq!(map.map_symbol("o\u{0303}").unwrap(), vec!["o"]);
+        assert_eq!(map.map_symbol("o\u{031E}").unwrap(), vec!["o"]);
+        assert_eq!(map.map_symbol("t\u{032A}").unwrap(), vec!["t"]);
+        assert_eq!(map.map_symbol("s\u{031D}").unwrap(), vec!["s"]);
+        assert_eq!(map.map_symbol("a\u{02C0}").unwrap(), vec!["a"]);
+        // rule 6, the second tie bar (U+035C, 2 occurrences in deu)
+        assert_eq!(map.map_symbol("t\u{035C}s").unwrap(), vec!["t", "s"]);
         // rule 8 / unmappable: ɝ (English rhotic, the one deu loanword)
         assert!(map.map_symbol("\u{025D}").is_none());
         // memoization: repeated symbols resolve consistently
