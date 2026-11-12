@@ -16,6 +16,8 @@ across feature combos).
   - floravox v0.8.10 tagged; **publish workflow blocked by GitHub
     Actions billing** — rerun the Publish run after fixing billing
 - Phase 3 (Hume): not started
+- Non-English Piper G2P (#82): planned — see
+  [SHERPA_NONENGLISH_G2P_PLAN.md](SHERPA_NONENGLISH_G2P_PLAN.md)
 
 ## Phase 0 — investigation (DONE, findings below)
 
