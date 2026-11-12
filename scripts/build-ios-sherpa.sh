@@ -25,7 +25,7 @@ onnx_sha=2c2299acbb461d26d4bac4bc85985d40e7c7177ed6072703ae0846d88b0b4599
 cache="${CARGO_TARGET_DIR:-target}/sherpa-ios-$sherpa_version-onnx-$onnx_version"
 mkdir -p "$cache"
 cache=$(cd "$cache" && pwd)
-lib_dir="$cache/$target"
+lib_dir="$cache/$target-thin"
 scratch=$(mktemp -d "$cache/.prepare.XXXXXX")
 trap 'rm -rf "$scratch"' EXIT
 
@@ -43,11 +43,12 @@ download() {
 
 thin_archive() {
   local source=$1 output=$2
-  if [[ $(xcrun lipo -archs "$source") == "$arch" ]]; then
-    cp "$source" "$output"
-  else
-    xcrun lipo "$source" -thin "$arch" -output "$output"
-  fi
+  # Even a one-architecture device library can use the fat container format.
+  # Rust needs a plain archive to bundle the native objects into a staticlib.
+  case "$(LC_ALL=C xcrun lipo -info "$source")" in
+    "Non-fat file:"*) cp "$source" "$output" ;;
+    *) xcrun lipo "$source" -thin "$arch" -output "$output" ;;
+  esac
 }
 
 if [[ ! -f "$lib_dir/libsherpa-onnx-c-api.a" || ! -f "$lib_dir/libonnxruntime.a" ]]; then
