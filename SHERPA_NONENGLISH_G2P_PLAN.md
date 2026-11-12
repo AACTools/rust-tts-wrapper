@@ -91,7 +91,7 @@ Insertion point: `SherpaOnnxEngine::synthesize`
 streaming and ~728 file paths). When the front-end is active for the loaded
 model, it produces the codepoints and the call sites pass `""` as the text
 argument — do NOT rebind `text` itself: both `EstimatePlan::build(text)`
-sites (streaming ~645, and non-streaming ~744, which runs AFTER generate)
+sites (streaming ~608, and non-streaming ~744, which runs AFTER generate)
 must keep the ORIGINAL text. They are WPM estimates over words and do not
 depend on the phoneme stream.
 
@@ -214,8 +214,18 @@ when the `sherpa-g2p` front-end is available it is always used):
   Without the feature: discovery only, no download (today's behaviour).
 - Extend `should_auto_generate_lexicon`: allowlisted non-English VITS/piper
   models qualify for generation (English rules unchanged, still
-  pairs-gated). Note the German path needs NO pairs table — gruut-de IS the
-  model's training convention; the pairs requirement stays English-only.
+  pairs-gated). The German path needs NO pairs table — the operational
+  basis is the probe's result, not convention identity: gruut-de is
+  *close to* but demonstrably not identical to thorsten's encoding
+  (mechanical normalization — tie bars, length marks, ASCII `g` —
+  converted 277,912/277,912 entries), so conversion always runs and is
+  always asserted; the pairs requirement stays English-only.
+- **Update `test_lexicon_gate_against_full_registry`
+  (`src/sherpaonnx_engine.rs:1699`)**: it asserts
+  `!gated || is_english_model_id(&lower)` and pins per-family gated counts
+  (piper 132, …). Extending the gate to allowlisted German models breaks
+  both — deliberately: relax the invariant to "English or allowlisted"
+  and re-pin the counts in the same PR.
 - Read-only model dirs (iOS bundles): when the model dir is not writable,
   generate into `<cache_root>/lexicons-gen/<model_id>/lexicon.txt` and add
   that path to `collect_lexicons` for the config. New credentials key
@@ -252,11 +262,18 @@ New `src/sherpa_g2p.rs` (feature `sherpa-g2p`), mirroring
   tokens). Any failure → the model uses the plain-text path with a loud
   one-line warning (for an espeak-orphaned model that means silence) and
   the log points at the `lexiconCompat` option — never silent garbling.
+  Edge case to name in the code comment: if EVERY sentence phonemizes to
+  empty (all words dropped), sherpa silently ignores empty codepoints
+  (crate `tts.rs:629` guards `has_codepoints` on non-empty vectors) and
+  synthesizes the empty text — surfacing as the existing "returned no
+  audio" error, not a sherpa bug.
 - **Unmappable/OOV-after-WFST words**: dropped with an `eprintln!` + a
   counter surfaced in stats; never abort the sentence.
-- **Hook**: in `synthesize`, when the loaded model is allowlisted and the
-  feature is on and the chain loaded: phonemize → set
-  `gen_config.phoneme_codepoints` → pass `""` as text to both
+- **Hook**: in `synthesize`, when the loaded model has an allowlist row
+  (row PRESENCE activates Path B; `validated` gates only download
+  surfacing, not the front-end — otherwise Phases 3–4 could not be tested
+  end-to-end) and the feature is on and the chain loaded: phonemize → set
+  `gen_config.phoneme_codepoints` → pass `""` as text at both
   `generate_with_config` call sites. Everything downstream (streaming
   delivery, prosody, boundary estimates, cancellation) is untouched.
 - **German digits**: minimal normalizer (`3` → `drei` …) applied to tokens
@@ -324,8 +341,11 @@ pattern):
   both German bundle download steps beside the eng-US ones. Pre-seed the
   CRATE's own cache layout — `~/.voicegarden/lexicons/de/` (base) and
   `~/.voicegarden/lexicons/expanded/deu/` (expanded subdir, matching the
-  existing `expanded/eng-US` layout) — so the live tests exercise the
-  real `fetch` path and find the bundles cached instead of re-downloading.
+  existing `expanded/eng-US` layout) — AND write each dir's `.sha256`
+  stamp with the manifest sha (`add4f489…` for de, `880f03da…` for deu):
+  the crate's cache hit requires the stamp plus the `fst`/`pho` files, so
+  without it `fetch` re-downloads 13–19 MB every run. With it, the live
+  tests exercise the real `fetch` path and find the bundles cached.
 - iOS: extend `tests/ios_sherpa_smoke.c` — front-end on, WFST forced to
   load (one OOV sentence), assert audio and no crash.
 - Measure OOV rate on a German corpus (e.g. 50k Wikipedia words) with the
