@@ -123,6 +123,19 @@ pub struct SherpaOnnxEngine {
     /// hook re-fires per utterance and a misprovisioned setup never
     /// self-heals, so warn once per engine instance instead of spamming.
     compat_log_once: std::sync::atomic::AtomicBool,
+    /// The #82 wrapper-side G2P front-end for this model (feature
+    /// `sherpa-g2p`): built once after the bundle provisions, reused
+    /// across utterances (word cache + memoized symbol ladder).
+    #[cfg(feature = "sherpa-g2p")]
+    g2p: Mutex<Option<crate::sherpa_g2p::G2pFrontend>>,
+    /// Throttle for bundle-provisioning retries: a failed fetch must be
+    /// retryable, but not re-attempted on every utterance while offline.
+    #[cfg(feature = "sherpa-g2p")]
+    g2p_last_attempt: Mutex<Option<std::time::Instant>>,
+    /// One-shot latch for G2P front-end failure logs (same anti-spam
+    /// rule as `compat_log_once`).
+    #[cfg(feature = "sherpa-g2p")]
+    g2p_log_once: std::sync::atomic::AtomicBool,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -267,6 +280,12 @@ impl SherpaOnnxEngine {
             lexicon_compat,
             lexicon_cache,
             compat_log_once: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "sherpa-g2p")]
+            g2p: Mutex::new(None),
+            #[cfg(feature = "sherpa-g2p")]
+            g2p_last_attempt: Mutex::new(None),
+            #[cfg(feature = "sherpa-g2p")]
+            g2p_log_once: std::sync::atomic::AtomicBool::new(false),
             tts_instance: Mutex::new(None),
         }
     }
@@ -274,6 +293,88 @@ impl SherpaOnnxEngine {
     /// Return the map of available models from the registry.
     pub fn available_models(&self) -> &HashMap<String, SherpaModelInfo> {
         &self.models
+    }
+
+    /// Phonemize `text` for the loaded model via the wrapper-side G2P
+    /// front-end (#82, feature `sherpa-g2p`). Returns per-sentence
+    /// codepoint streams for `GenerationConfig::phoneme_codepoints`, or
+    /// `None` when the front-end does not apply (no allowlist row, wrong
+    /// family, provisioning failed, or nothing survived mapping — then
+    /// the plain-text path runs and its own logs say why, once).
+    ///
+    /// Provisioning (bundle fetch, sha256-verified) happens here, not in
+    /// the constructor: constructors stay I/O-free, and a failed fetch
+    /// is retried on a later utterance, throttled to one attempt per
+    /// minute.
+    #[cfg(feature = "sherpa-g2p")]
+    fn phonemize_for_model(
+        &self,
+        model_dir: &std::path::Path,
+        model_info: &SherpaModelInfo,
+        text: &str,
+    ) -> Option<Vec<Vec<i32>>> {
+        let id_lower = model_info.id.to_ascii_lowercase();
+        if !should_compat_generate_lexicon(&model_info.model_type, &id_lower) {
+            return None; // same family gate: vits/piper-family only
+        }
+        let bundle = crate::sherpa_lang::default_bundle_for_model(model_info)?;
+
+        // build the front-end once; reuse on every utterance after
+        let mut g2p = self.g2p.lock().unwrap();
+        if g2p.is_none() {
+            let last = *self.g2p_last_attempt.lock().unwrap();
+            let throttled = last.is_some_and(|t| t.elapsed().as_secs() < 60);
+            if throttled {
+                return None;
+            }
+            *self.g2p_last_attempt.lock().unwrap() = Some(std::time::Instant::now());
+            match crate::sherpa_g2p::provision_bundle(bundle.archive, bundle.key).and_then(|dir| {
+                crate::sherpa_g2p::G2pFrontend::open(
+                    &dir,
+                    bundle.key,
+                    &model_dir.join("tokens.txt"),
+                )
+                .map_err(|e| e.to_string())
+            }) {
+                Ok(fe) => {
+                    *g2p = Some(fe);
+                }
+                Err(e) => {
+                    if !self.g2p_log_once.swap(true, Ordering::Relaxed) {
+                        eprintln!(
+                            "sherpa: G2P front-end unavailable for '{}' (bundle '{}'): {e} \
+                             — retrying on a later utterance; the text path is used meanwhile",
+                            model_info.id, bundle.key
+                        );
+                    }
+                    return None;
+                }
+            }
+        }
+        let fe = g2p.as_mut().expect("just initialised");
+        match fe.phonemize(text) {
+            r if !r.sentences.is_empty() => {
+                if r.dropped > 0 {
+                    eprintln!(
+                        "sherpa: G2P dropped {}/{} words (unmappable after OOV fallback)",
+                        r.dropped, r.words
+                    );
+                }
+                Some(r.sentences)
+            }
+            r => {
+                // everything dropped (or empty text): sherpa treats
+                // empty codepoints as "use the text argument", so fall
+                // back explicitly — do not synthesize silence
+                if r.dropped > 0 && !self.g2p_log_once.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "sherpa: G2P dropped every word ({}/{}); using the text path",
+                        r.dropped, r.words
+                    );
+                }
+                None
+            }
+        }
     }
 
     /// Resolve the reference clip for zero-shot cloning models: the
@@ -618,6 +719,25 @@ impl SherpaOnnxEngine {
             }
         };
 
+        // #82 Phase 3: the wrapper-side G2P front-end (feature
+        // `sherpa-g2p`). When active, sherpa receives per-sentence
+        // phoneme codepoints instead of text — OOV words are spoken via
+        // the bundle's Phonetisaurus model instead of dropped. The
+        // plain-text path (and the compat lexicon above) remain the
+        // behavior when the feature is off or the front-end is
+        // unavailable.
+        #[cfg(feature = "sherpa-g2p")]
+        let phoneme_codepoints = self.phonemize_for_model(&model_dir, model_info, text);
+        #[cfg(not(feature = "sherpa-g2p"))]
+        let phoneme_codepoints: Option<Vec<Vec<i32>>> = None;
+        // codepoints replace the text argument (crate contract); the
+        // ORIGINAL text stays bound for both EstimatePlan::build sites
+        let tts_text = if phoneme_codepoints.is_some() {
+            ""
+        } else {
+            text
+        };
+
         let config = sherpa_onnx::OfflineTtsConfig {
             model: model_config,
             // Single-sentence mode matches the reference implementations and
@@ -683,6 +803,10 @@ impl SherpaOnnxEngine {
             sherpa_onnx::GenerationConfig {
                 sid,
                 speed: rate.max(0.1),
+                // #82: pre-phonemized input replaces the text path when
+                // the front-end produced sentences (mutually exclusive
+                // with `text` at the sherpa level)
+                phoneme_codepoints: phoneme_codepoints.clone(),
                 ..Default::default()
             }
         };
@@ -802,7 +926,8 @@ impl SherpaOnnxEngine {
                 }
                 !CANCEL_REQUESTED.load(Ordering::SeqCst)
             };
-            let result = tts.generate_with_config(text, &gen_config, Some(deliver_batch.clone()));
+            let result =
+                tts.generate_with_config(tts_text, &gen_config, Some(deliver_batch.clone()));
             // Kitten returns audio without invoking the progress callback.
             // Deliver that audio once, unless streaming or cancellation
             // already took place. The same delivery path applies prosody
@@ -839,7 +964,7 @@ impl SherpaOnnxEngine {
         } else {
             let audio = tts
                 .generate_with_config(
-                    text,
+                    tts_text,
                     &gen_config,
                     Some(|_s: &[f32], _p: f32| -> bool {
                         !CANCEL_REQUESTED.load(Ordering::SeqCst)

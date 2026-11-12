@@ -258,6 +258,20 @@ when the `sherpa-g2p` front-end is available it is always used):
 
 ### Phase 3 — Path B: the phonemize front-end
 
+**Implemented.** Contract pinned from sherpa-onnx 2.0.1's
+`PiperPhonemesToIdsVits`: the caller supplies the BARE phoneme stream
+per sentence — words joined by literal space codepoints, punctuation
+as its own token (`,`/`.`/`-`, the piper pause convention); BOS/EOS
+and pad interleaving are added by sherpa itself, and unknown
+codepoints are skipped inside sherpa with a log — which is why every
+emitted symbol is validated single-codepoint AND in `tokens.txt`
+before it can reach the stream. The A/B probe
+(`examples/sherpa_g2p_probe.rs`) ran against the real thorsten model:
+the lexicon path DROPPED `zweiundvierzig` (`OOV word skipped`) while
+the codepoints path SPOKE it via the WFST — the exact #82 difference,
+now reproducible for the ear-check. The live end-to-end test
+(engine → provisioning → codepoints → audio) passes on Linux.
+
 New `src/sherpa_g2p.rs` (feature `sherpa-g2p`), mirroring
 `floravox_engine`'s proven chain:
 

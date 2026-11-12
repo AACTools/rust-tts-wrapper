@@ -58,6 +58,77 @@ fn model_present(id: &str) -> bool {
         .exists()
 }
 
+// ===== VITS family — non-English Piper via the G2P front-end (#82) =====
+//
+// Feature `sherpa-g2p`: wrapper-side phonemization handed to sherpa as
+// `phoneme_codepoints` — OOV words are SPOKEN through the bundle's
+// Phonetisaurus model instead of dropped. Needs the thorsten model and
+// the de bundle on disk:
+//
+//   SHERPA_DE_MODEL_DIR=/path/to/vits-piper-de_DE-thorsten-medium \
+//   SHERPA_DE_BUNDLE_DIR=/path/to/voicegarden-lexicons/de \
+//   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- --ignored german
+
+#[cfg(feature = "sherpa-g2p")]
+#[test]
+#[ignore = "live: needs thorsten model + de bundle (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR)"]
+fn vits_piper_german_g2p_synthesizes() {
+    use std::path::PathBuf;
+    let (Some(model_dir), Some(bundle_dir)) = (
+        std::env::var_os("SHERPA_DE_MODEL_DIR").map(PathBuf::from),
+        std::env::var_os("SHERPA_DE_BUNDLE_DIR").map(PathBuf::from),
+    ) else {
+        eprintln!("skipping: SHERPA_DE_MODEL_DIR / SHERPA_DE_BUNDLE_DIR not set");
+        return;
+    };
+    assert!(model_dir.join("tokens.txt").is_file(), "model dir");
+    assert!(bundle_dir.join("de.fst").is_file(), "bundle dir");
+
+    // stage a provisioned cache (stamp + symlink) so no network is hit
+    let cache = tempfile::tempdir().unwrap();
+    let bundle_cache = cache.path().join("de");
+    std::os::unix::fs::symlink(&bundle_dir, &bundle_cache).unwrap();
+    std::fs::write(bundle_cache.join(".sha256"), b"test-stamp").unwrap();
+    // stage the model under its registry id name
+    let parent = cache.path().join("models");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::os::unix::fs::symlink(&model_dir, parent.join("piper-de_DE-thorsten-medium")).unwrap();
+
+    std::env::set_var("VOICEGARDEN_LEXICON_DIR", cache.path());
+    let engine = create_engine(
+        "sherpaonnx",
+        &format!(
+            r#"{{"modelId":"piper-de_DE-thorsten-medium","modelPath":"{}"}}"#,
+            parent.display()
+        ),
+    )
+    .expect("sherpaonnx engine");
+    std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
+
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(AudioSink::new()));
+    let sink_for_cb = sink.clone();
+    let mut cb = move |chunk: &[u8]| {
+        sink_for_cb.lock().unwrap().total_bytes += chunk.len();
+    };
+    // dictionary words, digits, a nonce OOV word (must be SPOKEN via
+    // the WFST, not dropped), a capitalized noun
+    engine
+        .speak(
+            "Guten Morgen! Ich habe 42 Häuser. Das Blorpinxel ist neu.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+            None,
+        )
+        .expect("speak");
+
+    let sink = sink.lock().unwrap();
+    assert!(sink.total_bytes > 0, "expected non-empty audio");
+}
+
 macro_rules! skip_if_missing {
     ($id:expr) => {
         if !model_present(&$id) {
