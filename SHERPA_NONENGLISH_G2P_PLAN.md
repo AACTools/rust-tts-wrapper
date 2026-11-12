@@ -86,12 +86,14 @@ sha mismatches, so checksums verify against the uploaded bytes.
 ```
 
 Insertion point: `SherpaOnnxEngine::synthesize`
-(`src/sherpaonnx_engine.rs`), just before the two
-`tts.generate_with_config(text, &gen_config, …)` calls (streaming and
-file paths). When the front-end is active for the loaded model, it produces
-the codepoints and the `text` argument becomes `""`. Word-boundary estimates
-(`EstimatePlan::build(text)`) keep using the ORIGINAL text — they are WPM
-estimates over words and do not depend on the phoneme stream.
+(`src/sherpaonnx_engine.rs`), at the two
+`tts.generate_with_config(text, &gen_config, …)` call sites (lines ~692
+streaming and ~728 file paths). When the front-end is active for the loaded
+model, it produces the codepoints and the call sites pass `""` as the text
+argument — do NOT rebind `text` itself: both `EstimatePlan::build(text)`
+sites (streaming ~645, and non-streaming ~744, which runs AFTER generate)
+must keep the ORIGINAL text. They are WPM estimates over words and do not
+depend on the phoneme stream.
 
 ## Phases
 
@@ -121,13 +123,31 @@ New `src/sherpa_lang.rs`:
   Normalize to BCP-47; bundle keys resolve via the crate's exact/prefix
   matching (`de-DE` → `de`). Keep excluding bilingual `<lang>_en`
   compounds (`is_bilingual_en_compound`).
-- A compile-time allowlist `VALIDATED_LANG_BUNDLES: &[(&str /*bcp47*/, &str
-  /*bundle key*/)]` — the single gate for everything downstream. Starts as
-  `[("de", <deu or de — decided by the Phase 4 bake-off>)]`. Every later
-  phase keys off it; "enable download for validated languages" (issue
-  bullet 4) becomes "add a row here after Phase 4 passes".
-- Unit tests: registry language → bundle key; compounds rejected; unknown
-  language → None.
+- A compile-time allowlist — the single gate for everything downstream:
+
+  ```rust
+  struct LangBundle {
+      bcp47: &'static str, // "de"
+      archive: Archive,    // Base (lexicons.json) | Expanded (expanded.json)
+      key: &'static str,   // "de" | "deu" — keys differ between archives
+      validated: bool,     // flipped in Phase 5 once Phase 4 passes
+  }
+  ```
+
+  The archive dimension is load-bearing: `de` exists only in the base
+  `lexicons.json`, `deu` only in `expanded.json`, and the crate's
+  `entry()` matches on `bcp47` — asking the expanded archive for "de"
+  silently resolves `deu`. Fetch constructs EXACTLY the archive named in
+  the row (`LexiconArchive::default_archive()` /
+  `default_expanded()`), never the `expanded.or_else(base)` order
+  `floravox_engine` uses. Lifecycle: both German rows ship from Phase 1
+  behind the `sherpa-g2p` feature (`validated: false`); Phase 4's bake-off
+  picks the default row; Phase 5 flips `validated` → download enablement.
+- Unit tests: registry language → (key, archive); compounds rejected;
+  unknown language → None. Registry `lang_code`s are bare codes
+  (`"de"` with `country: "DE"` as a separate field — no underscore forms
+  exist in the pinned registry), so fixtures must use real shapes, and
+  normalization maps `de` → bundle lookup, not `de_DE` → `de`.
 
 ### Phase 2 — generalized model-aware converter + Path A for German
 
@@ -162,16 +182,21 @@ counts; the converter must handle at least these):
 | `ˑ` half-long | U+02D1 | 28 | — | split off base |
 | `̃ ̥ ͜ ̞ ˀ ̪ ̝` | assorted | ≤20 | ≤2 | strip |
 
-ASCII `g` (→ IPA `ɡ`) appears 68,427 times in the deu lexicon; IPA `ɡ`
-appears zero times — the homoglyph map carries real weight. All lexicon
-keys are lowercase (0 capitalized keys in deu; `Haus` is stored `haus`), so
-query normalization NFC → lowercase is correct, not a guess.
+Counted as standalone space-separated phone tokens: ASCII `g` appears
+92,996 times in deu (82,705 in de); IPA `ɡ` appears zero times as a
+standalone token — its single deu occurrence is inside the composite
+`ɡ̥ː` (`gacki`), which chains rules 3+5+6 (IPA base + U+0325 + U+02D0)
+and belongs in the converter unit tests. The homoglyph map carries real
+weight. All lexicon keys are lowercase (0 capitalized keys in deu; `Haus`
+is stored `haus`), so query normalization NFC → lowercase is correct, not
+a guess.
 
 Coverage test: the original probe converted all 277,912 base entries with
-the first three rules; the test re-runs conversion over the whole selected
-bundle (`#[ignore]`-gated against the real file) and asserts ≥ the probe's
-rate, plus offline unit tests against a synthetic thorsten-like tokens.txt
-covering every mark in the table above.
+the first three rules; until Phase 4 selects the default, the test re-runs
+conversion over BOTH bundles (`#[ignore]`-gated against the real files)
+and asserts ≥ the probe's rate on each, plus offline unit tests against a
+synthetic thorsten-like tokens.txt covering every mark in the table above
+and the `ɡ̥ː` composite.
 
 Path A wiring (explicit compatibility option — not an automatic fallback;
 when the `sherpa-g2p` front-end is available it is always used):
@@ -184,7 +209,8 @@ when the `sherpa-g2p` front-end is available it is always used):
   layouts (`<key>/lexicon.txt` under the crate's cache root), replacing the
   eng-US/en hardcoding for allowlisted languages (English layouts stay for
   English).
-- Fetch behind the new `sherpa-g2p` feature via `LexiconArchive::fetch`.
+- Fetch behind the new `sherpa-g2p` feature via `LexiconArchive::fetch`,
+  constructing the archive pinned by the allowlist row (see Phase 1).
   Without the feature: discovery only, no download (today's behaviour).
 - Extend `should_auto_generate_lexicon`: allowlisted non-English VITS/piper
   models qualify for generation (English rules unchanged, still
@@ -271,7 +297,8 @@ measured by hand on a real device — slot below):**
   worst case); release on an A-series core likely **~0.3–0.8 s**. Lazy
   load keeps it off the first utterance unless an OOV word forces it.
 - Disk: bundle tarball + extracted FSTs ≈ **45–95 MB**, i.e. the same
-  order as a second piper model (~63 MB for thorsten-medium).
+  order as a second piper model (64.1 MB for thorsten-medium per the
+  registry).
 - Dictionary tier: mmap'd, ~0 resident, <0.1 ms/word (README) — the tier
   almost every sentence hits.
 
@@ -294,8 +321,11 @@ pattern):
 - Compat option regression: with `lexiconCompat`, the generated
   `lexicon.txt` loads and the plain-text path speaks.
 - CI (`.github/workflows/sherpaonnx-live.yml`): add the thorsten model +
-  both German bundle download steps beside the eng-US ones; cache
-  `~/.voicegarden/lexicons/{de,deu}`.
+  both German bundle download steps beside the eng-US ones. Pre-seed the
+  CRATE's own cache layout — `~/.voicegarden/lexicons/de/` (base) and
+  `~/.voicegarden/lexicons/expanded/deu/` (expanded subdir, matching the
+  existing `expanded/eng-US` layout) — so the live tests exercise the
+  real `fetch` path and find the bundles cached instead of re-downloading.
 - iOS: extend `tests/ios_sherpa_smoke.c` — front-end on, WFST forced to
   load (one OOV sentence), assert audio and no crash.
 - Measure OOV rate on a German corpus (e.g. 50k Wikipedia words) with the
@@ -303,7 +333,8 @@ pattern):
 
 ### Phase 5 — enable download + docs
 
-- Add `("de", …)` to the allowlist as validated → voices surface/download
+- Flip `validated: true` on the bake-off-winning German row (both rows have
+  existed since Phase 1, `validated: false`) → voices surface/download
   guidance updated (`get_voices` annotations or registry metadata, whatever
   the download-enablement mechanism consumes).
 - Update `docs/engines.md`, `README.md` (non-English piper section), and
