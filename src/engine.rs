@@ -190,7 +190,7 @@ pub(crate) fn pcm16_mono_to_wav(pcm: &[u8], sample_rate: Option<u32>) -> TtsResu
         .filter(|rate| *rate > 0)
         .and_then(|rate| rate.checked_mul(2))
         .ok_or_else(|| TtsError("Synthesis did not report a valid audio sample rate".into()))?;
-    if pcm.is_empty() || pcm.len() % 2 != 0 {
+    if pcm.is_empty() || !pcm.len().is_multiple_of(2) {
         return Err(TtsError(
             "Synthesis did not return complete PCM16 samples".into(),
         ));

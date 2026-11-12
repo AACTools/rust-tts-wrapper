@@ -340,7 +340,7 @@ fn load_models() -> HashMap<String, SherpaModelInfo> {
 }
 
 impl SherpaOnnxEngine {
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn synthesize(
         &self,
         text: &str,

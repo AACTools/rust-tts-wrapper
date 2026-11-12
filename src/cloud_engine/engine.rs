@@ -177,7 +177,11 @@ impl CloudEngine {
 }
 
 impl CloudEngine {
-    #[allow(clippy::too_many_lines, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::cast_precision_loss
+    )]
     fn synthesize(
         &self,
         text: &str,
