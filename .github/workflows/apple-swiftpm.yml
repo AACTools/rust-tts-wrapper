@@ -39,3 +39,4 @@ jobs:
           name: apple-swiftpm
           path: target/apple/RustTtsNative.xcframework.zip
           if-no-files-found: error
+          compression-level: 0
