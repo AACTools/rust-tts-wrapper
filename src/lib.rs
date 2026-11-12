@@ -1455,8 +1455,8 @@ pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_ch
     .unwrap_or(ptr::null_mut())
 }
 
-/// Free a string returned by [`tts_get_last_error_detail_json`] or
-/// [`tts_get_engine_setups_json`].
+/// Free a string returned by [`tts_get_last_error_detail_json`],
+/// [`tts_get_engine_setups_json`], or [`tts_get_sherpa_models_json`].
 ///
 /// # Safety
 ///
@@ -1483,6 +1483,43 @@ pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let json = crate::engine_schema::engine_setups_json();
         CString::new(json).map_or(ptr::null_mut(), CString::into_raw)
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
+///
+/// This uses the build's bundled registry snapshot and requires no engine or network
+/// connection. Caller must free the returned string with [`tts_free_string`].
+/// Returns null on failure, including builds without the `sherpaonnx` feature.
+/// Read the global error with [`tts_get_last_error_detail_json`] and a null context.
+#[no_mangle]
+pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(feature = "sherpaonnx")]
+        match CString::new(sherpa_onnx_models::MODELS_JSON) {
+            Ok(json) => json.into_raw(),
+            Err(_) => {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::EngineFailure,
+                    Some("sherpaonnx"),
+                    None,
+                    "The embedded Sherpa-ONNX model registry contains an invalid NUL byte",
+                ));
+                ptr::null_mut()
+            }
+        }
+
+        #[cfg(not(feature = "sherpaonnx"))]
+        {
+            set_error_detail(ErrorDetail::new(
+                TtsErrorCode::EngineNotAvailable,
+                Some("sherpaonnx"),
+                None,
+                "The Sherpa-ONNX model registry requires the sherpaonnx feature",
+            ));
+            ptr::null_mut()
+        }
     }))
     .unwrap_or(ptr::null_mut())
 }

@@ -73,6 +73,13 @@ Credentials are `[String: String]` dictionaries serialised to the JSON
 the Rust factory parses (canonical keys — see the
 [engines doc](engines.md)).
 
+## Listing Sherpa-ONNX models
+
+Use `try TtsClient.sherpaModelsJSON()` to read the model registry bundled with
+the native build. It returns a JSON object keyed by model ID, with the original
+download metadata, languages, and licence fields. The call works offline and
+throws `engineNotAvailable` when the native build excludes Sherpa-ONNX.
+
 ## Playing audio in an Apple app
 
 For cloud and Sherpa-ONNX voices, use `synthToWav` to get a complete

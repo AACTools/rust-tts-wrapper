@@ -624,6 +624,18 @@ public final class TtsClient: @unchecked Sendable {
         try engineSetups().first { $0.id == engineId }
     }
 
+    /// The embedded Sherpa-ONNX model registry, keyed by model ID.
+    ///
+    /// Throws `TtsError` with code `engineNotAvailable` when Sherpa-ONNX
+    /// is disabled in the native build.
+    public static func sherpaModelsJSON() throws -> String {
+        guard let ptr = tts_get_sherpa_models_json() else {
+            throw TtsError("Could not load the Sherpa-ONNX model registry", detail: getGlobalLastErrorDetail())
+        }
+        defer { tts_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
     // --- private helpers ----------------------------------------------
 
     /// Build a `TtsError` carrying the structured detail (GH #69).

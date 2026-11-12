@@ -18,6 +18,7 @@ reference harness compiled with `-Wall -Wextra -Werror`.
 | Settings | `tts_set_voice`, `tts_set_rate`, `tts_set_pitch`, `tts_set_volume` |
 | Events | `tts_set_on_audio`, `tts_set_on_boundary` (7-arg incl. `estimated`), `tts_set_on_mark`, `tts_set_on_viseme`, `tts_set_on_start`, `tts_set_on_end`, `tts_set_on_error` |
 | Enumeration | `tts_get_voices`/`tts_free_voices`, `tts_get_engine_count`, `tts_get_engines`/`tts_free_engines`, `tts_get_engine_setups_json` |
+| Model registry | `tts_get_sherpa_models_json` |
 | Errors | `tts_get_last_error`, `tts_get_last_error_code`, `tts_get_last_error_detail_json`, `tts_free_string` |
 | Credentials | `tts_check_credentials` (1 = Verified, 0 = Rejected, 2 = Unverified, −1 = failed → detail) |
 
@@ -37,6 +38,10 @@ Conventions that hold across the ABI:
 `tts_synth_to_wav` returns one PCM WAV buffer at the synthesized sample
 rate for cloud and Sherpa-ONNX engines. Free it with `tts_free_bytes`.
 `tts_synth_to_bytes` keeps its original engine-specific byte format.
+
+`tts_get_sherpa_models_json` returns the bundled registry JSON keyed by model
+ID. Free the returned string with `tts_free_string`. A build without Sherpa-ONNX
+returns null and sets the global `EngineNotAvailable` error.
 
 ## Error codes (GH #69)
 

@@ -386,8 +386,8 @@ uint32_t tts_get_last_error_code(struct tts_ctx *ctx);
 char *tts_get_last_error_detail_json(struct tts_ctx *ctx);
 
 /**
- * Free a string returned by [`tts_get_last_error_detail_json`] or
- * [`tts_get_engine_setups_json`].
+ * Free a string returned by [`tts_get_last_error_detail_json`],
+ * [`tts_get_engine_setups_json`], or [`tts_get_sherpa_models_json`].
  *
  * # Safety
  *
@@ -406,6 +406,16 @@ void tts_free_string(char *s);
  * success; returns `"[]"` when no engines are compiled in.
  */
 char *tts_get_engine_setups_json(void);
+
+/**
+ * Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
+ *
+ * This uses the build's bundled registry snapshot and requires no engine or network
+ * connection. Caller must free the returned string with [`tts_free_string`].
+ * Returns null on failure, including builds without the `sherpaonnx` feature.
+ * Read the global error with [`tts_get_last_error_detail_json`] and a null context.
+ */
+char *tts_get_sherpa_models_json(void);
 
 /**
  * Verify the context's credentials with an explicit "unverified"
