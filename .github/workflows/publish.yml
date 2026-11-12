@@ -13,10 +13,16 @@ jobs:
     name: Sync version
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # Read the staged draft release.
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify staged SwiftPM release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/apple/verify-release.sh "$GITHUB_REF_NAME"
       - id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
       - name: Update Cargo.toml version
@@ -767,19 +773,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify staged SwiftPM release asset
-        # The source tag pins this exact zip. Keep the asset already attached
-        # to the draft release so it becomes public with the other artifacts.
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          tag=$(awk -F '"' '/^let releaseTag = / { print $2 }' Package.swift)
-          checksum=$(awk -F '"' '/^let releaseChecksum = / { print $2 }' Package.swift)
-          if [[ "$tag" != "$GITHUB_REF_NAME" || ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
-            echo "Pin the XCFramework for $GITHUB_REF_NAME before tagging. See docs/swift.md." >&2
-            exit 1
-          fi
-          gh release download "$tag" --pattern RustTtsNative.xcframework.zip
-          echo "$checksum  RustTtsNative.xcframework.zip" | sha256sum --check
+        run: scripts/apple/verify-release.sh "$GITHUB_REF_NAME"
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
