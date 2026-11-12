@@ -452,47 +452,6 @@ jobs:
           name: static-${{ matrix.label }}
           path: target/${{ matrix.target }}/release/*rust_tts_wrapper-${{ matrix.label }}.lib
 
-  xcframework:
-    name: Apple XCFramework
-    needs: build
-    runs-on: macos-latest
-    strategy:
-      matrix:
-        include:
-          - name: RustTtsWrapper
-            suffix: cloud
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: static-${{ matrix.suffix }}-aarch64-apple-ios
-          path: ios-device
-      - uses: actions/download-artifact@v4
-        with:
-          name: static-${{ matrix.suffix }}-aarch64-apple-ios-sim
-          path: ios-sim
-      - name: Create ${{ matrix.name }}.xcframework
-        run: |
-          mkdir -p headers
-          cp include/tts_wrapper.h headers/
-          # Give each slice its own directory (xcodebuild requires distinct
-          # paths and renames the lib per slice).
-          mkdir -p device sim
-          cp ios-device/librust_tts_wrapper-${{ matrix.suffix }}-aarch64-apple-ios.a device/librust_tts_wrapper.a
-          cp headers/tts_wrapper.h device/
-          cp ios-sim/librust_tts_wrapper-${{ matrix.suffix }}-aarch64-apple-ios-sim.a sim/librust_tts_wrapper.a
-          cp headers/tts_wrapper.h sim/
-          rm -rf ${{ matrix.name }}.xcframework
-          xcodebuild -create-xcframework \
-            -library device/librust_tts_wrapper.a -headers device \
-            -library sim/librust_tts_wrapper.a -headers sim \
-            -output ${{ matrix.name }}.xcframework
-          ditto -c -k --sequesterRsrc --keepParent ${{ matrix.name }}.xcframework ${{ matrix.name }}.xcframework.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xcframework-${{ matrix.name }}
-          path: ${{ matrix.name }}.xcframework.zip
-
   nuget:
     name: Pack & Publish .NET NuGet
     needs: build
@@ -801,21 +760,31 @@ jobs:
 
   release:
     name: GitHub Release
-    needs: [build, xcframework, npm, offline-engine-libs]
+    needs: [build, npm, offline-engine-libs]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - name: Verify staged SwiftPM release asset
+        # The source tag pins this exact zip. Keep the asset already attached
+        # to the draft release so it becomes public with the other artifacts.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(awk -F '"' '/^let releaseTag = / { print $2 }' Package.swift)
+          checksum=$(awk -F '"' '/^let releaseChecksum = / { print $2 }' Package.swift)
+          if [[ "$tag" != "$GITHUB_REF_NAME" || ! "$checksum" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "Pin the XCFramework for $GITHUB_REF_NAME before tagging. See docs/swift.md." >&2
+            exit 1
+          fi
+          gh release download "$tag" --pattern RustTtsNative.xcframework.zip
+          echo "$checksum  RustTtsNative.xcframework.zip" | sha256sum --check
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           pattern: "{lib-*,static-*}"
           merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          pattern: "xcframework-*"
       - uses: actions/download-artifact@v4
         with:
           path: engine-libs-artifacts

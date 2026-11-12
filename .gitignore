@@ -24,3 +24,6 @@ node_modules/
 pkg2.nupkg
 session-ses_*.md
 *.nupkg
+
+# Apple SwiftPM build products
+/.build/
