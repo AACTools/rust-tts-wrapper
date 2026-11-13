@@ -147,13 +147,11 @@ impl CloudEngine {
             access_key: self
                 .credentials
                 .get("accessKeyId")
-                .map(String::as_str)
-                .unwrap_or_default(),
+                .map_or("", String::as_str),
             secret_key: self
                 .credentials
                 .get("secretAccessKey")
-                .map(String::as_str)
-                .unwrap_or_default(),
+                .map_or("", String::as_str),
             region: &region,
             service: "polly",
         };
@@ -1231,13 +1229,11 @@ impl TtsEngine for CloudEngine {
                 access_key: self
                     .credentials
                     .get("accessKeyId")
-                    .map(String::as_str)
-                    .unwrap_or_default(),
+                    .map_or("", String::as_str),
                 secret_key: self
                     .credentials
                     .get("secretAccessKey")
-                    .map(String::as_str)
-                    .unwrap_or_default(),
+                    .map_or("", String::as_str),
                 region: &region,
                 service: "polly",
             };

@@ -196,7 +196,7 @@ pub(crate) fn qwen_parse_event(frame: &str) -> QwenServerEvent {
                         .and_then(|o| o.get("sentence"))
                         .and_then(|s| s.get("words"))
                         .and_then(|w| w.as_array())
-                        .map(|arr| {
+                        .map_or(Vec::new(), |arr| {
                             arr.iter()
                                 .filter_map(|w| {
                                     let text = w.get("text").and_then(|v| v.as_str())?.to_string();
@@ -213,8 +213,7 @@ pub(crate) fn qwen_parse_event(frame: &str) -> QwenServerEvent {
                                     })
                                 })
                                 .collect()
-                        })
-                        .unwrap_or_default();
+                        });
                     QwenServerEvent::SentenceEnd {
                         sentence: sentence_index(),
                         words,

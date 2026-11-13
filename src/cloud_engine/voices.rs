@@ -53,22 +53,21 @@ pub(crate) fn map_google_voices(json: &[serde_json::Value]) -> Vec<Voice> {
             continue;
         }
         let gender_raw = v.get("ssmlGender").and_then(|v| v.as_str()).unwrap_or("");
-        let lang_codes = v
-            .get("languageCodes")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|c| {
-                        let code = c.as_str()?;
-                        Some(LanguageCode {
-                            iso639_3: code.split('-').next()?.to_string(),
-                            bcp47: code.to_string(),
-                            display: code.to_string(),
+        let lang_codes =
+            v.get("languageCodes")
+                .and_then(|v| v.as_array())
+                .map_or(Vec::new(), |arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            let code = c.as_str()?;
+                            Some(LanguageCode {
+                                iso639_3: code.split('-').next()?.to_string(),
+                                bcp47: code.to_string(),
+                                display: code.to_string(),
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+                        .collect::<Vec<_>>()
+                });
 
         voices.push(Voice {
             id: name.to_string(),

@@ -843,12 +843,10 @@ impl TtsEngine for SherpaOnnxEngine {
         let num_speakers = model_info.map_or(1, |m| m.num_speakers);
         let lang = model_info
             .and_then(|m| m.language.first())
-            .map(|l| l.language_name.clone())
-            .unwrap_or_default();
+            .map_or(String::new(), |l| l.language_name.clone());
         let lang_code = model_info
             .and_then(|m| m.language.first())
-            .map(|l| l.lang_code.clone())
-            .unwrap_or_default();
+            .map_or(String::new(), |l| l.lang_code.clone());
         let iso639 = iso639_3(&lang_code);
         let mut voices = Vec::new();
         for i in 0..num_speakers {
@@ -959,10 +957,7 @@ fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: i32) -> bool 
         &data_len.to_le_bytes(),
     ]
     .concat();
-    if f.write_all(&header).is_err() || f.write_all(&pcm).is_err() {
-        return false;
-    }
-    true
+    f.write_all(&header).is_ok() && f.write_all(&pcm).is_ok()
 }
 
 /// Play a WAV file using a platform-appropriate command.
@@ -1055,8 +1050,7 @@ fn find_primary_model_onnx(dir: &std::path::Path) -> Option<std::path::PathBuf> 
                 let name = path
                     .file_name()
                     .and_then(|n| n.to_str())
-                    .map(str::to_ascii_lowercase)
-                    .unwrap_or_default();
+                    .map_or(String::new(), str::to_ascii_lowercase);
                 // Skip acoustic models and vocoders.
                 if !name.starts_with("model-steps")
                     && !name.starts_with("vocos")
