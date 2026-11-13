@@ -255,8 +255,7 @@ impl FloravoxEngine {
         let path = path.as_ref();
         let model_id = path
             .file_stem()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_default();
+            .map_or(String::new(), |s| s.to_string_lossy().to_string());
         let models_dir = path
             .parent()
             .map_or_else(default_models_dir, std::path::Path::to_path_buf);
