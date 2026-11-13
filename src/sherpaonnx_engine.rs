@@ -1329,8 +1329,9 @@ fn collect_lexicons(dir: &std::path::Path) -> Option<String> {
 /// read-only — it must be passed explicitly, it is not discovered).
 /// Deterministically sorted, comma-joined as before.
 fn collect_lexicons_with(dir: &std::path::Path, extra: Option<&std::path::Path>) -> Option<String> {
-    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .map(|entries| {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir).map_or_else(
+        |_| Vec::new(),
+        |entries| {
             entries
                 .filter_map(Result::ok)
                 .map(|e| e.path())
@@ -1343,8 +1344,8 @@ fn collect_lexicons_with(dir: &std::path::Path, extra: Option<&std::path::Path>)
                             .is_some_and(crate::sherpa_lexicon::is_lexicon_file_name)
                 })
                 .collect()
-        })
-        .unwrap_or_default();
+        },
+    );
     if let Some(extra) = extra.filter(|p| p.is_file()) {
         paths.push(extra.to_path_buf());
     }

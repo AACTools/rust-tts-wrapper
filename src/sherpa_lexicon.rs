@@ -1442,6 +1442,7 @@ mod tests {
     /// and the returned path is outside the model dir (the caller must
     /// pass it to the config). Skipped when running as root (root
     /// ignores directory permissions).
+    #[cfg(unix)] // chmod-based; the Windows suite skips it
     #[test]
     fn compat_lexicon_falls_back_when_model_dir_readonly() {
         use std::os::unix::fs::PermissionsExt;
@@ -1476,6 +1477,7 @@ mod tests {
     /// fallback-dir lexicon on subsequent calls — the engine re-runs
     /// this per synthesize, and re-converting 277k entries per
     /// utterance would be a multi-second tax. Skipped as root.
+    #[cfg(unix)] // chmod-based; the Windows suite skips it
     #[test]
     fn compat_lexicon_reuses_fallback_on_second_call() {
         use std::os::unix::fs::PermissionsExt;
