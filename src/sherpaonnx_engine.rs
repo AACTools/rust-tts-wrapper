@@ -109,6 +109,20 @@ pub struct SherpaOnnxEngine {
     /// (its bundled test wavs have known transcripts). Ignored by pocket,
     /// which clones from audio alone.
     reference_text: Option<String>,
+    /// `lexiconCompat` credentials option (#82 Phase 2): generate a
+    /// sherpa `lexicon.txt` for allowlisted non-English models from
+    /// their cached voicegarden language bundle — an interop artifact
+    /// for bare-sherpa consumers of the same model dir. The primary
+    /// front-end (Phase 3, wrapper-side phonemization) does not need it.
+    lexicon_compat: bool,
+    /// `lexiconCachePath` credentials option: writable root for
+    /// generated lexicons when the model dir is read-only (iOS app
+    /// bundles). Defaults to the model root.
+    lexicon_cache: Option<PathBuf>,
+    /// One-shot latch for compat-generation failure logs: the synthesize
+    /// hook re-fires per utterance and a misprovisioned setup never
+    /// self-heals, so warn once per engine instance instead of spamming.
+    compat_log_once: std::sync::atomic::AtomicBool,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -158,6 +172,12 @@ impl SherpaOnnxEngine {
     ///   model's bundled `test_wavs/` clip.
     /// - `referenceText`: transcript of `referenceAudio` (zipvoice requires
     ///   it to match the audio exactly; pocket ignores it).
+    /// - `lexiconCompat`: `"true"` to generate a sherpa `lexicon.txt` for
+    ///   allowlisted non-English models from their cached voicegarden
+    ///   language bundle (interop option; the wrapper's own front-end
+    ///   does not need it — #82 Phase 2).
+    /// - `lexiconCachePath`: writable root for generated lexicons when
+    ///   the model dir is read-only (defaults to the model root).
     /// - `provider`: `cpu` (default), `coreml`, `cuda`, `directml`, etc.
     #[must_use]
     pub fn new(credentials_json: &str) -> Self {
@@ -168,6 +188,8 @@ impl SherpaOnnxEngine {
         let mut provider: Option<String> = None;
         let mut reference_audio: Option<PathBuf> = None;
         let mut reference_text: Option<String> = None;
+        let mut lexicon_compat = false;
+        let mut lexicon_cache: Option<PathBuf> = None;
 
         if !credentials_json.is_empty() {
             // Numeric values are coerced to strings so callers can write
@@ -219,6 +241,15 @@ impl SherpaOnnxEngine {
                         reference_text = Some(t.clone());
                     }
                 }
+                if let Some(v) = creds.get("lexiconCompat") {
+                    // accept "true"/"1" (JSON true stringifies to "true")
+                    lexicon_compat = v.eq_ignore_ascii_case("true") || v == "1";
+                }
+                if let Some(v) = creds.get("lexiconCachePath") {
+                    if !v.is_empty() {
+                        lexicon_cache = Some(PathBuf::from(v));
+                    }
+                }
             }
         }
 
@@ -233,6 +264,9 @@ impl SherpaOnnxEngine {
             provider,
             reference_audio,
             reference_text,
+            lexicon_compat,
+            lexicon_cache,
+            compat_log_once: std::sync::atomic::AtomicBool::new(false),
             tts_instance: Mutex::new(None),
         }
     }
@@ -437,6 +471,80 @@ impl SherpaOnnxEngine {
             }
         }
 
+        // #82 Phase 2, the lexiconCompat option: for allowlisted
+        // non-English models, convert the cached language bundle into a
+        // sherpa lexicon.txt (interop artifact — bare-sherpa consumers
+        // of this model dir benefit too; the wrapper's own front-end
+        // arrives in Phase 3 and does not need the file). Purely local:
+        // the bundle must already be cached (provisioning is Phase 3).
+        let mut compat_lexicon_path: Option<std::path::PathBuf> = None;
+        if self.lexicon_compat && !crate::sherpa_lexicon::has_lexicon_file(&model_dir) {
+            let bundle = crate::sherpa_lang::default_bundle_for_model(model_info).filter(|_| {
+                should_compat_generate_lexicon(model_info.model_type.as_str(), &id_lower)
+            });
+            if let Some(bundle) = bundle {
+                let fallback_root = self
+                    .lexicon_cache
+                    .clone()
+                    .unwrap_or_else(|| self.model_dir.clone());
+                match crate::sherpa_lexicon::ensure_compat_lexicon(
+                    &model_dir,
+                    bundle.key,
+                    &fallback_root,
+                    &self.loaded_model_id,
+                ) {
+                    Ok(Some(res)) if res.reused => {
+                        // fallback-dir lexicon already exists (read-only
+                        // model dir): cheap path reuse, still must reach
+                        // the config every call — no log, this fires per
+                        // utterance
+                        if !res.path.starts_with(&model_dir) {
+                            compat_lexicon_path = Some(res.path);
+                        }
+                    }
+                    Ok(Some(res)) => {
+                        eprintln!(
+                            "sherpa: generated compat lexicon.txt for '{}' from bundle \
+                             '{}' — {} entries ({} skipped) at {}",
+                            self.loaded_model_id,
+                            bundle.key,
+                            res.written,
+                            res.skipped,
+                            res.path.display()
+                        );
+                        if !res.path.starts_with(&model_dir) {
+                            // written outside the model dir (read-only):
+                            // the config must point here explicitly
+                            compat_lexicon_path = Some(res.path);
+                        }
+                    }
+                    // None here means the bundle is not cached (the
+                    // model dir had no lexicon and has tokens.txt, both
+                    // pre-checked): warn ONCE — the hook re-fires every
+                    // utterance and this never self-heals
+                    Ok(None) => {
+                        if !self.compat_log_once.swap(true, Ordering::Relaxed) {
+                            eprintln!(
+                                "sherpa: lexiconCompat: bundle '{}' not found in the \
+                                 lexicon cache — skipped. Provision the bundle or set \
+                                 VOICEGARDEN_LEXICON_DIR (fetching arrives with the \
+                                 sherpa-g2p feature, plan Phase 3).",
+                                bundle.key
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if !self.compat_log_once.swap(true, Ordering::Relaxed) {
+                            eprintln!(
+                                "sherpa: compat lexicon generation failed for '{}': {e}",
+                                self.loaded_model_id
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         let model_config = match model_info.model_type.as_str() {
             "kokoro" => sherpa_onnx::OfflineTtsModelConfig {
                 kokoro: build_kokoro_config(&model_dir),
@@ -491,7 +599,12 @@ impl SherpaOnnxEngine {
             // VITS, MMS (Facebook Massively Multilingual Speech), and unknown
             // model types all use the VITS config family.
             "vits" | "mms" | "unknown" | "" => sherpa_onnx::OfflineTtsModelConfig {
-                vits: build_vits_config(&model_dir, is_piper_or_github, is_chinese),
+                vits: build_vits_config(
+                    &model_dir,
+                    is_piper_or_github,
+                    is_chinese,
+                    compat_lexicon_path.as_deref(),
+                ),
                 num_threads: self.num_threads,
                 debug: false,
                 provider: self.provider.clone(),
@@ -1181,6 +1294,26 @@ fn should_auto_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool 
     }
 }
 
+/// Should the lexiconCompat generation run for this model? (#82 Phase 2)
+/// Allowlisted non-English VITS/piper-family models only — same family
+/// rule as the English auto path's vits branch. `"mms"` is deliberately
+/// absent: MMS models ship their own lexicon (the has-lexicon check
+/// short-circuits anyway) and the registry has no German MMS entry; if
+/// one ever appears, decide here rather than letting it silently skip.
+/// `lang_bundle` is whether the model's language resolved to an
+/// allowlist row (the caller has the registry metadata; this fn stays
+/// pure for the registry test).
+fn should_compat_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool {
+    match model_type {
+        "vits" | "unknown" | "" => {
+            is_piper_or_github_model(model_id_lower)
+                || model_id_lower.starts_with("inflect-")
+                || model_id_lower.starts_with("willwade-patched-")
+        }
+        _ => false,
+    }
+}
+
 /// Collect all lexicon file paths in a model dir (lexicon.txt,
 /// lexicon-*.txt — multilingual Kokoro ships several). Comma-joined,
 /// deterministically sorted. Used by the Kokoro, VITS, and kitten
@@ -1188,24 +1321,40 @@ fn should_auto_generate_lexicon(model_type: &str, model_id_lower: &str) -> bool 
 /// front-end (espeak left the runtime). Returns `None` when no lexicon
 /// files are present so the field is left unset.
 fn collect_lexicons(dir: &std::path::Path) -> Option<String> {
-    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .is_some_and(crate::sherpa_lexicon::is_lexicon_file_name)
-        })
-        .collect();
+    collect_lexicons_with(dir, None)
+}
+
+/// [`collect_lexicons`] plus one explicit extra lexicon path (#82: a
+/// compat lexicon generated outside the model dir when the model dir is
+/// read-only — it must be passed explicitly, it is not discovered).
+/// Deterministically sorted, comma-joined as before.
+fn collect_lexicons_with(dir: &std::path::Path, extra: Option<&std::path::Path>) -> Option<String> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir).map_or_else(
+        |_| Vec::new(),
+        |entries| {
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.is_file()
+                        && p.extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("txt"))
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(crate::sherpa_lexicon::is_lexicon_file_name)
+                })
+                .collect()
+        },
+    );
+    if let Some(extra) = extra.filter(|p| p.is_file()) {
+        paths.push(extra.to_path_buf());
+    }
     if paths.is_empty() {
         return None;
     }
     // Sort for deterministic ordering across platforms / readdir order.
     paths.sort();
+    paths.dedup();
     Some(
         paths
             .iter()
@@ -1568,6 +1717,7 @@ fn build_vits_config(
     model_dir: &std::path::Path,
     is_piper_or_github: bool,
     is_chinese: bool,
+    compat_lexicon: Option<&std::path::Path>,
 ) -> sherpa_onnx::OfflineTtsVitsModelConfig {
     // Try the canonical name first, then scan for any non-acoustic .onnx
     // (handles Piper's en_US-amy-low.onnx naming convention).
@@ -1620,8 +1770,10 @@ fn build_vits_config(
         // 2.x: the lexicon IS the phonetic back-end. Pass every
         // lexicon*.txt found (lexicon.txt, lexicon-us-en.txt, …) —
         // including Piper models, whose 1.x behavior ("prefer espeak,
-        // ignore lexicon") inverted when espeak left the runtime.
-        lexicon: collect_lexicons(model_dir),
+        // ignore lexicon") inverted when espeak left the runtime. The
+        // explicit compat lexicon (#82) is merged in when it had to be
+        // written outside the model dir.
+        lexicon: collect_lexicons_with(model_dir, compat_lexicon),
         data_dir,
         dict_dir,
         ..Default::default()
@@ -2522,7 +2674,7 @@ mod tests {
     #[test]
     fn test_build_vits_config_piper_uses_espeak_data_no_dict() {
         let d = fake_piper_dir();
-        let cfg = build_vits_config(d.path(), true, false);
+        let cfg = build_vits_config(d.path(), true, false, None);
         // The model is found by scanning for the first non-vocoder .onnx.
         assert!(cfg
             .model
@@ -2548,7 +2700,7 @@ mod tests {
         let dict_dir = d.path().join("dict");
         fs::create_dir(&dict_dir).unwrap();
 
-        let cfg = build_vits_config(d.path(), false, true);
+        let cfg = build_vits_config(d.path(), false, true, None);
         assert_eq!(
             cfg.dict_dir.as_deref(),
             Some(dict_dir.to_str().unwrap()),
@@ -2564,7 +2716,7 @@ mod tests {
         fs::write(d.path().join("tokens.txt"), b"x").unwrap();
         fs::write(d.path().join("lexicon.txt"), b"x").unwrap();
 
-        let cfg = build_vits_config(d.path(), false, false);
+        let cfg = build_vits_config(d.path(), false, false, None);
         assert!(cfg.lexicon.is_some());
         assert!(
             cfg.dict_dir.is_none(),
@@ -2580,7 +2732,7 @@ mod tests {
         fs::write(d.path().join("tokens.txt"), b"x").unwrap();
         fs::create_dir(d.path().join("dict")).unwrap();
 
-        let cfg = build_vits_config(d.path(), false, false);
+        let cfg = build_vits_config(d.path(), false, false, None);
         assert!(cfg.dict_dir.is_some());
     }
 
@@ -2789,9 +2941,117 @@ mod tests {
     }
 
     #[test]
+    fn test_lexicon_compat_credentials_parsed() {
+        // off by default
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"m"}"#);
+        assert!(!engine.lexicon_compat);
+        // JSON true (stringifies to "true"), string "true", "1"
+        for creds in [
+            r#"{"modelId":"m","lexiconCompat":true}"#,
+            r#"{"modelId":"m","lexiconCompat":"true"}"#,
+            r#"{"modelId":"m","lexiconCompat":"1"}"#,
+        ] {
+            assert!(SherpaOnnxEngine::new(creds).lexicon_compat, "{creds}");
+        }
+        // anything else is off
+        let engine = SherpaOnnxEngine::new(r#"{"modelId":"m","lexiconCompat":"false"}"#);
+        assert!(!engine.lexicon_compat);
+        // cache override
+        let engine =
+            SherpaOnnxEngine::new(r#"{"modelId":"m","lexiconCachePath":"/tmp/lex-cache"}"#);
+        assert_eq!(
+            engine.lexicon_cache.as_deref(),
+            Some(std::path::Path::new("/tmp/lex-cache"))
+        );
+    }
+
+    /// The compat gate over the full pinned registry: exactly the 52
+    /// German single-language vits-family models qualify (51 piper +
+    /// coqui-de-css10); the multilingual supertonic and every
+    /// non-German model do not. German resolution itself is pinned in
+    /// sherpa_lang's registry test; this pins the model-family half.
+    #[test]
+    fn test_compat_gate_against_full_registry() {
+        let mut eligible = 0;
+        for (id, m) in sherpa_onnx_models::models() {
+            let info = SherpaModelInfo {
+                id: id.clone(),
+                model_type: m.model_type.clone(),
+                engines: String::new(),
+                name: String::new(),
+                language: m
+                    .language
+                    .iter()
+                    .map(|l| SherpaLanguage {
+                        lang_code: l.lang_code.clone(),
+                        language_name: l.language_name.clone(),
+                        country: l.country.clone(),
+                    })
+                    .collect(),
+                sample_rate: m.sample_rate,
+                num_speakers: m.num_speakers,
+                quality: String::new(),
+                url: String::new(),
+                compression: false,
+                filesize_mb: 0.0,
+                license: String::new(),
+                license_url: String::new(),
+            };
+            let lower = id.to_ascii_lowercase();
+            let row = crate::sherpa_lang::default_bundle_for_model(&info);
+            let gated = row.is_some() && should_compat_generate_lexicon(&m.model_type, &lower);
+            if gated {
+                eligible += 1;
+                assert!(row.is_some_and(|b| b.bcp47 == "de"), "id {id}");
+            }
+        }
+        assert_eq!(eligible, 52, "German compat-eligible model count moved");
+    }
+
+    #[test]
     fn test_engine_num_threads_invalid_falls_back_to_default() {
         let engine = SherpaOnnxEngine::new(r#"{"numThreads":"not-a-number"}"#);
         assert_eq!(engine.num_threads, 2); // default
+    }
+
+    /// The compat-fallback lexicon path must reach the vits config: an
+    /// out-of-model-dir lexicon is merged into the `lexicon` field
+    /// alongside (sorted, deduped) any in-model-dir lexicons.
+    #[test]
+    fn test_build_vits_config_merges_extra_lexicon() {
+        let d = tempfile::tempdir().unwrap().keep();
+        std::fs::write(d.join("tokens.txt"), "a 0\n").unwrap();
+        let cfg = build_vits_config(&d, true, false, None);
+        assert!(
+            cfg.lexicon.is_none(),
+            "no lexicons anywhere → field unset (was: {:?})",
+            cfg.lexicon
+        );
+
+        // extra only
+        let extra = d.join("generated-elsewhere.txt");
+        std::fs::write(&extra, "haus||h a ʊ s\n").unwrap();
+        let cfg = build_vits_config(&d, true, false, Some(&extra));
+        assert_eq!(cfg.lexicon.as_deref(), Some(extra.to_str().unwrap()));
+
+        // extra + in-model-dir lexicon: both, deterministic order, no dupes
+        std::fs::write(d.join("lexicon.txt"), "a||a\n").unwrap();
+        let cfg = build_vits_config(&d, true, false, Some(&extra));
+        let joined = cfg.lexicon.expect("both present");
+        let parts: Vec<&str> = joined.split(',').collect();
+        assert_eq!(parts.len(), 2, "{joined}");
+        assert!(parts.contains(&d.join("lexicon.txt").to_str().unwrap()));
+        assert!(parts.contains(&extra.to_str().unwrap()));
+        // sorted deterministically regardless of readdir order
+        let mut sorted = parts.clone();
+        sorted.sort_unstable();
+        assert_eq!(parts, sorted, "{joined}");
+
+        // dedup: extra pointing at the in-model lexicon collapses to one
+        let same = d.join("lexicon.txt");
+        let cfg = build_vits_config(&d, true, false, Some(&same));
+        let joined = cfg.lexicon.expect("present");
+        assert_eq!(joined.split(',').count(), 1, "{joined}");
     }
 
     #[test]
