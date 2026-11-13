@@ -589,8 +589,7 @@ impl PocketTtsModel {
             .iter()
             .map(|row| {
                 row.get(voice_len..voice_len + text_len)
-                    .map(<[f32]>::to_vec)
-                    .unwrap_or_default()
+                    .map_or(Vec::new(), <[f32]>::to_vec)
             })
             .collect();
 

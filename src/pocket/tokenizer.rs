@@ -96,8 +96,7 @@ impl PocketTokenizer {
         self.token2id
             .iter()
             .find(|(_, v)| **v == id)
-            .map(|(k, _)| k.clone())
-            .unwrap_or_default()
+            .map_or_else(String::new, |(k, _)| k.clone())
     }
 }
 

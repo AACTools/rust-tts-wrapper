@@ -224,7 +224,6 @@ pub(crate) fn pcm16_mono_to_wav(pcm: &[u8], sample_rate: Option<u32>) -> TtsResu
 pub trait TtsEngine: Send + Sync + fmt::Debug {
     /// Start speaking `text` asynchronously.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     fn speak(
         &self,
         text: &str,
@@ -260,7 +259,6 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
     }
 
     /// Speak `text` synchronously, blocking until synthesis completes.
-    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     fn speak_sync(
         &self,
