@@ -61,7 +61,7 @@ Canonical keys per engine (also available at runtime via
 | playht | `apiKey`, `userId` |
 | watson | `apiKey`, `region`, `instanceId` |
 | witai | `token` |
-| sherpaonnx | `modelPath`, `modelId`, `numThreads`, `numSteps`, `provider`, `referenceAudio`, `referenceText` |
+| sherpaonnx | `modelPath`, `modelId`, `numThreads`, `numSteps`, `provider`, `referenceAudio`, `referenceText`, `lexiconCompat`, `lexiconCachePath` |
 | qwen3-local | `modelsDir` (required), `threads`, `temperature`, `topK`, `maxTokens` |
 | omnivoice-local | `modelPath`, `codecPath` (required GGUFs), `numSteps`, `seed`, `instruct`, `language` |
 | floravox | `modelsDir`, `modelId`, `misaki`, `chars`, `speaker` |
@@ -155,6 +155,31 @@ registry crate (canonical:
 [AACTools/sherpa-onnx-tts-models](https://github.com/AACTools/sherpa-onnx-tts-models)).
 Models load from `~/.rust-tts-wrapper/sherpaonnx/`; refresh the
 registry with `cargo update -p sherpa-onnx-models`.
+
+### Non-English Piper via VoiceGarden G2P (`sherpa-g2p` feature, #82)
+
+Non-English piper voices under sherpa-onnx 2.x have no phonetic
+front-end (espeak left the runtime). With the `sherpa-g2p` cargo
+feature, the wrapper phonemizes them itself — dictionary + Phonetisaurus
+OOV fallback from a [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons)
+bundle, handed to sherpa as phoneme codepoints. Out-of-vocabulary
+words and numbers are **spoken**, not dropped (the built-in lexicon
+front-end drops them).
+
+- German voices (`piper-de_DE-*` and `coqui-de-css10` — every
+  single-language German model in the registry) are enabled: the `deu`
+  bundle (expanded) is
+  fetched and sha-verified automatically on first use and cached under
+  `~/.voicegarden/lexicons` (pre-seed it for fully-offline first use — the cache root honors
+  `VOICEGARDEN_LEXICON_DIR`).
+- `sherpa_lang::g2p_enabled_for(&model)` tells download surfaces which
+  models are enabled (validated bundle row).
+- `lexiconCompat: true` additionally writes a converted `lexicon.txt`
+  beside the model (or under `lexiconCachePath` when the model dir is
+  read-only) — an interop artifact for bare sherpa consumers; the
+  wrapper's own front-end does not need it.
+- Apple builds: add the feature to `scripts/apple/build-xcframework.sh`
+  and `scripts/build-ios-sherpa.sh` (already done there).
 
 ## Cloud engine notes
 

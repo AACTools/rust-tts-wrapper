@@ -59,8 +59,9 @@ pub struct LangBundle {
     /// Bundle key inside that archive ("de" | "deu" — keys differ
     /// between archives).
     pub key: &'static str,
-    /// Phase-5 download-enablement flag; false until the Phase 4 bake-off
-    /// and validation pass. Does NOT gate front-end activation.
+    /// Download-enablement flag; `false` until the language's bake-off
+    /// and validation pass (German deu: passed). Does NOT gate
+    /// front-end activation.
     pub validated: bool,
 }
 
@@ -80,7 +81,7 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         bcp47: "de",
         archive: Archive::Expanded,
         key: "deu",
-        validated: false,
+        validated: true, // Phase 5: bake-off + ear-check + CI passed
     },
     LangBundle {
         bcp47: "de",
@@ -121,6 +122,16 @@ pub fn bundles_for_language(lang_code: &str) -> Vec<&'static LangBundle> {
 /// module exists to prevent.
 #[must_use]
 pub fn default_bundle_for_model(model: &SherpaModelInfo) -> Option<&'static LangBundle> {
+    Some(&LANG_BUNDLES[default_row_in(LANG_BUNDLES, model)?])
+}
+
+/// The index of the default row for `model` in `rows` — the shared
+/// resolution shared by [`default_bundle_for_model`] and the
+/// [`g2p_enabled_with`] seam (tests pin the `validated` half with
+/// synthetic rows: the shipped unvalidated row is never a default, so
+/// the live table cannot exercise it). Returns an index so callers
+/// can bridge lifetimes however they need.
+fn default_row_in(rows: &[LangBundle], model: &SherpaModelInfo) -> Option<usize> {
     if crate::sherpaonnx_engine::is_bilingual_en_compound(&model.id.to_ascii_lowercase()) {
         return None;
     }
@@ -133,7 +144,29 @@ pub fn default_bundle_for_model(model: &SherpaModelInfo) -> Option<&'static Lang
     {
         return None; // genuinely multi-language
     }
-    bundles_for_language(&first.lang_code).into_iter().next()
+    rows.iter().position(|b| b.bcp47 == primary)
+}
+
+/// May a downloader offer this model for G2P-backed synthesis? True
+/// when the model's language resolves to an allowlist row that has
+/// PASSED validation — the Phase 5 download-enablement gate. This is
+/// the one call downstream download surfaces should make (rather than
+/// reaching into `LANG_BUNDLES`): front-end ACTIVATION still keys on
+/// row presence, so a validated bundle also speaks when installed.
+#[must_use]
+pub fn g2p_enabled_for(model: &SherpaModelInfo) -> bool {
+    g2p_enabled_with(LANG_BUNDLES, model)
+}
+
+/// [`g2p_enabled_for`] against an explicit allowlist — the seam that
+/// pins the `validated` half of the gate: the shipped table can never
+/// return an unvalidated DEFAULT row (its only unvalidated row is the
+/// base `de` alternative), so a synthetic unvalidated default is the
+/// only way to test that download enablement stays off until a
+/// language passes validation.
+#[must_use]
+pub fn g2p_enabled_with(rows: &[LangBundle], model: &SherpaModelInfo) -> bool {
+    default_row_in(rows, model).is_some_and(|i| rows[i].validated)
 }
 
 #[cfg(test)]
@@ -167,6 +200,38 @@ mod tests {
     }
 
     #[test]
+    fn download_enablement_gates_on_validation() {
+        let m = model("piper-de_DE-thorsten-medium", "de", "DE");
+        assert!(g2p_enabled_for(&m));
+        assert!(!g2p_enabled_for(&model("piper-en_US-amy-low", "en", "US")));
+        assert!(!g2p_enabled_for(&model(
+            "piper-pl_PL-gosia-medium",
+            "pl",
+            "PL"
+        )));
+        assert!(!g2p_enabled_for(&model("melo-zh_en-melo-tts", "zh", "CN")));
+
+        // the seam: a synthetic UNVALIDATED default row must disable —
+        // the shipped table can never exercise this (its only
+        // unvalidated row is never a default), and it is exactly the
+        // state a NEW language ships in
+        let unvalidated = [LangBundle {
+            bcp47: "de",
+            archive: Archive::Expanded,
+            key: "deu",
+            validated: false,
+        }];
+        assert!(!g2p_enabled_with(&unvalidated, &m));
+        let validated = [LangBundle {
+            bcp47: "de",
+            archive: Archive::Expanded,
+            key: "deu",
+            validated: true,
+        }];
+        assert!(g2p_enabled_with(&validated, &m));
+    }
+
+    #[test]
     fn thorsten_resolves_to_default_expanded_row() {
         // registry spelling: piper ids embed de_DE, lang_code is bare "de";
         // the Phase 4 bake-off made deu (expanded) the default
@@ -177,14 +242,15 @@ mod tests {
     }
 
     #[test]
-    fn german_rows_ship_both_unvalidated_in_preference_order() {
+    fn german_rows_preference_order_deu_validated() {
         let rows = bundles_for_language("de");
         assert_eq!(rows.len(), 2, "both German rows ship");
         assert_eq!((rows[0].key, rows[0].archive), ("deu", Archive::Expanded));
         assert_eq!((rows[1].key, rows[1].archive), ("de", Archive::Base));
+        assert!(rows[0].validated, "deu validated: Phase 5");
         assert!(
-            rows.iter().all(|r| !r.validated),
-            "validated flips in Phase 5, after Phase 4 passes"
+            !rows[1].validated,
+            "base de stays the unvalidated alternative"
         );
     }
 

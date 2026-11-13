@@ -462,14 +462,21 @@ pattern):
 
 ### Phase 5 — enable download + docs
 
-- Flip `validated: true` on the bake-off-winning German row (both rows have
-  existed since Phase 1, `validated: false`) → voices surface/download
-  guidance updated (`get_voices` annotations or registry metadata, whatever
-  the download-enablement mechanism consumes).
-- Update `docs/engines.md`, `README.md` (non-English piper section), and
-  the FFI/Swift docs for the new `lexiconCachePath` credentials key.
-- Leave a pointer in `voicegarden-lexicons` to reconcile the README's
-  "symbols all resolve" claim with the sherpa-runtime conversion need.
+**Implemented (closing PR).** Flipped `validated: true` on the deu
+row; download surfaces consume it through
+`sherpa_lang::g2p_enabled_for(&SherpaModelInfo)` — the one-call gate
+(`get_voices` has no downloadability surface in this wrapper;
+downloaders live downstream). `docs/engines.md` gained the
+`lexiconCompat`/`lexiconCachePath` credentials keys and a
+"Non-English Piper via VoiceGarden G2P" section; `README.md` lists the
+`sherpa-g2p` feature. The voicegarden-lexicons README-claim
+reconciliation is filed as a follow-up below rather than a PR.
+
+- ~~Flip `validated: true`~~ ✅
+- ~~docs/engines.md, README.md~~ ✅
+- voicegarden-lexicons pointer: **follow-up** (upstream repo note,
+  not blocking — the runtime conversion requirement is documented
+  here and in the bundle review thread).
 
 ## Feature and dependency changes
 

@@ -78,7 +78,7 @@ All six suites (including Python) run in CI on every push
 ## Feature flags
 
 `system` `sapi` `avsynth` — OS voices · `cloud` — 22 providers ·
-`sherpaonnx` `qwen3-local` `omnivoice-local` `floravox` `pocket-timing`
+`sherpaonnx` `sherpa-g2p` `qwen3-local` `omnivoice-local` `floravox` `pocket-timing`
 — offline engines · `cloning` — voice banking · `display_names` — ICU
 locale names. Details in the [engines doc](docs/engines.md); local
 GGML engines need their C++ runtime built first
