@@ -363,18 +363,21 @@ Mac-team review)** — **`deu` (expanded) is the default**:
 | | `de` (base) | `deu` (expanded) |
 |---|---|---|
 | Phase 4 word set (26 words) | dict 73.1%, fallback 26.9%, drop 0 | dict 76.9%, fallback 23.1%, drop 0 |
-| corpus dict share (top 50k types, weighted, post-normalization) | 92.13% | 98.05% |
-| corpus FALLBACK-chain share (WFST + rule) | **7.87%** | **1.95%** |
+| corpus dict share (top 50k types, weighted, post-normalization) | 92.24% | 98.21% |
+| corpus FALLBACK-chain share (WFST + rule) | **7.75%** | **1.79%** |
 | corpus runtime DROPPED share | 0.005% | 0.000% |
-| heuristic error signal (fallback share × WFST holdout err — see note) | 0.50% | **0.27%** |
+| heuristic error signal (fallback share × WFST holdout err — see note) | 0.50% | **0.25%** |
 
 The 0.50%/0.27% figures are a **heuristic comparison signal, not a
 measurement**: the fallback bucket mixes WFST guesses with rule-fallback
 spellings, and the holdout error rate only measures the WFST part
 (second Mac-team review). Compare across bundles, not as absolutes.
-Tier attribution uses the runtime's own `token_parts` normalization, so
-`42.` counts as a dictionary hit when its normalized form
-(`zweiundvierzig`) is one.
+Tier attribution uses the runtime's own `token_parts` normalization
+AND the runtime's lookup key (`lookup_key`: NFC + edge-punctuation
+strip — `token_parts` reattaches the period, and looking up
+`"zweiundvierzig."` raw still miscounted it as fallback; third
+Mac-team review), so `42.` counts as a dictionary hit when its
+normalized form (`zweiundvierzig`) is one.
 
 Corpus: a subtitle-derived German frequency list (top 50k types,
 frequency-weighted) — a realistic usage sample substituting for the

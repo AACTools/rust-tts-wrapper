@@ -288,6 +288,21 @@ pub fn token_parts(token: &str) -> Option<Vec<String>> {
     }
 }
 
+/// The dictionary lookup key for one [`token_parts`] part: NFC-
+/// normalized, edge punctuation stripped — exactly what the runtime
+/// hands the lexicon (`phonemize` NFC-normalizes each part, then
+/// floravox's `phonemize_token` applies `word_core`; the FST lexicon
+/// lowercases its lookup itself). Public so the bake-off attributes
+/// tiers on the same key the runtime looks up — `token_parts`
+/// reattaches punctuation (`"42."` → `"zweiundvierzig."`), and
+/// looking THAT up raw miscounts a dictionary hit as fallback
+/// (Mac-team review #3).
+#[must_use]
+pub fn lookup_key(part: &str) -> Option<String> {
+    let nfc: String = part.nfc().collect();
+    floravox_g2p_fst::word_core(&nfc).map(str::to_string)
+}
+
 /// Rebuild a token around an expanded core: the non-alphanumeric edges
 /// of the original (the punctuation `word_core` stripped) are reattached
 /// so `punct_phonemes` still sees them ("42." → "zweiundvierzig.").

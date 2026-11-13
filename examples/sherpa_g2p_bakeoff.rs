@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use floravox_g2p_fst::MmapLexicon;
-use rust_tts_wrapper::sherpa_g2p::{token_parts, G2pFrontend};
+use rust_tts_wrapper::sherpa_g2p::{lookup_key, token_parts, G2pFrontend};
 
 /// The plan's Phase 4 word set: common words, inflections, a compound,
 /// proper names, number words the digit normalizer produces, and nonce
@@ -195,9 +195,12 @@ fn classify(b: &mut Bundle, word: &str) -> &'static str {
     let tier = match token_parts(word) {
         None => "drop",
         Some(parts) => {
+            // the runtime strips edge punctuation (reattached by
+            // token_parts: "42." → "zweiundvierzig.") and NFC-
+            // normalizes before the lookup — same key here
             if parts
                 .iter()
-                .all(|p| b.lex.lookup(&p.to_lowercase()).is_some())
+                .all(|p| lookup_key(p).is_some_and(|k| b.lex.lookup(&k).is_some()))
             {
                 "dict"
             } else {
