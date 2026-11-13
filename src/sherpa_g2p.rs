@@ -763,7 +763,7 @@ mod tests {
 
         // everything dropped → empty sentences (caller falls back to text)
         let r = fe.phonemize("qqqq");
-        assert!(r.sentences.is_empty());
+        assert!(r.sentences.is_empty(), "all-dropped falls back to text");
         assert_eq!(r.dropped, 1);
     }
 
