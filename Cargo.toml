@@ -227,6 +227,11 @@ path = "examples/sherpa_g2p_probe.rs"
 required-features = ["sherpaonnx", "sherpa-g2p"]
 
 [[example]]
+name = "sherpa-g2p-bakeoff"
+path = "examples/sherpa_g2p_bakeoff.rs"
+required-features = ["sherpaonnx", "sherpa-g2p"]
+
+[[example]]
 name = "kokoro-ab"
 path = "examples/kokoro_ab.rs"
 required-features = ["sherpaonnx"]

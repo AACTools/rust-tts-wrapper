@@ -9,6 +9,9 @@ on:
   pull_request:
     paths:
       - "src/sherpaonnx_engine.rs"
+      - "src/sherpa_g2p.rs"
+      - "src/sherpa_lang.rs"
+      - "src/sherpa_lexicon.rs"
       - "tests/sherpaonnx_live.rs"
       - ".github/workflows/sherpaonnx-live.yml"
       - "scripts/get-model-url.py"
@@ -50,9 +53,14 @@ jobs:
             ~/.rust-tts-wrapper/sherpaonnx/supertonic-3-multilingual
             ~/.rust-tts-wrapper/sherpaonnx/zipvoice-zh_en-emilia-distill-int8
             ~/.rust-tts-wrapper/sherpaonnx/kyutai-en-pocket-tts-int8
+            ~/.rust-tts-wrapper/sherpaonnx/piper-de_DE-thorsten-medium
             ~/.rust-tts-wrapper/sherpaonnx/hifigan_v2.onnx
             ~/.rust-tts-wrapper/sherpaonnx/vocos_24khz.onnx
             ~/.voicegarden/lexicons/eng-US
+            ~/.voicegarden/lexicons/de
+            ~/.voicegarden/lexicons/deu
+            ~/.voicegarden/lexicons/expanded.json
+            ~/.voicegarden/lexicons/lexicons.json
           key: sherpa-models-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             sherpa-models-${{ matrix.os }}-
@@ -245,6 +253,51 @@ jobs:
           rm pocket.tar.bz2
           ls -la kyutai-en-pocket-tts-int8/ | head -5
 
+      - name: Download German test model + voicegarden bundles (#82)
+        # thorsten + BOTH German bundles (deu = the Phase 4 default row,
+        # de for the coverage tests), provisioned with the crate's own
+        # cache contract: manifest + per-key dirs + .sha256 stamps whose
+        # content equals the manifest sha (a placeholder stamp would make
+        # provisioning re-download on every run).
+        shell: bash
+        run: |
+          set -e
+          cd "$MODEL_DIR"
+          if [ ! -d "piper-de_DE-thorsten-medium" ] || [ -z "$(ls -A piper-de_DE-thorsten-medium 2>/dev/null)" ]; then
+            URL=$(get-model-url.py piper-de_DE-thorsten-medium)
+            echo "Downloading $URL"
+            curl -fsSL -o thorsten.tar.bz2 "$URL"
+            mkdir -p piper-de_DE-thorsten-medium
+            tar -xjf thorsten.tar.bz2 -C piper-de_DE-thorsten-medium --strip-components=1
+            rm thorsten.tar.bz2
+          fi
+          VG="$HOME/.voicegarden/lexicons"
+          mkdir -p "$VG"
+          BASE=https://github.com/AACTools/voicegarden-lexicons/releases/download/v0.3.1
+          for m in expanded.json lexicons.json; do
+            [ -f "$VG/$m" ] || curl -fsSL -o "$VG/$m" "$BASE/$m"
+          done
+          # shas from the v0.3.1 manifests (deterministic release
+          # artifacts; also recorded in SHERPA_NONENGLISH_G2P_PLAN.md)
+          provision() {
+            lang="$1"; sha="$2"
+            dir="$VG/$lang"
+            if [ -f "$dir/.sha256" ] && [ "$(cat "$dir/.sha256")" = "$sha" ] \
+               && [ -f "$dir/$lang.fst" ] && [ -f "$dir/$lang.pho" ]; then
+              echo "$lang already provisioned (sha matches)"
+              return
+            fi
+            mkdir -p "$dir"
+            curl -fsSL -o "$lang.tar.gz" "$BASE/$lang.tar.gz"
+            tar -xzf "$lang.tar.gz" -C "$dir"
+            rm "$lang.tar.gz"
+            printf '%s' "$sha" > "$dir/.sha256"
+            ls -la "$dir" | head -5
+          }
+          # deu (expanded, the default row): 880f03da… ; de (base): add4f489…
+          provision deu 880f03dafce83b74b8d90e6c4853a49eb12c3d1c73f9a8366bd397eede61b266
+          provision de add4f489d3f8f9c13eb03ef983006fc8b8054cdf6d25e6e2d8af4462fda66323
+
       - name: Ensure sherpa-onnx prebuilt libs are complete
         # sherpa-onnx-sys caches its downloaded static libs under
         # target/sherpa-onnx-prebuilt and SKIPS the download when the
@@ -266,3 +319,21 @@ jobs:
         shell: bash
         run: |
           cargo test --test sherpaonnx_live --no-default-features --features sherpaonnx -- --ignored --nocapture --test-threads=1
+
+      - name: Run German G2P live + real-bundle tests (#82)
+        # The wrapper-side G2P front-end: engine → provisioning →
+        # phoneme_codepoints → real audio, plus the Phase 2 converter's
+        # real-coverage pins and the Phase 4 pre-synthesis assertions.
+        shell: bash
+        run: |
+          VG="$HOME/.voicegarden/lexicons"
+          TH="$MODEL_DIR/piper-de_DE-thorsten-medium"
+          export SHERPA_DE_MODEL_DIR="$TH"
+          export SHERPA_DE_BUNDLE_DIR="$VG/deu"
+          export SHERPA_DE_MANIFEST="$VG/expanded.json"
+          export SHERPA_TEST_THORSTEN_TOKENS="$TH/tokens.txt"
+          export SHERPA_TEST_DE_DIR="$VG/de"
+          export SHERPA_TEST_DE_LEXICON="$VG/de/lexicon.txt"
+          export SHERPA_TEST_DEU_LEXICON="$VG/deu/lexicon.txt"
+          cargo test --test sherpaonnx_live --no-default-features --features sherpaonnx,sherpa-g2p -- --ignored --nocapture --test-threads=1 german
+          cargo test --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_g2p sherpa_lexicon -- --ignored --nocapture

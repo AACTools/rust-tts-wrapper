@@ -65,24 +65,25 @@ pub struct LangBundle {
 }
 
 /// The allowlist. Order is preference order: the first row matching a
-/// language is the default until Phase 4's bake-off reorders it.
-///
-/// German ships both rows (base `de`, expanded `deu`) so the bake-off can
-/// run either; the numbers that motivated keeping both are recorded in
-/// `SHERPA_NONENGLISH_G2P_PLAN.md` (base: 277,912 entries, Phonetisaurus
-/// 93.6% holdout, 32.5 MB; expanded: 333,945 entries but distilled adds
-/// at 0.711 agreement with no audit, Phonetisaurus 86.1%, 50.2 MB).
+/// language is the default. **German default = the expanded `deu`
+/// bundle, decided by the Phase 4 bake-off** (recorded in
+/// `SHERPA_NONENGLISH_G2P_PLAN.md`): on a frequency-weighted 50k-type
+/// German corpus, deu drops 0.24% of token occurrences vs de's 1.20%
+/// and its expected mispronunciation is 0.24% vs 0.43% (its larger
+/// dictionary more than pays for its weaker 86.1%-holdout WFST; de's
+/// is 93.6%). The base `de` row stays second for comparison and as a
+/// smaller-disk alternative (32.5 MB WFST vs 50.2 MB).
 pub const LANG_BUNDLES: &[LangBundle] = &[
-    LangBundle {
-        bcp47: "de",
-        archive: Archive::Base,
-        key: "de",
-        validated: false,
-    },
     LangBundle {
         bcp47: "de",
         archive: Archive::Expanded,
         key: "deu",
+        validated: false,
+    },
+    LangBundle {
+        bcp47: "de",
+        archive: Archive::Base,
+        key: "de",
         validated: false,
     },
 ];
@@ -164,23 +165,24 @@ mod tests {
     }
 
     #[test]
-    fn thorsten_resolves_to_default_base_row() {
-        // registry spelling: piper ids embed de_DE, lang_code is bare "de"
+    fn thorsten_resolves_to_default_expanded_row() {
+        // registry spelling: piper ids embed de_DE, lang_code is bare "de";
+        // the Phase 4 bake-off made deu (expanded) the default
         let m = model("piper-de_DE-thorsten-medium", "de", "DE");
         let b = default_bundle_for_model(&m).expect("thorsten resolves");
-        assert_eq!((b.bcp47, b.key), ("de", "de"));
-        assert_eq!(b.archive, Archive::Base);
+        assert_eq!((b.bcp47, b.key), ("de", "deu"));
+        assert_eq!(b.archive, Archive::Expanded);
     }
 
     #[test]
     fn german_rows_ship_both_unvalidated_in_preference_order() {
         let rows = bundles_for_language("de");
-        assert_eq!(rows.len(), 2, "both German rows ship for the bake-off");
-        assert_eq!((rows[0].key, rows[0].archive), ("de", Archive::Base));
-        assert_eq!((rows[1].key, rows[1].archive), ("deu", Archive::Expanded));
+        assert_eq!(rows.len(), 2, "both German rows ship");
+        assert_eq!((rows[0].key, rows[0].archive), ("deu", Archive::Expanded));
+        assert_eq!((rows[1].key, rows[1].archive), ("de", Archive::Base));
         assert!(
             rows.iter().all(|r| !r.validated),
-            "Phase 1: nothing is validated until the Phase 4 bake-off"
+            "validated flips in Phase 5, after Phase 4 passes"
         );
     }
 
@@ -304,7 +306,7 @@ mod tests {
             if single_german {
                 de_single += 1;
                 let b = resolved.expect("single-language German model resolves");
-                assert_eq!((b.key, b.archive), ("de", Archive::Base), "id {id}");
+                assert_eq!((b.key, b.archive), ("deu", Archive::Expanded), "id {id}");
             } else {
                 assert!(resolved.is_none(), "id {id} must not resolve");
             }

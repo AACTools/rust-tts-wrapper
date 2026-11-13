@@ -996,6 +996,69 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the real thorsten tokens.txt + de bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DE_DIR)"]
+    fn real_bundle_pre_synthesis_phone_assertions() {
+        // upstream #4139's lesson, as a gate: a non-empty WAV passes even
+        // when the front-end dropped half the sentence, so the words that
+        // matter must produce valid model phones BEFORE any synthesis —
+        // a capitalized noun, a name ABSENT from the dictionary, and a
+        // number (the digit normalizer's job)
+        let (Some(tokens), Some(bundle)) = (
+            env_val("SHERPA_TEST_THORSTEN_TOKENS"),
+            env_val("SHERPA_TEST_DE_DIR"),
+        ) else {
+            eprintln!("skipping: env vars not set");
+            return;
+        };
+        let vocab = read_tokens_txt_public(&tokens).unwrap();
+        let mut fe = G2pFrontend::open(&bundle, "de", &tokens).expect("frontend");
+
+        // a name confirmed absent from the dictionary (pick from a small
+        // candidate list so the test self-adjusts if the lexicon grows)
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let lex = floravox_g2p_fst::MmapLexicon::open(bundle.join(format!("{key}.fst")))
+            .expect("direct lexicon open for the absence check");
+        let absent_name = ["xanthippe", "balderich", "gunzelin"]
+            .into_iter()
+            .find(|n| lex.lookup(n).is_none())
+            .expect("at least one candidate absent from the dictionary");
+
+        let r = fe.phonemize("Haus");
+        assert_eq!((r.words, r.dropped), (1, 0), "capitalized noun");
+        for sentence in &r.sentences {
+            for &cp in sentence {
+                let c = char::from_u32(cp.cast_unsigned()).unwrap();
+                assert!(vocab.contains(&c.to_string()), "Haus: {c:?} not in vocab");
+            }
+        }
+
+        let r = fe.phonemize(absent_name);
+        assert_eq!(
+            (r.words, r.dropped),
+            (1, 0),
+            "dictionary-absent name must still be SPOKEN (WFST), not dropped"
+        );
+        assert!(!r.sentences.is_empty());
+        for sentence in &r.sentences {
+            for &cp in sentence {
+                let c = char::from_u32(cp.cast_unsigned()).unwrap();
+                assert!(
+                    vocab.contains(&c.to_string()),
+                    "{absent_name}: {c:?} not in vocab"
+                );
+            }
+        }
+
+        let r = fe.phonemize("42.");
+        assert_eq!(r.dropped, 0, "number with punctuation");
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        assert!(sentence.ends_with('.'), "pause token survives: {sentence}");
+    }
+
+    #[test]
     #[ignore = "needs the real de bundle dir (SHERPA_TEST_DE_DIR)"]
     fn real_bundle_oov_word_goes_through_the_wfst() {
         let Some(bundle) = env_val("SHERPA_TEST_DE_DIR") else {
