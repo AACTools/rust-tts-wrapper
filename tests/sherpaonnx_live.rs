@@ -146,14 +146,17 @@ fn vits_piper_german_g2p_synthesizes() {
     std::fs::create_dir_all(&parent).unwrap();
     copy_dir(&model_dir, &parent.join("piper-de_DE-thorsten-medium"));
 
-    let engine = create_engine(
-        "sherpaonnx",
-        &format!(
-            r#"{{"modelId":"piper-de_DE-thorsten-medium","modelPath":"{}"}}"#,
-            parent.display()
-        ),
-    )
-    .expect("sherpaonnx engine");
+    // serialize with serde_json: a raw format! interpolates the path
+    // into JSON, and Windows backslashes (C:\Users\…) become invalid
+    // escapes — the engine then fails to parse the credentials and
+    // loses BOTH fields (Mac-team review: "No SherpaOnnx modelId
+    // configured" on the Windows runner)
+    let credentials = serde_json::json!({
+        "modelId": "piper-de_DE-thorsten-medium",
+        "modelPath": parent.display().to_string(),
+    })
+    .to_string();
+    let engine = create_engine("sherpaonnx", &credentials).expect("sherpaonnx engine");
 
     let sink = std::sync::Arc::new(std::sync::Mutex::new(AudioSink::new()));
     let sink_for_cb = sink.clone();

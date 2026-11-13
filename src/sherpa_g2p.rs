@@ -194,26 +194,14 @@ impl G2pFrontend {
                 // "COVID-19" → "covid neunzehn", "A4" → "a vier",
                 // "b2b" → "b zwei b". Leading zeros collapse ("007" →
                 // "sieben") — accepted for quantities, noted for codes.
-                let expanded: String;
-                let parts: Vec<&str> = {
-                    let core = floravox_g2p_fst::word_core(token).unwrap_or_default();
-                    if core.chars().any(|c| c.is_ascii_digit()) {
-                        let Some(german) = digits_to_german(core)
-                            .or_else(|| digits_plus_suffix(core))
-                            .or_else(|| split_digit_runs(core))
-                        else {
-                            // unhandled numeric (">999_999_999",
-                            // malformed separators): drop, counted
-                            dropped += 1;
-                            words += 1;
-                            continue;
-                        };
-                        expanded = reattach_punct(token, &german);
-                        expanded.split_whitespace().collect()
-                    } else {
-                        vec![token]
-                    }
+                let Some(parts_owned) = token_parts(token) else {
+                    // unhandled numeric (">999_999_999", malformed
+                    // separators): drop, counted
+                    dropped += 1;
+                    words += 1;
+                    continue;
                 };
+                let parts: Vec<&str> = parts_owned.iter().map(String::as_str).collect();
                 words += 1;
                 let mut mapped: Vec<char> = Vec::new();
                 let mut ok = true;
@@ -270,6 +258,33 @@ impl G2pFrontend {
             words,
             dropped,
         }
+    }
+}
+
+/// The words the dictionary/WFST will actually be asked for, after
+/// the digit normalization: digit-bearing cores expand (`42.` →
+/// `["zweiundvierzig."]`, `COVID-19` → `["covid", "neunzehn"]` with
+/// punctuation reattached), everything else passes through as the
+/// token itself. `None` = an unhandled numeric the caller drops.
+/// Public so the bake-off attributes dictionary-vs-fallback tiers on
+/// the SAME lookup words the runtime uses (Mac-team review: looking
+/// up the raw `42.` miscounted a normalized dictionary hit as
+/// fallback).
+#[must_use]
+pub fn token_parts(token: &str) -> Option<Vec<String>> {
+    let core = floravox_g2p_fst::word_core(token).unwrap_or_default();
+    if core.chars().any(|c| c.is_ascii_digit()) {
+        let german = digits_to_german(core)
+            .or_else(|| digits_plus_suffix(core))
+            .or_else(|| split_digit_runs(core))?;
+        Some(
+            reattach_punct(token, &german)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        )
+    } else {
+        Some(vec![token.to_string()])
     }
 }
 

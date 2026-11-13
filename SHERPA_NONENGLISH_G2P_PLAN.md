@@ -363,10 +363,18 @@ Mac-team review)** — **`deu` (expanded) is the default**:
 | | `de` (base) | `deu` (expanded) |
 |---|---|---|
 | Phase 4 word set (26 words) | dict 73.1%, fallback 26.9%, drop 0 | dict 76.9%, fallback 23.1%, drop 0 |
-| corpus dict share (top 50k types, weighted) | 92.12% | 98.04% |
-| corpus FALLBACK-chain share (WFST + rule) | **7.87%** | **1.96%** |
+| corpus dict share (top 50k types, weighted, post-normalization) | 92.13% | 98.05% |
+| corpus FALLBACK-chain share (WFST + rule) | **7.87%** | **1.95%** |
 | corpus runtime DROPPED share | 0.005% | 0.000% |
-| expected mispronunciation (share × holdout err) | 0.50% | **0.27%** |
+| heuristic error signal (fallback share × WFST holdout err — see note) | 0.50% | **0.27%** |
+
+The 0.50%/0.27% figures are a **heuristic comparison signal, not a
+measurement**: the fallback bucket mixes WFST guesses with rule-fallback
+spellings, and the holdout error rate only measures the WFST part
+(second Mac-team review). Compare across bundles, not as absolutes.
+Tier attribution uses the runtime's own `token_parts` normalization, so
+`42.` counts as a dictionary hit when its normalized form
+(`zweiundvierzig`) is one.
 
 Corpus: a subtitle-derived German frequency list (top 50k types,
 frequency-weighted) — a realistic usage sample substituting for the

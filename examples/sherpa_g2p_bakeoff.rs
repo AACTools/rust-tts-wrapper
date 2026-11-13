@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use floravox_g2p_fst::MmapLexicon;
-use rust_tts_wrapper::sherpa_g2p::G2pFrontend;
+use rust_tts_wrapper::sherpa_g2p::{token_parts, G2pFrontend};
 
 /// The plan's Phase 4 word set: common words, inflections, a compound,
 /// proper names, number words the digit normalizer produces, and nonce
@@ -183,14 +183,27 @@ fn load(name: &'static str, dir: &Path, tokens: &Path) -> Bundle {
     Bundle { frontend, lex }
 }
 
-/// Tier attribution + the RUNTIME decision for one word:
-/// `dict`/`wfst` = spoken (which tier supplied it), `drop` = the
-/// runtime path dropped it (dictionary AND fallback both unmappable).
+/// Tier attribution + the RUNTIME decision for one word. Attribution
+/// uses [`token_parts`] — the SAME normalized lookup words the runtime
+/// phonemizes — so a digit-bearing corpus token counts as `dict` when
+/// its NORMALIZED form (`42.` → `zweiundvierzig`) is a dictionary hit
+/// (Mac-team review). `dict` = every part a dictionary hit · `wfst` =
+/// at least one part resolved by the fallback chain (WFST guess or
+/// rule spelling — the bucket is mixed) · `drop` = the runtime path
+/// dropped it.
 fn classify(b: &mut Bundle, word: &str) -> &'static str {
-    let tier = if b.lex.lookup(&word.to_lowercase()).is_some() {
-        "dict"
-    } else {
-        "wfst"
+    let tier = match token_parts(word) {
+        None => "drop",
+        Some(parts) => {
+            if parts
+                .iter()
+                .all(|p| b.lex.lookup(&p.to_lowercase()).is_some())
+            {
+                "dict"
+            } else {
+                "wfst"
+            }
+        }
     };
     let r = b.frontend.phonemize(word);
     if r.dropped == 0 && !r.sentences.is_empty() {
@@ -214,13 +227,20 @@ fn report(label: &str, t: &[Tally; 2]) {
 }
 
 #[allow(clippy::cast_precision_loss)]
+/// A HEURISTIC, not a measurement (Mac-team review): the fallback
+/// bucket mixes WFST guesses with rule-fallback spellings, and the
+/// WFST holdout error rate only measures the WFST part — treat the
+/// product as a rough comparison signal between bundles on the same
+/// corpus, not an absolute quality figure.
 fn verdict(name: &str, wfst_exact: f64, t: &Tally) {
     let total = t.total().max(1);
     let share = t.wfst as f64 / total as f64 * 100.0;
-    let expected_err = share / 100.0 * (1.0 - wfst_exact) * 100.0;
+    let heuristic = share / 100.0 * (1.0 - wfst_exact) * 100.0;
     println!(
-        "{name}: WFST share {share:.2}% × holdout error {:.1}% → expected \
-         mispronunciation ≈ {expected_err:.2}% of tokens",
+        "{name}: fallback share {share:.2}% × WFST holdout error {:.1}% → \
+         heuristic error signal ≈ {heuristic:.2}% of tokens (heuristic: the \
+         bucket mixes WFST guesses with rule spellings; compare across \
+         bundles, not as an absolute)",
         (1.0 - wfst_exact) * 100.0
     );
 }
