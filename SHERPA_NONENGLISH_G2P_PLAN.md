@@ -368,7 +368,7 @@ Mac-team review)** — **`deu` (expanded) is the default**:
 | corpus runtime DROPPED share | 0.005% | 0.000% |
 | heuristic error signal (fallback share × WFST holdout err — see note) | 0.50% | **0.25%** |
 
-The 0.50%/0.27% figures are a **heuristic comparison signal, not a
+The 0.50%/0.25% figures are a **heuristic comparison signal, not a
 measurement**: the fallback bucket mixes WFST guesses with rule-fallback
 spellings, and the holdout error rate only measures the WFST part
 (second Mac-team review). Compare across bundles, not as absolutes.
@@ -389,8 +389,8 @@ names) instead of dropping them — so actual runtime drops are ≈0 for
 both bundles, and the quality difference lives in the fallback-chain
 share: 4× fewer words leave the dictionary tier with deu. The
 decision is unchanged and now rests on the honest numbers: deu's
-larger dictionary more than pays for its weaker WFST (1.96% × 13.9%
-holdout error < 7.87% × 6.4%). Concrete word-set data point:
+larger dictionary more than pays for its weaker WFST (1.79% × 13.9%
+holdout error < 7.75% × 6.4%). Concrete word-set data point:
 `zweiundvierzig` (the digit-normalizer output for 42) is a dictionary
 hit in deu, a fallback guess in de. `LANG_BUNDLES` order updated (deu
 first); the base row stays second as the smaller-disk alternative.
