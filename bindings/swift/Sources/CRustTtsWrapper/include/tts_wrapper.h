@@ -418,6 +418,20 @@ char *tts_get_engine_setups_json(void);
 char *tts_get_sherpa_models_json(void);
 
 /**
+ * Provision (fetch when not cached, sha-verify) the VoiceGarden G2P
+ * bundle for a Sherpa-ONNX model's language (#82), so installers can
+ * make a non-English piper voice speak offline on first use. Returns
+ * true when the bundle is present in the cache afterwards.
+ *
+ * Requires the `sherpa-g2p` feature (false with an EngineNotAvailable
+ * detail otherwise) and a model whose language has a validated
+ * allowlist row (false with a ModelNotFound detail otherwise). The
+ * cache honors `VOICEGARDEN_LEXICON_DIR`; a cache miss downloads
+ * 13–19 MB and verifies the manifest sha256.
+ */
+bool tts_provision_sherpa_g2p_bundle(const char *model_id);
+
+/**
  * Verify the context's credentials with an explicit "unverified"
  * state (GH #69).
  *

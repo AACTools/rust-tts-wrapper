@@ -33,6 +33,7 @@ jobs:
         run: |
           cargo clippy --no-default-features --features cloud,sherpaonnx,sherpa-g2p --all-targets -- -D warnings
           cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib
+          cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --test sherpa_models_ffi
 
       - name: Build (Linux features)
         run: cargo build --no-default-features --features system,cloud
