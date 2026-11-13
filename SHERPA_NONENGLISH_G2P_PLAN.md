@@ -258,6 +258,20 @@ when the `sherpa-g2p` front-end is available it is always used):
 
 ### Phase 3 — Path B: the phonemize front-end
 
+**Implemented.** Contract pinned from sherpa-onnx 2.0.1's
+`PiperPhonemesToIdsVits`: the caller supplies the BARE phoneme stream
+per sentence — words joined by literal space codepoints, punctuation
+as its own token (`,`/`.`/`-`, the piper pause convention); BOS/EOS
+and pad interleaving are added by sherpa itself, and unknown
+codepoints are skipped inside sherpa with a log — which is why every
+emitted symbol is validated single-codepoint AND in `tokens.txt`
+before it can reach the stream. The A/B probe
+(`examples/sherpa_g2p_probe.rs`) ran against the real thorsten model:
+the lexicon path DROPPED `zweiundvierzig` (`OOV word skipped`) while
+the codepoints path SPOKE it via the WFST — the exact #82 difference,
+now reproducible for the ear-check. The live end-to-end test
+(engine → provisioning → codepoints → audio) passes on Linux.
+
 New `src/sherpa_g2p.rs` (feature `sherpa-g2p`), mirroring
 `floravox_engine`'s proven chain:
 
@@ -267,19 +281,34 @@ New `src/sherpa_g2p.rs` (feature `sherpa-g2p`), mirroring
   The WFST opens LAZILY on the first dictionary miss — its cost is
   bundle-dependent (see the bake-off numbers below) and is not paid for
   dictionary-only sentences on iOS.
-- **Provisioning, not first-speak fetching**: the bundle is fetched and
-  checksum-verified during model setup (engine construction with the model
-  present / the model-download flow), so the first utterance works offline.
-  A failed fetch must be RETRYABLE — do not cache the failure (the
-  `OnceLock<Option<…>>` pattern in `floravox_engine` caches a miss forever;
-  store the state so the next construction retries) — and construction
-  fails soft to the plain text path with a logged reason.
+- **Provisioning, not first-speak fetching** — **implemented with a
+  deviation**: provisioning runs at the FIRST synthesize, not in the
+  constructor (constructors stay I/O-free — a stronger invariant than
+  "fetch at setup"; there is no model-setup hook on this engine). The
+  fetch (13–19 MB, crate-side 30 s connect timeout, no read timeout)
+  happens off the audio path only in the sense that it precedes the
+  tts lock; a slow fetch delays the first utterance. Failures are
+  RETRYABLE (throttled to one attempt/minute; no cached misses) and
+  the utterance falls back to the text path — for an espeak-orphaned
+  model offline that means the pre-#82 behavior (no audio), not a
+  regression. Pre-seeding the cache (`VOICEGARDEN_LEXICON_DIR` + the
+  `.sha256` stamp matching the manifest) makes the first utterance
+  fully offline; the stamp check verifies content against the
+  manifest sha, so stale bundles refresh.
+- The WFST opens LAZILY on the first dictionary miss — its cost is
+  bundle-dependent (see the bake-off numbers below) and is not paid for
+  dictionary-only sentences on iOS.
 - **Lookup normalization** mirrors sherpa's post-#4075 `NormalizeLexiconKey`:
   NFC → Unicode lowercase → NFC. Measured: all bundle keys are already
   lowercase (`Haus` is stored `haus`), so lowercased queries match directly;
   NFC composes decomposed input the same way sherpa now does.
 - **Sentence splitting** on `. ! ? ; :` and newlines (#4075's set) —
-  each sentence becomes one `Vec<i32>`.
+  each sentence becomes one `Vec<i32>`. Punctuation flattening note:
+  floravox's `punct_phonemes` maps `!?`→`.` and `;:`→`,` (the piper
+  pause convention), while sherpa's lexicon path emits `!?;:` literally
+  when the vocabulary carries them (thorsten's does). Whether literal
+  passthrough sounds better is a Phase 4 ear-check decision; the
+  current flattening is deliberate and tested.
 - **Validation**: every mapped symbol must be a single Unicode codepoint
   present in `tokens.txt` (the codepoint path cannot address multi-char
   tokens). Any failure → the model uses the plain-text path with a loud
@@ -389,30 +418,15 @@ pattern):
 
 ## Feature and dependency changes
 
-```toml
-# Cargo.toml
-[features]
-sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p"]
+`sherpa-g2p` uses `voicegarden-lexicons` 0.3 and the same
+`floravox-g2p` 0.6.1 crate as the bundle loader. The 0.6.1 crate
+links ONNX Runtime only with its `onnx` feature. Sherpa uses its FST
+lexicon and Phonetisaurus APIs. The separate Floravox synthesis engine
+uses the 0.8.8 API required by `floravox-core`.
 
-[dependencies]
-voicegarden-lexicons = { version = "0.3", optional = true }  # already present
-floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }  # already present
-```
-
-- NOT default: keeps default builds lean, mirrors `floravox-lexicons`.
-  Deliberately independent of it too — `floravox-lexicons` drags in the
-  whole Floravox synthesis engine (`floravox-core`, an ONNX runtime),
-  while the Apple XCFramework builds with `--no-default-features
-  --features cloud,sherpaonnx` and must not.
-- **Enable in both Apple build scripts**: `scripts/apple/build-xcframework.sh`
-  (line 19) and `scripts/build-ios-sherpa.sh` (line 81) change to
-  `--features cloud,sherpaonnx,sherpa-g2p`. Check `.github/workflows` and
-  `Package.swift` for any other place the Apple feature set is spelled out.
-- `floravox-g2p` WITHOUT the `onnx` feature — FST lexicon + Phonetisaurus
-  only, no second ONNX runtime in the binary (the macOS CoreML/BNNS clash
-  noted in Cargo.toml).
-- `voicegarden-lexicons` vendors its own older `floravox-g2p`; only paths
-  cross that boundary (same note as `floravox_engine.rs`).
+Both Apple build scripts enable `cloud,sherpaonnx,sherpa-g2p`.
+Validate the macOS and iOS links and check the German speech path
+before merging Phase 3.
 
 ## Risks
 

@@ -2,6 +2,7 @@
 #include "tts_wrapper.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -28,20 +29,30 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // Pass the parent of an extracted inflect-en-nano-v2 model directory.
+    // Pass the parent of the extracted model. For German, also pass the
+    // absolute path to a provisioned VoiceGarden cache and use a Thorsten
+    // model directory without lexicon.txt to exercise the G2P path.
+    bool german = argc >= 3;
+    if (german && setenv("VOICEGARDEN_LEXICON_DIR", argv[2], 1) != 0) {
+        perror("VOICEGARDEN_LEXICON_DIR");
+        return 1;
+    }
     if (chdir(argv[1]) != 0) {
         perror(argv[1]);
         return 1;
     }
-    struct tts_ctx *client = tts_create(
-        "sherpaonnx", "{\"modelPath\":\".\",\"modelId\":\"inflect-en-nano-v2\"}");
+    const char *credentials = german
+        ? "{\"modelPath\":\".\",\"modelId\":\"piper-de_DE-thorsten-medium\"}"
+        : "{\"modelPath\":\".\",\"modelId\":\"inflect-en-nano-v2\"}";
+    struct tts_ctx *client = tts_create("sherpaonnx", credentials);
     if (!client) {
         fprintf(stderr, "Could not initialize Sherpa-ONNX: %s\n", tts_get_last_error(NULL));
         return 1;
     }
     uint8_t *bytes = NULL;
     size_t length = 0;
-    int result = tts_synth_to_bytes(client, "Hello from the iOS simulator.", &bytes, &length);
+    const char *text = german ? "Blorpinxel!" : "Hello from the iOS simulator.";
+    int result = tts_synth_to_bytes(client, text, &bytes, &length);
     if (result != 0) {
         fprintf(stderr, "Sherpa-ONNX synthesis failed: %s\n", tts_get_last_error(client));
     }

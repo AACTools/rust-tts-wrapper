@@ -70,6 +70,9 @@ ssml-expand = ["dep:floravox-ssml"]
 # for build + model setup and the critical --duration finding.
 omnivoice-local = ["dep:hound", "ssml-expand"]
 sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization"]
+# German Piper G2P uses the same FST crate version as VoiceGarden's
+# bundle loader. Its ONNX feature is disabled for Sherpa builds.
+sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p-fst"]
 # floravox offline engine (piper/MMS/Matcha/Kokoro ONNX voices): native
 # SSML (<break>/<prosody rate>/<mark>/<phoneme>/<sub>, byte-exact spans)
 # with measured word timings on duration-patched voices, a student-tier
@@ -158,6 +161,7 @@ floravox-core = { version = "=0.8.8", optional = true }
 # Exact pin: MisakiG2p implements a floravox-core trait — a drifted
 # patch pair breaks the build (same reasoning as sherpa-onnx-sys above).
 floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
+floravox-g2p-fst = { package = "floravox-g2p", version = "=0.6.1", optional = true, default-features = false }
 voicegarden-lexicons = { version = "0.3", optional = true }
 # Pin sys to match the main crate (cargo update can drift them apart).
 sherpa-onnx-sys = { version = "=2.0.1", optional = true }
@@ -216,6 +220,11 @@ cargo = "warn"
 name = "lexicon-convert"
 path = "examples/lexicon_convert.rs"
 required-features = ["sherpaonnx"]
+
+[[example]]
+name = "sherpa-g2p-probe"
+path = "examples/sherpa_g2p_probe.rs"
+required-features = ["sherpaonnx", "sherpa-g2p"]
 
 [[example]]
 name = "kokoro-ab"

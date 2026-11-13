@@ -26,6 +26,14 @@ jobs:
       - name: Clippy (floravox)
         run: cargo clippy --no-default-features --features floravox -- -D warnings
 
+      - name: Clippy + test (sherpaonnx + sherpa-g2p)
+        # #82: the G2P front-end feature must compile and pass its unit
+        # tests in CI (the real-bundle + live tests stay #[ignore]d and
+        # run in the sherpaonnx-live workflow / by hand)
+        run: |
+          cargo clippy --no-default-features --features cloud,sherpaonnx,sherpa-g2p --all-targets -- -D warnings
+          cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib
+
       - name: Build (Linux features)
         run: cargo build --no-default-features --features system,cloud
 

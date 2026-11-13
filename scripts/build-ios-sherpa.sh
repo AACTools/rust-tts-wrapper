@@ -78,4 +78,4 @@ TOML
 
 export IPHONEOS_DEPLOYMENT_TARGET=${IPHONEOS_DEPLOYMENT_TARGET:-15.0}
 cargo rustc --config "$scratch/sherpa.toml" --target "$target" "$@" \
-  --no-default-features --features cloud,sherpaonnx --lib --crate-type staticlib
+  --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --crate-type staticlib

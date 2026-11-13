@@ -90,6 +90,8 @@ pub mod floravox_engine;
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpa_convention;
+#[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
+pub mod sherpa_g2p;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpa_lang;
 #[cfg(feature = "sherpaonnx")]
