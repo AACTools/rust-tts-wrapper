@@ -67,12 +67,12 @@ fn model_present(id: &str) -> bool {
 //
 //   SHERPA_DE_MODEL_DIR=/path/to/vits-piper-de_DE-thorsten-medium \
 //   SHERPA_DE_BUNDLE_DIR=/path/to/voicegarden-lexicons/de \
-//   SHERPA_DE_MANIFEST=/path/to/voicegarden-lexicons/lexicons.json \
+//   SHERPA_DE_MANIFEST=/path/to/voicegarden-lexicons/expanded.json \
 //   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- --ignored german
 
-#[cfg(all(unix, feature = "sherpa-g2p"))]
+#[cfg(feature = "sherpa-g2p")]
 #[test]
-#[ignore = "live: needs thorsten model + de bundle + manifest (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR, SHERPA_DE_MANIFEST)"]
+#[ignore = "live: needs thorsten model + deu bundle + manifest (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR, SHERPA_DE_MANIFEST)"]
 fn vits_piper_german_g2p_synthesizes() {
     use std::path::PathBuf;
     let (Some(model_dir), Some(bundle_dir), Some(manifest)) = (
@@ -86,41 +86,77 @@ fn vits_piper_german_g2p_synthesizes() {
         return;
     };
     assert!(model_dir.join("tokens.txt").is_file(), "model dir");
-    assert!(bundle_dir.join("de.fst").is_file(), "bundle dir");
+    let key = bundle_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("deu");
+    assert!(
+        bundle_dir.join(format!("{key}.fst")).is_file(),
+        "bundle dir"
+    );
 
-    // stage a provisioned cache: the manifest + the de bundle with the
-    // REAL sha stamp (the engine's provisioning verifies stamp ==
-    // manifest sha, so a placeholder would trigger a network fetch)
-    let de_sha: String = {
+    // stage a provisioned cache for the DEFAULT allowlist row — the
+    // Phase 4 bake-off made that deu (expanded): manifest staged under
+    // its cache name, bundle symlinked under the row's key, stamp =
+    // the REAL manifest sha (provisioning verifies stamp == sha, so a
+    // placeholder would trigger a network fetch)
+    let manifest_name = manifest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("expanded.json")
+        .to_string();
+    let bundle_key = bundle_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("deu")
+        .to_string();
+    let sha: String = {
         let m: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
         m["languages"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|l| l["lang"] == "de")
+            .find(|l| l["lang"] == bundle_key)
             .and_then(|l| l["sha256"].as_str())
-            .expect("de entry in the manifest")
+            .unwrap_or_else(|| panic!("{bundle_key} entry in the manifest"))
             .to_string()
     };
     let cache = tempfile::tempdir().unwrap();
-    std::fs::copy(&manifest, cache.path().join("lexicons.json")).unwrap();
-    let bundle_cache = cache.path().join("de");
-    std::os::unix::fs::symlink(&bundle_dir, &bundle_cache).unwrap();
-    std::fs::write(bundle_cache.join(".sha256"), de_sha.as_bytes()).unwrap();
+    std::fs::copy(&manifest, cache.path().join(&manifest_name)).unwrap();
+    // COPY (not symlink) the bundle and model into the temp cache —
+    // symlinks staged zero tests on Windows (Mac-team review), and a
+    // copy exercises the same provisioning path everywhere
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().filter_map(Result::ok) {
+            let to = dst.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+    let bundle_cache = cache.path().join(&bundle_key);
+    copy_dir(&bundle_dir, &bundle_cache);
+    std::fs::write(bundle_cache.join(".sha256"), sha.as_bytes()).unwrap();
     // stage the model under its registry id name
     let parent = cache.path().join("models");
     std::fs::create_dir_all(&parent).unwrap();
-    std::os::unix::fs::symlink(&model_dir, parent.join("piper-de_DE-thorsten-medium")).unwrap();
+    copy_dir(&model_dir, &parent.join("piper-de_DE-thorsten-medium"));
 
-    let engine = create_engine(
-        "sherpaonnx",
-        &format!(
-            r#"{{"modelId":"piper-de_DE-thorsten-medium","modelPath":"{}"}}"#,
-            parent.display()
-        ),
-    )
-    .expect("sherpaonnx engine");
+    // serialize with serde_json: a raw format! interpolates the path
+    // into JSON, and Windows backslashes (C:\Users\…) become invalid
+    // escapes — the engine then fails to parse the credentials and
+    // loses BOTH fields (Mac-team review: "No SherpaOnnx modelId
+    // configured" on the Windows runner)
+    let credentials = serde_json::json!({
+        "modelId": "piper-de_DE-thorsten-medium",
+        "modelPath": parent.display().to_string(),
+    })
+    .to_string();
+    let engine = create_engine("sherpaonnx", &credentials).expect("sherpaonnx engine");
 
     let sink = std::sync::Arc::new(std::sync::Mutex::new(AudioSink::new()));
     let sink_for_cb = sink.clone();

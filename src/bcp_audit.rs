@@ -111,7 +111,7 @@ mod audit {
         // The reverse direction (BCP-47 → eSpeak voice) is where bugs could
         // lurk. Verify common codes produce valid eSpeak voice identifiers.
         #[test]
-        fn eSpeak_voice_mapping_common_codes() {
+        fn espeak_voice_mapping_common_codes() {
             // eSpeak-ng voice identifiers are lowercase with hyphens
             // e.g. "en", "en-gb", "en-us", "fr", "fr-fr"
             // These are validated against the actual eSpeak voice list

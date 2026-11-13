@@ -194,26 +194,14 @@ impl G2pFrontend {
                 // "COVID-19" → "covid neunzehn", "A4" → "a vier",
                 // "b2b" → "b zwei b". Leading zeros collapse ("007" →
                 // "sieben") — accepted for quantities, noted for codes.
-                let expanded: String;
-                let parts: Vec<&str> = {
-                    let core = floravox_g2p_fst::word_core(token).unwrap_or_default();
-                    if core.chars().any(|c| c.is_ascii_digit()) {
-                        let Some(german) = digits_to_german(core)
-                            .or_else(|| digits_plus_suffix(core))
-                            .or_else(|| split_digit_runs(core))
-                        else {
-                            // unhandled numeric (">999_999_999",
-                            // malformed separators): drop, counted
-                            dropped += 1;
-                            words += 1;
-                            continue;
-                        };
-                        expanded = reattach_punct(token, &german);
-                        expanded.split_whitespace().collect()
-                    } else {
-                        vec![token]
-                    }
+                let Some(parts_owned) = token_parts(token) else {
+                    // unhandled numeric (">999_999_999", malformed
+                    // separators): drop, counted
+                    dropped += 1;
+                    words += 1;
+                    continue;
                 };
+                let parts: Vec<&str> = parts_owned.iter().map(String::as_str).collect();
                 words += 1;
                 let mut mapped: Vec<char> = Vec::new();
                 let mut ok = true;
@@ -271,6 +259,48 @@ impl G2pFrontend {
             dropped,
         }
     }
+}
+
+/// The words the dictionary/WFST will actually be asked for, after
+/// the digit normalization: digit-bearing cores expand (`42.` →
+/// `["zweiundvierzig."]`, `COVID-19` → `["covid", "neunzehn"]` with
+/// punctuation reattached), everything else passes through as the
+/// token itself. `None` = an unhandled numeric the caller drops.
+/// Public so the bake-off attributes dictionary-vs-fallback tiers on
+/// the SAME lookup words the runtime uses (Mac-team review: looking
+/// up the raw `42.` miscounted a normalized dictionary hit as
+/// fallback).
+#[must_use]
+pub fn token_parts(token: &str) -> Option<Vec<String>> {
+    let core = floravox_g2p_fst::word_core(token).unwrap_or_default();
+    if core.chars().any(|c| c.is_ascii_digit()) {
+        let german = digits_to_german(core)
+            .or_else(|| digits_plus_suffix(core))
+            .or_else(|| split_digit_runs(core))?;
+        Some(
+            reattach_punct(token, &german)
+                .split_whitespace()
+                .map(str::to_string)
+                .collect(),
+        )
+    } else {
+        Some(vec![token.to_string()])
+    }
+}
+
+/// The dictionary lookup key for one [`token_parts`] part: NFC-
+/// normalized, edge punctuation stripped — exactly what the runtime
+/// hands the lexicon (`phonemize` NFC-normalizes each part, then
+/// floravox's `phonemize_token` applies `word_core`; the FST lexicon
+/// lowercases its lookup itself). Public so the bake-off attributes
+/// tiers on the same key the runtime looks up — `token_parts`
+/// reattaches punctuation (`"42."` → `"zweiundvierzig."`), and
+/// looking THAT up raw miscounts a dictionary hit as fallback
+/// (Mac-team review #3).
+#[must_use]
+pub fn lookup_key(part: &str) -> Option<String> {
+    let nfc: String = part.nfc().collect();
+    floravox_g2p_fst::word_core(&nfc).map(str::to_string)
 }
 
 /// Rebuild a token around an expanded core: the non-alphanumeric edges
@@ -958,7 +988,7 @@ mod tests {
     // ── real-bundle coverage (env-gated, like Phase 2's) ──
     //
     //   SHERPA_TEST_THORSTEN_TOKENS=.../tokens.txt \
-    //   SHERPA_TEST_DE_DIR=.../voicegarden/lexicons/de \
+    //   SHERPA_TEST_DEU_DIR=.../voicegarden/lexicons/deu \
     //   cargo test --features sherpaonnx,sherpa-g2p --lib sherpa_g2p -- --ignored
 
     fn env_val(var: &str) -> Option<PathBuf> {
@@ -968,16 +998,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the real thorsten tokens.txt + de bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DE_DIR)"]
+    #[ignore = "needs the real thorsten tokens.txt + deu bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DEU_DIR)"]
     fn real_bundle_phonemizes_a_german_sentence() {
         let (Some(tokens), Some(bundle)) = (
             env_val("SHERPA_TEST_THORSTEN_TOKENS"),
-            env_val("SHERPA_TEST_DE_DIR"),
+            env_val("SHERPA_TEST_DEU_DIR"),
         ) else {
             eprintln!("skipping: env vars not set");
             return;
         };
-        let mut fe = G2pFrontend::open(&bundle, "de", &tokens).expect("frontend");
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let mut fe = G2pFrontend::open(&bundle, &key, &tokens).expect("frontend");
         let r = fe.phonemize("Guten Morgen! Ich habe 42 Häuser in Donaudampfschifffahrt gesehen.");
         assert_eq!(r.dropped, 0, "every word must resolve");
         assert_eq!(r.sentences.len(), 2);
@@ -996,15 +1027,89 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the real de bundle dir (SHERPA_TEST_DE_DIR)"]
+    #[ignore = "needs the real thorsten tokens.txt + deu bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DEU_DIR)"]
+    fn real_bundle_pre_synthesis_phone_assertions() {
+        // upstream #4139's lesson, as a gate: a non-empty WAV passes even
+        // when the front-end dropped half the sentence, so the words that
+        // matter must produce valid model phones BEFORE any synthesis —
+        // a capitalized noun, a name ABSENT from the dictionary, and a
+        // number (the digit normalizer's job)
+        let (Some(tokens), Some(bundle)) = (
+            env_val("SHERPA_TEST_THORSTEN_TOKENS"),
+            env_val("SHERPA_TEST_DEU_DIR"),
+        ) else {
+            eprintln!("skipping: env vars not set");
+            return;
+        };
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let vocab = read_tokens_txt_public(&tokens).unwrap();
+        let mut fe = G2pFrontend::open(&bundle, &key, &tokens).expect("frontend");
+
+        // a name confirmed absent from the dictionary (pick from a small
+        // candidate list so the test self-adjusts if the lexicon grows)
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let lex = floravox_g2p_fst::MmapLexicon::open(bundle.join(format!("{key}.fst")))
+            .expect("direct lexicon open for the absence check");
+        let _ = &key; // used above
+        let absent_name = ["xanthippe", "balderich", "gunzelin"]
+            .into_iter()
+            .find(|n| lex.lookup(n).is_none())
+            .expect("at least one candidate absent from the dictionary");
+
+        let r = fe.phonemize("Haus");
+        assert_eq!((r.words, r.dropped), (1, 0), "capitalized noun");
+        for sentence in &r.sentences {
+            for &cp in sentence {
+                let c = char::from_u32(cp.cast_unsigned()).unwrap();
+                assert!(vocab.contains(&c.to_string()), "Haus: {c:?} not in vocab");
+            }
+        }
+
+        let r = fe.phonemize(absent_name);
+        assert_eq!(
+            (r.words, r.dropped),
+            (1, 0),
+            "dictionary-absent name must still be SPOKEN (WFST), not dropped"
+        );
+        assert!(!r.sentences.is_empty(), "WFST must speak the OOV word");
+        for sentence in &r.sentences {
+            for &cp in sentence {
+                let c = char::from_u32(cp.cast_unsigned()).unwrap();
+                assert!(
+                    vocab.contains(&c.to_string()),
+                    "{absent_name}: {c:?} not in vocab"
+                );
+            }
+        }
+
+        let r = fe.phonemize("42.");
+        assert_eq!(r.dropped, 0, "number with punctuation");
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        assert!(sentence.ends_with('.'), "pause token survives: {sentence}");
+        // and CONTENT before the pause: the number's own phones, not
+        // just any stream + '.' — with deu, zweiundvierzig is a
+        // dictionary hit and carries /ç/ (-zig)
+        let before = &sentence[..sentence.len() - 1];
+        assert!(
+            before.contains('\u{00E7}'),
+            "number phones before the pause: {sentence}"
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the real deu bundle dir (SHERPA_TEST_DEU_DIR)"]
     fn real_bundle_oov_word_goes_through_the_wfst() {
-        let Some(bundle) = env_val("SHERPA_TEST_DE_DIR") else {
+        let Some(bundle) = env_val("SHERPA_TEST_DEU_DIR") else {
             eprintln!("skipping: env var not set");
             return;
         };
         // tokens from the bundle dir's sibling model? use thorsten env too
         let tokens = env_val("SHERPA_TEST_THORSTEN_TOKENS").expect("tokens env");
-        let mut fe = G2pFrontend::open(&bundle, "de", &tokens).expect("frontend");
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let mut fe = G2pFrontend::open(&bundle, &key, &tokens).expect("frontend");
         // a nonce word: not in the dictionary, must still be spoken
         // (WFST guess) — dropped == 0 is the assertion that matters
         let r = fe.phonemize("Blorpinxel");

@@ -356,6 +356,45 @@ dictionary is larger. The same-words test decides: run the Phase 4 word
 set through BOTH bundles, score dictionary hits vs WFST guesses, and pick
 the default from data; record the result here.
 
+**Bake-off RESULT (2026-11-13, `examples/sherpa_g2p_bakeoff.rs`, real
+thorsten vocabulary; corrected to the RUNTIME decision path after the
+Mac-team review)** — **`deu` (expanded) is the default**:
+
+| | `de` (base) | `deu` (expanded) |
+|---|---|---|
+| Phase 4 word set (26 words) | dict 73.1%, fallback 26.9%, drop 0 | dict 76.9%, fallback 23.1%, drop 0 |
+| corpus dict share (top 50k types, weighted, post-normalization) | 92.24% | 98.21% |
+| corpus FALLBACK-chain share (WFST + rule) | **7.75%** | **1.79%** |
+| corpus runtime DROPPED share | 0.005% | 0.000% |
+| heuristic error signal (fallback share × WFST holdout err — see note) | 0.50% | **0.25%** |
+
+The 0.50%/0.27% figures are a **heuristic comparison signal, not a
+measurement**: the fallback bucket mixes WFST guesses with rule-fallback
+spellings, and the holdout error rate only measures the WFST part
+(second Mac-team review). Compare across bundles, not as absolutes.
+Tier attribution uses the runtime's own `token_parts` normalization
+AND the runtime's lookup key (`lookup_key`: NFC + edge-punctuation
+strip — `token_parts` reattaches the period, and looking up
+`"zweiundvierzig."` raw still miscounted it as fallback; third
+Mac-team review), so `42.` counts as a dictionary hit when its
+normalized form (`zweiundvierzig`) is one.
+
+Corpus: a subtitle-derived German frequency list (top 50k types,
+frequency-weighted) — a realistic usage sample substituting for the
+plan's "e.g. 50k Wikipedia words". **Measurement note (correction)**:
+the first version of this table reported "drops" of 1.204% / 0.244%
+because its classifier stopped at a WFST miss; the runtime path falls
+through to the rule fallback, which SPEAKS such words (English letter
+names) instead of dropping them — so actual runtime drops are ≈0 for
+both bundles, and the quality difference lives in the fallback-chain
+share: 4× fewer words leave the dictionary tier with deu. The
+decision is unchanged and now rests on the honest numbers: deu's
+larger dictionary more than pays for its weaker WFST (1.96% × 13.9%
+holdout error < 7.87% × 6.4%). Concrete word-set data point:
+`zweiundvierzig` (the digit-normalizer output for 42) is a dictionary
+hit in deu, a fallback guess in de. `LANG_BUNDLES` order updated (deu
+first); the base row stays second as the smaller-disk alternative.
+
 **Guesstimates (desktop/README-derived; physical-iPhone numbers to be
 measured by hand on a real device — slot below):**
 
@@ -370,6 +409,22 @@ measured by hand on a real device — slot below):**
   registry).
 - Dictionary tier: mmap'd, ~0 resident, <0.1 ms/word (README) — the tier
   almost every sentence hits.
+
+✅ **Ear-check + whisper round-trip (2026-11-13)** — the pause/prosody
+comparison PASSED: the A/B WAVs (probe sentence with `!` `;` `,`-decimal
+`:` + imperative) sound "very similar" to a human listener — pause
+placement and prosody are equivalent; punctuation flattening
+(`!?`→`.`) stays as-is, passthrough not needed. The independent ear
+(`scripts/whisper-ab-check.sh`, faster-whisper small, German) confirms
+the #82 difference objectively — numbers appear ONLY in B:
+
+- **A (lexicon path)**: „Guten Morgen, Ihr Haberhause, das kostet
+  **Euro**…" — `42` and `1,5` silently dropped.
+- **B (G2P path)**: „…ich habe **zwei und vier die** Hause, das kostet
+  **Heinz Komma von Vorur**…" — both numbers spoken (`zweiundvierzig`
+  from the deu dictionary, `einskommafünf` via the WFST — the decimal
+  compound remains the roughest pronunciation, a known WFST-guess
+  edge documented above).
 
 ⬜ **On-device measurement (physical iPhone, by hand)**: cold-start ms,
 peak RSS with/without WFST loaded, first-utterance latency. Fill in here.
