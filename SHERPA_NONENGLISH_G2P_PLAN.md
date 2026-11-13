@@ -357,28 +357,32 @@ set through BOTH bundles, score dictionary hits vs WFST guesses, and pick
 the default from data; record the result here.
 
 **Bake-off RESULT (2026-11-13, `examples/sherpa_g2p_bakeoff.rs`, real
-thorsten vocabulary)** — **`deu` (expanded) is the default**, decided
-on both axes:
+thorsten vocabulary; corrected to the RUNTIME decision path after the
+Mac-team review)** — **`deu` (expanded) is the default**:
 
 | | `de` (base) | `deu` (expanded) |
 |---|---|---|
-| Phase 4 word set (26 words) | dict 73.1%, wfst 26.9%, drop 0 | dict 76.9%, wfst 23.1%, drop 0 |
+| Phase 4 word set (26 words) | dict 73.1%, fallback 26.9%, drop 0 | dict 76.9%, fallback 23.1%, drop 0 |
 | corpus dict share (top 50k types, weighted) | 92.12% | 98.04% |
-| corpus WFST share | 6.67% | 1.72% |
-| corpus DROPPED share | **1.204%** | **0.244%** |
-| expected mispronunciation (share × holdout err) | 0.43% | **0.24%** |
+| corpus FALLBACK-chain share (WFST + rule) | **7.87%** | **1.96%** |
+| corpus runtime DROPPED share | 0.005% | 0.000% |
+| expected mispronunciation (share × holdout err) | 0.50% | **0.27%** |
 
-Corpus: the OpenSubtitles 2018 German frequency list (top 50k types,
+Corpus: a subtitle-derived German frequency list (top 50k types,
 frequency-weighted) — a realistic usage sample substituting for the
-plan's "e.g. 50k Wikipedia words". The deciding metric is DROPPED
-words (5× fewer missing words with deu — a dropped word is a missing
-word for an AAC user, and no WFST quality can recover it); deu also
-wins the expected-mispronunciation arithmetic despite its weaker
-WFST, because 1.72% WFST share × 13.9% holdout error < 6.67% × 6.4%.
-Concrete word-set data point: `zweiundvierzig` (the digit-normalizer
-output for 42) is a dictionary hit in deu, a WFST guess in de.
-`LANG_BUNDLES` order updated (deu first); the base row stays second
-as the smaller-disk alternative.
+plan's "e.g. 50k Wikipedia words". **Measurement note (correction)**:
+the first version of this table reported "drops" of 1.204% / 0.244%
+because its classifier stopped at a WFST miss; the runtime path falls
+through to the rule fallback, which SPEAKS such words (English letter
+names) instead of dropping them — so actual runtime drops are ≈0 for
+both bundles, and the quality difference lives in the fallback-chain
+share: 4× fewer words leave the dictionary tier with deu. The
+decision is unchanged and now rests on the honest numbers: deu's
+larger dictionary more than pays for its weaker WFST (1.96% × 13.9%
+holdout error < 7.87% × 6.4%). Concrete word-set data point:
+`zweiundvierzig` (the digit-normalizer output for 42) is a dictionary
+hit in deu, a fallback guess in de. `LANG_BUNDLES` order updated (deu
+first); the base row stays second as the smaller-disk alternative.
 
 **Guesstimates (desktop/README-derived; physical-iPhone numbers to be
 measured by hand on a real device — slot below):**

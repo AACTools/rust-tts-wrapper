@@ -67,12 +67,13 @@ pub struct LangBundle {
 /// The allowlist. Order is preference order: the first row matching a
 /// language is the default. **German default = the expanded `deu`
 /// bundle, decided by the Phase 4 bake-off** (recorded in
-/// `SHERPA_NONENGLISH_G2P_PLAN.md`): on a frequency-weighted 50k-type
-/// German corpus, deu drops 0.24% of token occurrences vs de's 1.20%
-/// and its expected mispronunciation is 0.24% vs 0.43% (its larger
-/// dictionary more than pays for its weaker 86.1%-holdout WFST; de's
-/// is 93.6%). The base `de` row stays second for comparison and as a
-/// smaller-disk alternative (32.5 MB WFST vs 50.2 MB).
+/// `SHERPA_NONENGLISH_G2P_PLAN.md`, runtime-path numbers): on a
+/// frequency-weighted 50k-type German corpus, only 1.96% of token
+/// occurrences leave the dictionary tier with deu vs 7.87% with de
+/// (runtime drops are ≈0 for both — the rule fallback speaks WFST
+/// misses), and expected mispronunciation is 0.27% vs 0.50%. The base
+/// `de` row stays second for comparison and as a smaller-disk
+/// alternative (32.5 MB WFST vs 50.2 MB).
 pub const LANG_BUNDLES: &[LangBundle] = &[
     LangBundle {
         bcp47: "de",

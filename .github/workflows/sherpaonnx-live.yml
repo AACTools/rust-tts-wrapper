@@ -332,8 +332,11 @@ jobs:
           export SHERPA_DE_BUNDLE_DIR="$VG/deu"
           export SHERPA_DE_MANIFEST="$VG/expanded.json"
           export SHERPA_TEST_THORSTEN_TOKENS="$TH/tokens.txt"
-          export SHERPA_TEST_DE_DIR="$VG/de"
+          export SHERPA_TEST_DEU_DIR="$VG/deu"
           export SHERPA_TEST_DE_LEXICON="$VG/de/lexicon.txt"
           export SHERPA_TEST_DEU_LEXICON="$VG/deu/lexicon.txt"
           cargo test --test sherpaonnx_live --no-default-features --features sherpaonnx,sherpa-g2p -- --ignored --nocapture --test-threads=1 german
-          cargo test --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_g2p sherpa_lexicon -- --ignored --nocapture
+          # one filter per invocation — cargo test takes a single
+          # positional filter and errors on the second (Mac-team review)
+          cargo test --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_g2p -- --ignored --nocapture
+          cargo test --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_lexicon -- --ignored --nocapture

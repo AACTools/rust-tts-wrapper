@@ -70,9 +70,9 @@ fn model_present(id: &str) -> bool {
 //   SHERPA_DE_MANIFEST=/path/to/voicegarden-lexicons/expanded.json \
 //   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- --ignored german
 
-#[cfg(all(unix, feature = "sherpa-g2p"))]
+#[cfg(feature = "sherpa-g2p")]
 #[test]
-#[ignore = "live: needs thorsten model + de bundle + manifest (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR, SHERPA_DE_MANIFEST)"]
+#[ignore = "live: needs thorsten model + deu bundle + manifest (SHERPA_DE_MODEL_DIR, SHERPA_DE_BUNDLE_DIR, SHERPA_DE_MANIFEST)"]
 fn vits_piper_german_g2p_synthesizes() {
     use std::path::PathBuf;
     let (Some(model_dir), Some(bundle_dir), Some(manifest)) = (
@@ -124,13 +124,27 @@ fn vits_piper_german_g2p_synthesizes() {
     };
     let cache = tempfile::tempdir().unwrap();
     std::fs::copy(&manifest, cache.path().join(&manifest_name)).unwrap();
+    // COPY (not symlink) the bundle and model into the temp cache —
+    // symlinks staged zero tests on Windows (Mac-team review), and a
+    // copy exercises the same provisioning path everywhere
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().filter_map(Result::ok) {
+            let to = dst.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
     let bundle_cache = cache.path().join(&bundle_key);
-    std::os::unix::fs::symlink(&bundle_dir, &bundle_cache).unwrap();
+    copy_dir(&bundle_dir, &bundle_cache);
     std::fs::write(bundle_cache.join(".sha256"), sha.as_bytes()).unwrap();
     // stage the model under its registry id name
     let parent = cache.path().join("models");
     std::fs::create_dir_all(&parent).unwrap();
-    std::os::unix::fs::symlink(&model_dir, parent.join("piper-de_DE-thorsten-medium")).unwrap();
+    copy_dir(&model_dir, &parent.join("piper-de_DE-thorsten-medium"));
 
     let engine = create_engine(
         "sherpaonnx",

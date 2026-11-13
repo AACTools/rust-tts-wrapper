@@ -23,14 +23,16 @@
 //! works — the subtitle-derived `de_full` list was used for the
 //! recorded bake-off). Without it, only the fixed Phase 4 word set
 //! runs.
-//! Tier meanings: `dict` = dictionary hit · `wfst` = WFST guess whose
-//! phones all map into the model vocabulary · `unmap` = WFST guess with
-//! phones the model cannot speak · `drop` = no path.
+//! Tier meanings (drop/speak decided by the RUNTIME front-end —
+//! `G2pFrontend::phonemize`, the exact production path): `dict` =
+//! spoken from a dictionary hit · `wfst` = spoken via the fallback
+//! chain (WFST guess, or rule fallback for WFST misses) · `drop` =
+//! the runtime path dropped the word (both tiers unmappable).
 
 use std::path::{Path, PathBuf};
 
-use floravox_g2p_fst::{MmapLexicon, OovFallback, PhonetisaurusG2p};
-use rust_tts_wrapper::sherpa_lexicon::VocabPhonemeMap;
+use floravox_g2p_fst::MmapLexicon;
+use rust_tts_wrapper::sherpa_g2p::G2pFrontend;
 
 /// The plan's Phase 4 word set: common words, inflections, a compound,
 /// proper names, number words the digit normalizer produces, and nonce
@@ -70,29 +72,33 @@ const WORD_SET: &[&str] = &[
     "schlimmerding",
 ];
 
+/// One bundle under test. The DROP/SPEAK decision comes from
+/// `G2pFrontend::phonemize` — the exact runtime path (dictionary →
+/// vocabulary ladder → lazy WFST → rule fallback → drop-if-unmappable),
+/// per the Mac-team review; `MmapLexicon` is opened only to ATTRIBUTE
+/// each spoken word to its tier (dictionary hit vs fallback) for the
+/// report. The digit normalizer is part of that path, so digit-bearing
+/// corpus tokens are measured as runtime treats them.
 struct Bundle {
+    frontend: G2pFrontend,
     lex: MmapLexicon,
-    wfst: Option<PhonetisaurusG2p>,
-    mapper: VocabPhonemeMap,
 }
 
 #[derive(Default, Clone, Copy)]
 struct Tally {
     dict: u64,
     wfst: u64,
-    unmap: u64,
     dropped: u64,
 }
 
 impl Tally {
     fn total(&self) -> u64 {
-        self.dict + self.wfst + self.unmap + self.dropped
+        self.dict + self.wfst + self.dropped
     }
     fn add(&mut self, tier: &str) {
         match tier {
             "dict" => self.dict += 1,
             "wfst" => self.wfst += 1,
-            "unmap" => self.unmap += 1,
             _ => self.dropped += 1,
         }
     }
@@ -169,37 +175,28 @@ fn main() {
 
 fn load(name: &'static str, dir: &Path, tokens: &Path) -> Bundle {
     let key = dir.file_name().unwrap().to_string_lossy().to_string();
+    let _ = name; // used only in panic messages above
+    let frontend =
+        G2pFrontend::open(dir, &key, tokens).unwrap_or_else(|e| panic!("{name} frontend: {e}"));
     let lex = MmapLexicon::open(dir.join(format!("{key}.fst")))
         .unwrap_or_else(|e| panic!("{name} lexicon: {e}"));
-    let wfst = dir
-        .join("phonetisaurus.fst")
-        .exists()
-        .then(|| PhonetisaurusG2p::open(dir.join("phonetisaurus.fst")).expect("wfst"));
-    let mapper = VocabPhonemeMap::for_language(tokens).expect("tokens.txt");
-    let _ = name; // used only in panic messages above
-    Bundle { lex, wfst, mapper }
+    Bundle { frontend, lex }
 }
 
-/// Which tier resolves `word`, and whether the result is speakable by
-/// the model — the same primitives and the same decision order as the
-/// runtime front-end (dictionary lookup, WFST fallback, then the
-/// Phase 2 vocabulary ladder on every phone).
+/// Tier attribution + the RUNTIME decision for one word:
+/// `dict`/`wfst` = spoken (which tier supplied it), `drop` = the
+/// runtime path dropped it (dictionary AND fallback both unmappable).
 fn classify(b: &mut Bundle, word: &str) -> &'static str {
-    let key = word.to_lowercase();
-    if b.lex.lookup(&key).is_some() {
-        return "dict";
-    }
-    let Some(wfst) = b.wfst.as_mut() else {
-        return "drop";
-    };
-    let phones = wfst.fallback(&key);
-    if phones.is_empty() {
-        return "drop";
-    }
-    if phones.iter().all(|p| b.mapper.map_symbol(p).is_some()) {
-        "wfst"
+    let tier = if b.lex.lookup(&word.to_lowercase()).is_some() {
+        "dict"
     } else {
-        "unmap"
+        "wfst"
+    };
+    let r = b.frontend.phonemize(word);
+    if r.dropped == 0 && !r.sentences.is_empty() {
+        tier
+    } else {
+        "drop"
     }
 }
 
@@ -208,10 +205,9 @@ fn report(label: &str, t: &[Tally; 2]) {
     for (name, row) in [("de", &t[0]), ("deu", &t[1])] {
         let total = row.total().max(1);
         println!(
-            "{label:<20} {name}: dict {:>6.2}%  wfst {:>6.2}%  unmap {:>6.3}%  drop {:>6.3}%",
+            "{label:<20} {name}: dict {:>6.2}%  wfst {:>6.2}%  drop {:>6.3}%",
             row.dict as f64 / total as f64 * 100.0,
             row.wfst as f64 / total as f64 * 100.0,
-            row.unmap as f64 / total as f64 * 100.0,
             row.dropped as f64 / total as f64 * 100.0,
         );
     }
@@ -220,7 +216,7 @@ fn report(label: &str, t: &[Tally; 2]) {
 #[allow(clippy::cast_precision_loss)]
 fn verdict(name: &str, wfst_exact: f64, t: &Tally) {
     let total = t.total().max(1);
-    let share = (t.wfst + t.unmap) as f64 / total as f64 * 100.0;
+    let share = t.wfst as f64 / total as f64 * 100.0;
     let expected_err = share / 100.0 * (1.0 - wfst_exact) * 100.0;
     println!(
         "{name}: WFST share {share:.2}% × holdout error {:.1}% → expected \

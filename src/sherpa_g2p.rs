@@ -958,7 +958,7 @@ mod tests {
     // ── real-bundle coverage (env-gated, like Phase 2's) ──
     //
     //   SHERPA_TEST_THORSTEN_TOKENS=.../tokens.txt \
-    //   SHERPA_TEST_DE_DIR=.../voicegarden/lexicons/de \
+    //   SHERPA_TEST_DEU_DIR=.../voicegarden/lexicons/deu \
     //   cargo test --features sherpaonnx,sherpa-g2p --lib sherpa_g2p -- --ignored
 
     fn env_val(var: &str) -> Option<PathBuf> {
@@ -968,16 +968,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the real thorsten tokens.txt + de bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DE_DIR)"]
+    #[ignore = "needs the real thorsten tokens.txt + deu bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DEU_DIR)"]
     fn real_bundle_phonemizes_a_german_sentence() {
         let (Some(tokens), Some(bundle)) = (
             env_val("SHERPA_TEST_THORSTEN_TOKENS"),
-            env_val("SHERPA_TEST_DE_DIR"),
+            env_val("SHERPA_TEST_DEU_DIR"),
         ) else {
             eprintln!("skipping: env vars not set");
             return;
         };
-        let mut fe = G2pFrontend::open(&bundle, "de", &tokens).expect("frontend");
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let mut fe = G2pFrontend::open(&bundle, &key, &tokens).expect("frontend");
         let r = fe.phonemize("Guten Morgen! Ich habe 42 Häuser in Donaudampfschifffahrt gesehen.");
         assert_eq!(r.dropped, 0, "every word must resolve");
         assert_eq!(r.sentences.len(), 2);
@@ -996,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "needs the real thorsten tokens.txt + de bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DE_DIR)"]
+    #[ignore = "needs the real thorsten tokens.txt + deu bundle dir (SHERPA_TEST_THORSTEN_TOKENS, SHERPA_TEST_DEU_DIR)"]
     fn real_bundle_pre_synthesis_phone_assertions() {
         // upstream #4139's lesson, as a gate: a non-empty WAV passes even
         // when the front-end dropped half the sentence, so the words that
@@ -1005,19 +1006,21 @@ mod tests {
         // number (the digit normalizer's job)
         let (Some(tokens), Some(bundle)) = (
             env_val("SHERPA_TEST_THORSTEN_TOKENS"),
-            env_val("SHERPA_TEST_DE_DIR"),
+            env_val("SHERPA_TEST_DEU_DIR"),
         ) else {
             eprintln!("skipping: env vars not set");
             return;
         };
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
         let vocab = read_tokens_txt_public(&tokens).unwrap();
-        let mut fe = G2pFrontend::open(&bundle, "de", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&bundle, &key, &tokens).expect("frontend");
 
         // a name confirmed absent from the dictionary (pick from a small
         // candidate list so the test self-adjusts if the lexicon grows)
         let key = bundle.file_name().unwrap().to_string_lossy().to_string();
         let lex = floravox_g2p_fst::MmapLexicon::open(bundle.join(format!("{key}.fst")))
             .expect("direct lexicon open for the absence check");
+        let _ = &key; // used above
         let absent_name = ["xanthippe", "balderich", "gunzelin"]
             .into_iter()
             .find(|n| lex.lookup(n).is_none())
@@ -1056,18 +1059,27 @@ mod tests {
             .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
             .collect();
         assert!(sentence.ends_with('.'), "pause token survives: {sentence}");
+        // and CONTENT before the pause: the number's own phones, not
+        // just any stream + '.' — with deu, zweiundvierzig is a
+        // dictionary hit and carries /ç/ (-zig)
+        let before = &sentence[..sentence.len() - 1];
+        assert!(
+            before.contains('\u{00E7}'),
+            "number phones before the pause: {sentence}"
+        );
     }
 
     #[test]
-    #[ignore = "needs the real de bundle dir (SHERPA_TEST_DE_DIR)"]
+    #[ignore = "needs the real deu bundle dir (SHERPA_TEST_DEU_DIR)"]
     fn real_bundle_oov_word_goes_through_the_wfst() {
-        let Some(bundle) = env_val("SHERPA_TEST_DE_DIR") else {
+        let Some(bundle) = env_val("SHERPA_TEST_DEU_DIR") else {
             eprintln!("skipping: env var not set");
             return;
         };
         // tokens from the bundle dir's sibling model? use thorsten env too
         let tokens = env_val("SHERPA_TEST_THORSTEN_TOKENS").expect("tokens env");
-        let mut fe = G2pFrontend::open(&bundle, "de", &tokens).expect("frontend");
+        let key = bundle.file_name().unwrap().to_string_lossy().to_string();
+        let mut fe = G2pFrontend::open(&bundle, &key, &tokens).expect("frontend");
         // a nonce word: not in the dictionary, must still be spoken
         // (WFST guess) — dropped == 0 is the assertion that matters
         let r = fe.phonemize("Blorpinxel");
