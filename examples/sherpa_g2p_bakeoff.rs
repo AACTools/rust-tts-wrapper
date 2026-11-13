@@ -19,14 +19,13 @@
 //!   <thorsten-tokens.txt> <de-dir> <deu-dir> [corpus.txt]
 //! ```
 //!
-//! `<corpus.txt>`: `word count` per line (a frequency list; the
-//! OpenSubtitles [`de_full`] list works). Without it, only the fixed
-//! Phase 4 word set runs.
-//!
-//! [`de_full`]: https://github.com/hermitdave/FrequencyWords/blob/master/content/2018/de/de_full.txt Tier meanings: `dict` = dictionary hit ·
-//! `wfst` = WFST guess whose phones all map into the model vocabulary ·
-//! `unmap` = WFST guess with phones the model cannot speak · `drop` =
-//! no path.
+//! `<corpus.txt>`: `word count` per line (a German frequency list
+//! works — the subtitle-derived `de_full` list was used for the
+//! recorded bake-off). Without it, only the fixed Phase 4 word set
+//! runs.
+//! Tier meanings: `dict` = dictionary hit · `wfst` = WFST guess whose
+//! phones all map into the model vocabulary · `unmap` = WFST guess with
+//! phones the model cannot speak · `drop` = no path.
 
 use std::path::{Path, PathBuf};
 

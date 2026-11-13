@@ -403,7 +403,7 @@ mod tests {
     #[cfg(feature = "display_names")]
     fn test_locale_display_name_unknown_falls_back() {
         let name = locale_display_name("xx-YY");
-        assert!(!name.is_empty());
+        assert!(!name.is_empty(), "voice name must not be empty");
     }
 
     #[test]

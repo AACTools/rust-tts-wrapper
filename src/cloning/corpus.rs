@@ -485,6 +485,6 @@ mod tests {
         assert_eq!(corpus.total_duration_secs(), 0); // 0.1 s floors to 0
         let identity = corpus.to_identity(Some("en"));
         assert_eq!(identity.language.as_deref(), Some("en"));
-        assert!(!identity.clips.is_empty());
+        assert!(!identity.clips.is_empty(), "clips present");
     }
 }

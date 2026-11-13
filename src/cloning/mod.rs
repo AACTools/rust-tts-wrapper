@@ -357,7 +357,12 @@ pub enum CloneOutcome {
     /// The voice is ready to use now.
     Ready(CloneHandle),
     /// The provider accepted the request; poll with `poll_clone`.
-    Pending { engine: String, job_id: String },
+    Pending {
+        /// Engine id to poll (`factory` key).
+        engine: String,
+        /// Provider-side job handle returned by the engine.
+        job_id: String,
+    },
 }
 
 /// Optional per-engine voice cloning, mirroring [`crate::engine::TtsEngine`].

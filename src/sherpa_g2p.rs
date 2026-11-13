@@ -1038,7 +1038,7 @@ mod tests {
             (1, 0),
             "dictionary-absent name must still be SPOKEN (WFST), not dropped"
         );
-        assert!(!r.sentences.is_empty());
+        assert!(!r.sentences.is_empty(), "WFST must speak the OOV word");
         for sentence in &r.sentences {
             for &cp in sentence {
                 let c = char::from_u32(cp.cast_unsigned()).unwrap();

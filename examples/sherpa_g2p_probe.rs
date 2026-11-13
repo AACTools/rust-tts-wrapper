@@ -94,7 +94,13 @@ fn main() {
     }
 
     // ── B: wrapper G2P → phoneme_codepoints ──
-    let mut frontend = G2pFrontend::open(&bundle_dir, "de", &tokens).expect("G2P front-end");
+    // bundle key follows the directory name (de/ or deu/ — the Phase 4
+    // bake-off made deu the default; both layouts are `<key>/<key>.fst`)
+    let key = bundle_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .expect("bundle dir name");
+    let mut frontend = G2pFrontend::open(&bundle_dir, key, &tokens).expect("G2P front-end");
     let result = frontend.phonemize(&text);
     println!(
         "B: {} words, {} dropped, {} sentences",
