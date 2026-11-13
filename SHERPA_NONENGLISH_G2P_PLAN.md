@@ -395,6 +395,22 @@ measured by hand on a real device — slot below):**
 - Dictionary tier: mmap'd, ~0 resident, <0.1 ms/word (README) — the tier
   almost every sentence hits.
 
+✅ **Ear-check + whisper round-trip (2026-11-13)** — the pause/prosody
+comparison PASSED: the A/B WAVs (probe sentence with `!` `;` `,`-decimal
+`:` + imperative) sound "very similar" to a human listener — pause
+placement and prosody are equivalent; punctuation flattening
+(`!?`→`.`) stays as-is, passthrough not needed. The independent ear
+(`scripts/whisper-ab-check.sh`, faster-whisper small, German) confirms
+the #82 difference objectively — numbers appear ONLY in B:
+
+- **A (lexicon path)**: „Guten Morgen, Ihr Haberhause, das kostet
+  **Euro**…" — `42` and `1,5` silently dropped.
+- **B (G2P path)**: „…ich habe **zwei und vier die** Hause, das kostet
+  **Heinz Komma von Vorur**…" — both numbers spoken (`zweiundvierzig`
+  from the deu dictionary, `einskommafünf` via the WFST — the decimal
+  compound remains the roughest pronunciation, a known WFST-guess
+  edge documented above).
+
 ⬜ **On-device measurement (physical iPhone, by hand)**: cold-start ms,
 peak RSS with/without WFST loaded, first-utterance latency. Fill in here.
 
