@@ -86,6 +86,7 @@ impl OovFallback for LazyWfst {
 pub struct G2pFrontend {
     chain: Box<dyn floravox_g2p_fst::TokenPhonemizer + Send>,
     mapper: VocabPhonemeMap,
+    normalizer: Box<dyn LangNormalizer>,
 }
 
 /// Why a front-end could not be built for a model. One-line reasons;
@@ -131,6 +132,73 @@ pub struct PhonemizeResult {
     pub dropped: usize,
 }
 
+/// Per-language text normalization for the phonemize path (#92 work
+/// item A): how a token containing digits becomes words the
+/// dictionary can answer. The first version hard-wired German rules
+/// for every language — French `1,5` and Spanish `3.500` were read
+/// with German decimal/thousands conventions. One implementation per
+/// language; unhandled languages get an identity normalizer whose
+/// digit tokens DROP (counted), never English letter-spelling.
+pub trait LangNormalizer: Send {
+    /// The BCP-47 primary subtag this normalizer handles ("de").
+    fn lang(&self) -> &'static str;
+    /// Expand a digit-bearing word core to words the dictionary
+    /// answers, or None when the numeric shape is unhandled (the
+    /// caller drops the token with a count). `core` is the
+    /// edge-punctuation-stripped core of the original token.
+    fn normalize_numeric(&self, core: &str) -> Option<String>;
+}
+
+/// German: decimals with Komma, strict thousands dots, decade
+/// suffixes, mixed alphanumeric run-splitting (#82 loop reviews).
+struct GermanNormalizer;
+
+impl LangNormalizer for GermanNormalizer {
+    fn lang(&self) -> &'static str {
+        "de"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        digits_to_german(core)
+            .or_else(|| digits_plus_suffix(core))
+            .or_else(|| split_digit_runs(core))
+    }
+}
+
+/// The identity normalizer for languages without number rules yet:
+/// digit-bearing tokens are UNHANDLED (dropped with a count by the
+/// caller) — speaking them via the English rule fallback is the bug
+/// class the #82 loop reviews eliminated, so no expansion beats
+/// wrong-language expansion.
+struct IdentityNormalizer;
+
+impl LangNormalizer for IdentityNormalizer {
+    fn lang(&self) -> &'static str {
+        ""
+    }
+    fn normalize_numeric(&self, _core: &str) -> Option<String> {
+        None
+    }
+}
+
+/// The normalizer for a bundle language. Known languages get their
+/// own; everything else gets the identity (drop-count) behavior.
+#[must_use]
+pub fn normalizer_for(lang: &str) -> Box<dyn LangNormalizer> {
+    match primary_subtag(lang).as_str() {
+        "de" | "deu" => Box::new(GermanNormalizer), // deu = corpus-tag key
+        _ => Box::new(IdentityNormalizer),
+    }
+}
+
+fn primary_subtag(lang_code: &str) -> String {
+    lang_code
+        .trim()
+        .split(['-', '_'])
+        .find(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 impl G2pFrontend {
     /// Build from a provisioned bundle directory (`<key>.fst` +
     /// `<key>.pho` + optional `phonetisaurus.fst`) and the model's
@@ -163,6 +231,10 @@ impl G2pFrontend {
         Ok(Self {
             chain: Box::new(chain),
             mapper,
+            // the bundle key is the language tag the dictionary
+            // answers in (deu/de, fra/fr, …): the normalizer follows
+            // the bundle, not the model registry spelling
+            normalizer: normalizer_for(key),
         })
     }
 
@@ -195,7 +267,7 @@ impl G2pFrontend {
                 // "COVID-19" → "covid neunzehn", "A4" → "a vier",
                 // "b2b" → "b zwei b". Leading zeros collapse ("007" →
                 // "sieben") — accepted for quantities, noted for codes.
-                let Some(parts_owned) = token_parts(token) else {
+                let Some(parts_owned) = token_parts_with(self.normalizer.as_ref(), token) else {
                     // unhandled numeric (">999_999_999", malformed
                     // separators): drop, counted
                     dropped += 1;
@@ -272,14 +344,12 @@ impl G2pFrontend {
 /// up the raw `42.` miscounted a normalized dictionary hit as
 /// fallback).
 #[must_use]
-pub fn token_parts(token: &str) -> Option<Vec<String>> {
+pub fn token_parts_with(norm: &dyn LangNormalizer, token: &str) -> Option<Vec<String>> {
     let core = floravox_g2p_fst::word_core(token).unwrap_or_default();
     if core.chars().any(|c| c.is_ascii_digit()) {
-        let german = digits_to_german(core)
-            .or_else(|| digits_plus_suffix(core))
-            .or_else(|| split_digit_runs(core))?;
+        let expanded = norm.normalize_numeric(core)?;
         Some(
-            reattach_punct(token, &german)
+            reattach_punct(token, &expanded)
                 .split_whitespace()
                 .map(str::to_string)
                 .collect(),
@@ -287,6 +357,14 @@ pub fn token_parts(token: &str) -> Option<Vec<String>> {
     } else {
         Some(vec![token.to_string()])
     }
+}
+
+/// [`token_parts_with`] with the GERMAN normalizer — the bake-off and
+/// existing call sites are German-only; kept so tooling does not need
+/// to know the language.
+#[must_use]
+pub fn token_parts(token: &str) -> Option<Vec<String>> {
+    token_parts_with(&GermanNormalizer, token)
 }
 
 /// The dictionary lookup key for one [`token_parts`] part: NFC-
@@ -665,7 +743,7 @@ mod tests {
     /// no WFST (so OOV falls through to the rule fallback and mostly
     /// drops — deterministic for tests).
     fn mini_bundle(dir: &Path) {
-        floravox_g2p_fst::LexiconWriter::new(dir.join("mini"))
+        floravox_g2p_fst::LexiconWriter::new(dir.join("de"))
             .write(vec![
                 ("haus".into(), "h aʊ̯ s".into()),
                 ("guten".into(), "ɡ uː t ə n".into()),
@@ -730,7 +808,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         mini_bundle(&dir);
         let tokens = mini_tokens(&dir);
-        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
 
         // '.' between digits does not end a sentence; decimals speak German
         let r = fe.phonemize("Haus 1,5 Tag");
@@ -770,7 +848,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         mini_bundle(&dir);
         let tokens = mini_tokens(&dir);
-        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
 
         let r = fe.phonemize("Guten Tag.");
         assert_eq!((r.words, r.dropped), (2, 0));
@@ -794,7 +872,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         mini_bundle(&dir);
         let tokens = mini_tokens(&dir);
-        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
 
         // "xyzzy" is OOV: no WFST in the mini bundle → rule fallback
         // spells English letter names → unmappable → dropped, counted
@@ -814,7 +892,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap().keep();
         mini_bundle(&dir);
         let tokens = mini_tokens(&dir);
-        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
 
         // 42 → zweiundvierzig (in the mini dictionary)
         let r = fe.phonemize("42");
@@ -846,11 +924,11 @@ mod tests {
     fn frontend_nfc_normalizes_input() {
         let dir = tempfile::tempdir().unwrap().keep();
         // a dictionary word stored precomposed: "schön"
-        floravox_g2p_fst::LexiconWriter::new(dir.join("mini"))
+        floravox_g2p_fst::LexiconWriter::new(dir.join("de"))
             .write(vec![("schön".into(), "ʃ eː n".into())])
             .expect("write mini lexicon");
         let tokens = mini_tokens(&dir);
-        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
         // decomposed input (s c h o + U+0308 n) composes to the key
         // form — assert the STREAM, not just the drop count (the rule
         // fallback also yields zero drops; the stream pins rule 1)
@@ -870,7 +948,7 @@ mod tests {
         mini_bundle(&dir);
         // a multi-char token (a misaki-style diphthong)
         std::fs::write(dir.join("tokens2.txt"), "a 0\nA 1\nI 2\nai 3\n").unwrap();
-        let Err(err) = G2pFrontend::open(&dir, "mini", &dir.join("tokens2.txt")) else {
+        let Err(err) = G2pFrontend::open(&dir, "de", &dir.join("tokens2.txt")) else {
             panic!("multi-char vocabulary must be refused");
         };
         assert!(matches!(err, FrontendError::MultiCharVocabulary(_)));
@@ -921,7 +999,7 @@ mod tests {
     fn phonemize_drops_unhandled_numerics_and_expands_suffix_forms() {
         let dir = tempfile::tempdir().unwrap().keep();
         // the mini dictionary gains the suffix-expanded word
-        floravox_g2p_fst::LexiconWriter::new(dir.join("mini"))
+        floravox_g2p_fst::LexiconWriter::new(dir.join("de"))
             .write(vec![
                 ("haus".into(), "h aʊ̯ s".into()),
                 ("tag".into(), "t aː k".into()),
@@ -934,7 +1012,7 @@ mod tests {
             ])
             .expect("write mini lexicon");
         let tokens = mini_tokens(&dir);
-        let mut fe = G2pFrontend::open(&dir, "mini", &tokens).expect("frontend");
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
 
         // "1920er" expands then resolves via the dictionary
         let r = fe.phonemize("Haus 1920er Tag");
@@ -1131,5 +1209,50 @@ mod tests {
         let r = fe.phonemize("Blorpinxel");
         assert_eq!(r.dropped, 0, "OOV must go through the WFST, not drop");
         assert_eq!(r.sentences.len(), 1);
+    }
+
+    #[test]
+    fn identity_normalizer_drops_digits_with_a_count() {
+        // a French-shaped bundle (no fr normalizer yet): digit tokens
+        // are UNHANDLED — dropped and counted, never German-expanded
+        // and never English letter-spelled via the rule fallback
+        let dir = tempfile::tempdir().unwrap().keep();
+        floravox_g2p_fst::LexiconWriter::new(dir.join("fr"))
+            .write(vec![("bonjour".into(), "b o ʒ u ʁ".into())])
+            .expect("write fr lexicon");
+        let tokens = mini_tokens(&dir);
+        let mut fe = G2pFrontend::open(&dir, "fr", &tokens).expect("frontend");
+        let r = fe.phonemize("bonjour 42");
+        assert_eq!(r.words, 2);
+        assert_eq!(r.dropped, 1, "digits drop with a count for unhandled langs");
+        assert_eq!(r.sentences.len(), 1, "the sentence survives");
+        let sentence: String = r.sentences[0]
+            .iter()
+            .filter_map(|&cp| char::from_u32(cp.cast_unsigned()))
+            .collect();
+        assert!(sentence.contains('ʒ'), "bonjour spoke: {sentence}");
+        assert!(
+            !sentence.contains('e') || !sentence.contains("tsvae"),
+            "no German zweiundvierzig: {sentence}"
+        );
+        assert!(
+            !sentence.contains("w\u{028c}n"),
+            "no English letter names: {sentence}"
+        );
+    }
+
+    #[test]
+    fn normalizer_registry_routes_by_language() {
+        assert_eq!(normalizer_for("de").lang(), "de");
+        assert_eq!(normalizer_for("de-DE").lang(), "de");
+        assert_eq!(
+            normalizer_for("deu").lang(),
+            "de",
+            "corpus-tag keys route too"
+        );
+        assert_eq!(normalizer_for("fr").lang(), "", "unhandled → identity");
+        assert_eq!(normalizer_for("fr-FR").lang(), "");
+        // identity never expands
+        assert!(normalizer_for("fr").normalize_numeric("42").is_none());
     }
 }
