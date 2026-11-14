@@ -1491,6 +1491,36 @@ pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
     .unwrap_or(ptr::null_mut())
 }
 
+/// Convert a typed registry entry into the public model shape (the
+/// enrichment and provisioning ABI paths need the language fields for
+/// the allowlist gate).
+#[cfg(feature = "sherpaonnx")]
+fn sherpa_registry_info(model: &sherpa_onnx_models::ModelInfo) -> types::SherpaModelInfo {
+    types::SherpaModelInfo {
+        id: model.id.clone(),
+        model_type: model.model_type.clone(),
+        engines: model.engines.clone(),
+        name: model.name.clone(),
+        language: model
+            .language
+            .iter()
+            .map(|l| types::SherpaLanguage {
+                lang_code: l.lang_code.clone(),
+                language_name: l.language_name.clone(),
+                country: l.country.clone(),
+            })
+            .collect(),
+        sample_rate: model.sample_rate,
+        num_speakers: model.num_speakers,
+        quality: model.quality.clone(),
+        url: model.url.clone(),
+        compression: model.compression,
+        filesize_mb: model.filesize_mb,
+        license: model.license.clone(),
+        license_url: model.license_url.clone(),
+    }
+}
+
 /// Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
 ///
 /// This uses the build's bundled registry snapshot and requires no engine or network
@@ -1502,12 +1532,42 @@ pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(feature = "sherpaonnx")]
         {
-            let Ok(json) = CString::new(sherpa_onnx_models::MODELS_JSON) else {
+            // The registry snapshot, enriched with one wrapper-computed
+            // field per model: `g2p_enabled` — true when this build can
+            // phonemize the model's language from a validated
+            // VoiceGarden bundle (#82: the `sherpa-g2p` feature AND a
+            // validated allowlist row). Download surfaces (Dasher's
+            // catalog decodes snake_case → `g2pEnabled`) consult this
+            // instead of re-implementing the gate; unknown fields are
+            // ignored by older consumers, so the shape is additive.
+            let Ok(mut registry) =
+                serde_json::from_str::<serde_json::Value>(sherpa_onnx_models::MODELS_JSON)
+            else {
                 set_error_detail(ErrorDetail::new(
                     TtsErrorCode::EngineFailure,
                     Some("sherpaonnx"),
                     None,
-                    "The embedded Sherpa-ONNX model registry contains an invalid NUL byte",
+                    "The embedded Sherpa-ONNX model registry is not valid JSON",
+                ));
+                return ptr::null_mut();
+            };
+            for (id, model) in sherpa_onnx_models::models() {
+                let info = sherpa_registry_info(model);
+                let enabled =
+                    cfg!(feature = "sherpa-g2p") && crate::sherpa_lang::g2p_enabled_for(&info);
+                // get_mut: never auto-vivify an entry if the JSON and
+                // models() ever diverge (impossible today — same source
+                // string — but the defensive form fails loudly instead)
+                if let Some(entry) = registry.get_mut(id.as_str()) {
+                    entry["g2p_enabled"] = serde_json::Value::Bool(enabled);
+                }
+            }
+            let Ok(json) = CString::new(registry.to_string()) else {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::EngineFailure,
+                    Some("sherpaonnx"),
+                    None,
+                    "The enriched Sherpa-ONNX model registry contains an invalid NUL byte",
                 ));
                 return ptr::null_mut();
             };
@@ -1526,6 +1586,97 @@ pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
         }
     }))
     .unwrap_or(ptr::null_mut())
+}
+
+/// Provision (fetch when not cached, sha-verify) the VoiceGarden G2P
+/// bundle for a Sherpa-ONNX model's language (#82), so installers can
+/// make a non-English piper voice speak offline on first use. Returns
+/// true when the bundle is present in the cache afterwards.
+///
+/// Requires the `sherpa-g2p` feature (false with an EngineNotAvailable
+/// detail otherwise) and a model whose language has a validated
+/// allowlist row (false with a ModelNotFound detail otherwise). The
+/// cache honors `VOICEGARDEN_LEXICON_DIR`; a cache miss downloads
+/// 13–19 MB and verifies the manifest sha256.
+#[no_mangle]
+pub extern "C" fn tts_provision_sherpa_g2p_bundle(model_id: *const c_char) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // sherpa-g2p does NOT imply sherpaonnx — every referenced item
+        // lives under all(sherpaonnx, sherpa-g2p), so the working branch
+        // needs the same pair (loop-review: g2p-alone stopped compiling)
+        #[cfg(not(all(feature = "sherpaonnx", feature = "sherpa-g2p")))]
+        {
+            let _ = model_id;
+            set_error_detail(ErrorDetail::new(
+                TtsErrorCode::EngineNotAvailable,
+                Some("sherpa-g2p"),
+                None,
+                "G2P bundle provisioning requires the sherpaonnx and \
+                 sherpa-g2p features",
+            ));
+            false
+        }
+        #[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
+        {
+            use std::ffi::CStr;
+            if model_id.is_null() {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::InvalidConfiguration,
+                    Some("sherpa-g2p"),
+                    None,
+                    "model_id must be a valid C string",
+                ));
+                return false;
+            }
+            // SAFETY: the caller passes a NUL-terminated C string.
+            let id = unsafe { CStr::from_ptr(model_id) }
+                .to_string_lossy()
+                .into_owned();
+            let Some((_, model)) = sherpa_onnx_models::models()
+                .iter()
+                .find(|(mid, _)| **mid == id)
+            else {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::ModelNotFound,
+                    Some("sherpa-g2p"),
+                    None,
+                    "model id not found in the Sherpa-ONNX registry",
+                ));
+                return false;
+            };
+            let info = sherpa_registry_info(model);
+            let Some(bundle) = crate::sherpa_lang::validated_bundle_for_model(&info) else {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::ModelNotFound,
+                    Some("sherpa-g2p"),
+                    None,
+                    "no validated G2P bundle for this model's language",
+                ));
+                return false;
+            };
+            match crate::sherpa_g2p::provision_bundle(bundle.archive, bundle.key) {
+                Ok(dir) => {
+                    // visible confirmation for installer logs
+                    eprintln!(
+                        "sherpa: G2P bundle '{}' provisioned at {}",
+                        bundle.key,
+                        dir.display()
+                    );
+                    true
+                }
+                Err(e) => {
+                    set_error_detail(ErrorDetail::new(
+                        TtsErrorCode::NetworkError,
+                        Some("sherpa-g2p"),
+                        None,
+                        format!("provisioning bundle '{}': {e}", bundle.key).as_str(),
+                    ));
+                    false
+                }
+            }
+        }
+    }))
+    .unwrap_or(false)
 }
 
 /// Verify the context's credentials with an explicit "unverified"

@@ -103,3 +103,15 @@ Build & run the harness:
 cargo build --release
 make -C bindings/c test
 ```
+
+### G2P bundle provisioning (`tts_provision_sherpa_g2p_bundle`)
+
+For non-English piper models whose language has a validated VoiceGarden
+bundle (German today), call once during model installation so the voice
+speaks offline on first use: `bool tts_provision_sherpa_g2p_bundle(const
+char *model_id)`. True = bundle present in the cache afterwards (the
+cache honors `VOICEGARDEN_LEXICON_DIR`; a miss downloads 13–19 MB and
+verifies the manifest sha256). The registry export
+(`tts_get_sherpa_models_json`) carries `g2p_enabled` per model for
+download-eligibility gating (snake_case → `g2pEnabled` in Swift's
+convertFromSnakeCase decoder).
