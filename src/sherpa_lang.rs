@@ -166,7 +166,19 @@ pub fn g2p_enabled_for(model: &SherpaModelInfo) -> bool {
 /// language passes validation.
 #[must_use]
 pub fn g2p_enabled_with(rows: &[LangBundle], model: &SherpaModelInfo) -> bool {
-    default_row_in(rows, model).is_some_and(|i| rows[i].validated)
+    validated_bundle_in(rows, model).is_some()
+}
+
+#[cfg(feature = "sherpa-g2p")]
+pub(crate) fn validated_bundle_for_model(model: &SherpaModelInfo) -> Option<&'static LangBundle> {
+    validated_bundle_in(LANG_BUNDLES, model)
+}
+
+fn validated_bundle_in<'a>(
+    rows: &'a [LangBundle],
+    model: &SherpaModelInfo,
+) -> Option<&'a LangBundle> {
+    Some(&rows[default_row_in(rows, model)?]).filter(|row| row.validated)
 }
 
 #[cfg(test)]
@@ -222,6 +234,7 @@ mod tests {
             validated: false,
         }];
         assert!(!g2p_enabled_with(&unvalidated, &m));
+        assert!(validated_bundle_in(&unvalidated, &m).is_none());
         let validated = [LangBundle {
             bcp47: "de",
             archive: Archive::Expanded,
@@ -229,6 +242,7 @@ mod tests {
             validated: true,
         }];
         assert!(g2p_enabled_with(&validated, &m));
+        assert_eq!(validated_bundle_in(&validated, &m).unwrap().key, "deu");
     }
 
     #[test]

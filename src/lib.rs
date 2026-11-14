@@ -1645,7 +1645,7 @@ pub extern "C" fn tts_provision_sherpa_g2p_bundle(model_id: *const c_char) -> bo
                 return false;
             };
             let info = sherpa_registry_info(model);
-            let Some(bundle) = crate::sherpa_lang::default_bundle_for_model(&info) else {
+            let Some(bundle) = crate::sherpa_lang::validated_bundle_for_model(&info) else {
                 set_error_detail(ErrorDetail::new(
                     TtsErrorCode::ModelNotFound,
                     Some("sherpa-g2p"),

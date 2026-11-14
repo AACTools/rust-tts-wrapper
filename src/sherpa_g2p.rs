@@ -36,6 +36,7 @@ use unicode_normalization::UnicodeNormalization as _;
 
 use crate::sherpa_lang::Archive;
 use crate::sherpa_lexicon::{read_tokens_txt_public, VocabPhonemeMap};
+use voicegarden_lexicons::{LexiconArchive, Manifest};
 
 /// The WFST, opened on the first dictionary miss. Opening it eagerly
 /// would put ~50 MB resident on every voice load for the many
@@ -590,55 +591,66 @@ fn integer_to_german(digits: &str) -> Option<String> {
 // Provisioning (model setup time; never inside the audio path)
 // ──────────────────────────────────────────────────────────────────
 
-/// Provision (fetch when stale or absent) the bundle named by an
-/// allowlist row. The cache check mirrors the crate's own contract
-/// EXACTLY: the `.sha256` stamp must match the manifest's sha (not
-/// merely exist — a stale bundle from an older release must refresh),
-/// plus both FST halves present under `<cache>/<key>/` (both archives
-/// cache flat in the pinned crate). Constructs EXACTLY the row's
-/// archive — the crate matches entries on `lang`/`bcp47`, so the
-/// expanded archive asked for "de" would silently resolve `deu` (the
-/// Phase 1 archive trap); with the pinned archive, a wrong key is an
-/// error, not a wrong bundle.
-///
-/// The archive's manifest itself is network-fetched once and then
-/// cached at `<cache>/lexicons.json` (offline installs fall back to
-/// that file), so an offline machine with a provisioned bundle never
-/// touches the network here.
+/// Provision the exact bundle named by an allowlist row. A local manifest,
+/// matching SHA stamp, and both FST files let an installed voice start without
+/// a network request. If the cache is incomplete or its stamp differs from the
+/// cached manifest, consult the remote archive and verify any download.
 ///
 /// # Errors
 /// A one-line message (network, checksum, manifest); the engine logs
 /// it once and retries on a later utterance (throttled).
 pub fn provision_bundle(archive: Archive, key: &str) -> Result<PathBuf, String> {
-    let pinned = match archive {
-        Archive::Base => voicegarden_lexicons::LexiconArchive::default_archive(),
-        Archive::Expanded => voicegarden_lexicons::LexiconArchive::default_expanded(),
-    }
-    .map_err(|e| format!("lexicon archive: {e}"))?;
-    provision_from(&pinned, &voicegarden_lexicons::default_cache_dir(), key)
+    let cache = voicegarden_lexicons::default_cache_dir();
+    let manifest_name = match archive {
+        Archive::Base => "lexicons.json",
+        Archive::Expanded => "expanded.json",
+    };
+    provision_from(&cache, manifest_name, key, || {
+        let base = voicegarden_lexicons::DEFAULT_BASE;
+        match archive {
+            Archive::Base => LexiconArchive::new(base, &cache),
+            Archive::Expanded => LexiconArchive::new_expanded(base, &cache),
+        }
+        .map_err(|e| format!("lexicon archive: {e}"))
+    })
 }
 
-/// The cache-hit / fetch decision against an explicit archive + cache
-/// (tests drive this with a local-dir base so the whole decision is
-/// provable offline).
 fn provision_from(
-    pinned: &voicegarden_lexicons::LexiconArchive,
-    cache: &std::path::Path,
+    cache: &Path,
+    manifest_name: &str,
     key: &str,
+    open_archive: impl FnOnce() -> Result<LexiconArchive, String>,
 ) -> Result<PathBuf, String> {
-    let entry = pinned
-        .entry(key)
-        .ok_or_else(|| format!("no '{key}' bundle in the archive manifest"))?;
     let dir = cache.join(key);
-    let stamp_matches =
-        std::fs::read_to_string(dir.join(".sha256")).ok().as_deref() == Some(entry.sha256.as_str());
-    if stamp_matches
-        && dir.join(format!("{key}.fst")).exists()
-        && dir.join(format!("{key}.pho")).exists()
-    {
+    let stamp = std::fs::read_to_string(dir.join(".sha256")).ok();
+    let has_cached_bundle =
+        dir.join(format!("{key}.fst")).is_file() && dir.join(format!("{key}.pho")).is_file();
+
+    let stamp = stamp.filter(|_| has_cached_bundle);
+    if let Some(stamp) = &stamp {
+        let cached_manifest = std::fs::read(cache.join(manifest_name))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok());
+        if cached_manifest.is_some_and(|manifest| {
+            manifest
+                .languages
+                .iter()
+                .any(|entry| entry.lang == key && entry.sha256 == *stamp)
+        }) {
+            return Ok(dir);
+        }
+    }
+
+    let archive = open_archive()?;
+    // VoiceGarden also resolves BCP-47 aliases. The allowlist names an exact
+    // bundle, so reject an alias that resolves to a different key.
+    let Some(entry) = archive.entry(key).filter(|entry| entry.lang == key) else {
+        return Err(format!("no '{key}' bundle in the archive manifest"));
+    };
+    if stamp.as_deref() == Some(entry.sha256.as_str()) {
         return Ok(dir);
     }
-    let bundle = pinned
+    let bundle = archive
         .fetch(key)
         .map_err(|e| format!("fetching bundle '{key}': {e}"))?;
     Ok(bundle.dir)
@@ -952,37 +964,41 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_stamp_must_match_the_manifest_sha() {
-        // a local-dir archive base with a mini manifest: cache hits and
-        // stale-stamp refreshes are provable offline (no tarball is
-        // staged, so any fetch attempt fails loudly)
-        let base = tempfile::tempdir().unwrap().keep();
-        let cache = tempfile::tempdir().unwrap().keep();
+    fn provisioning_opens_the_archive_only_on_a_cache_miss() {
+        let cache = tempfile::tempdir().unwrap();
+        let cache = cache.path();
         std::fs::write(
-            base.join("lexicons.json"),
-            r#"{"version":"t","languages":[{"lang":"de","name":"German","bcp47":"de",
+            cache.join("expanded.json"),
+            r#"{"version":"t","languages":[{"lang":"deu","name":"German","bcp47":"de",
                 "entries":1,"license":"MIT","source":"t","phonetisaurus":null,
-                "file":"de.tar.gz","sha256":"abc123"}]}"#,
+                "file":"deu.tar.gz","sha256":"abc123"}]}"#,
         )
         .unwrap();
-        let base_str = base.display().to_string();
-        let archive = voicegarden_lexicons::LexiconArchive::new(base_str, &cache).expect("archive");
-
-        // wrong sha → refresh attempt → fetch fails (no tarball) → Err
-        let dir = cache.join("de");
+        let dir = cache.join("deu");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("de.fst"), b"x").unwrap();
-        std::fs::write(dir.join("de.pho"), b"x").unwrap();
-        std::fs::write(dir.join(".sha256"), b"stale").unwrap();
-        assert!(
-            provision_from(&archive, &cache, "de").is_err(),
-            "stale stamp must refresh"
-        );
+        std::fs::write(dir.join("deu.fst"), b"x").unwrap();
+        std::fs::write(dir.join("deu.pho"), b"x").unwrap();
 
-        // matching sha + halves → cache hit with NO tarball present
+        let archive_unavailable = || Err("archive unavailable".into());
+        std::fs::write(dir.join(".sha256"), b"stale").unwrap();
+        assert_eq!(
+            provision_from(cache, "expanded.json", "deu", archive_unavailable),
+            Err("archive unavailable".into()),
+            "a stale stamp must open the archive"
+        );
         std::fs::write(dir.join(".sha256"), b"abc123").unwrap();
-        let got = provision_from(&archive, &cache, "de").expect("cache hit");
+        let got = provision_from(cache, "expanded.json", "deu", || {
+            panic!("a complete cache must not open the archive")
+        })
+        .expect("cache hit");
         assert_eq!(got, dir);
+
+        std::fs::remove_file(dir.join("deu.pho")).unwrap();
+        assert_eq!(
+            provision_from(cache, "expanded.json", "deu", archive_unavailable),
+            Err("archive unavailable".into()),
+            "an incomplete bundle must open the archive"
+        );
     }
 
     // ── real-bundle coverage (env-gated, like Phase 2's) ──
