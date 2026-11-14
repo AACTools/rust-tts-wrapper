@@ -1,0 +1,6 @@
+[toolchain]
+# Pin every cargo invocation in this repo (local dev, hooks, CI) to
+# stable. Without this, a machine's default toolchain (e.g. an old
+# nightly) applies different clippy lints than CI — the pre-push hook
+# then fails (or worse, passes) on lints CI never sees.
+channel = "stable"
