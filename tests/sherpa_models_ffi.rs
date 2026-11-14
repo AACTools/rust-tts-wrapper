@@ -21,9 +21,8 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
         .as_str()
         .is_some_and(|url| url.starts_with("https://")));
 
-    // the enrichment: g2p_enabled on every model, German true when the
-    // feature is compiled in, everything else false. (Dasher decodes
-    // this snake_case field as g2pEnabled for download eligibility.)
+    // the enrichment: g2p_enabled + readiness on every model (Dasher
+    // decodes snake_case → g2pEnabled/readiness for eligibility)
     for (_id, m) in registry.as_object().unwrap() {
         assert!(
             m.get("g2p_enabled")
@@ -31,14 +30,67 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
                 .is_some(),
             "every model carries g2p_enabled"
         );
+        let r = m["readiness"]
+            .as_str()
+            .expect("every model carries readiness");
+        assert!(
+            r == "ready"
+                || r == "needs_bundle"
+                || r == "unverified"
+                || r.starts_with("needs_assets:")
+                || r.starts_with("blocked:"),
+            "documented value set, got {r}"
+        );
     }
     assert_eq!(
         registry["piper-de_DE-thorsten-medium"]["g2p_enabled"],
         serde_json::Value::Bool(cfg!(feature = "sherpa-g2p"))
     );
+    // readiness: German = needs_bundle when G2P is compiled in
+    // (provision at install); without the feature the validated
+    // bundle exists but this build lacks the front-end → its own
+    // reason, NOT "no-bundle"
+    #[cfg(feature = "sherpa-g2p")]
     assert_eq!(
-        registry["piper-en_US-amy-low"]["g2p_enabled"],
-        serde_json::Value::Bool(false)
+        registry["piper-de_DE-thorsten-medium"]["readiness"],
+        serde_json::Value::String("needs_bundle".to_string())
+    );
+    #[cfg(not(feature = "sherpa-g2p"))]
+    assert_eq!(
+        registry["piper-de_DE-thorsten-medium"]["readiness"],
+        serde_json::Value::String("blocked:g2p-unavailable".to_string())
+    );
+    assert_eq!(
+        registry["piper-en_US-amy-low"]["readiness"],
+        serde_json::Value::String("ready".to_string())
+    );
+    assert_eq!(
+        registry["piper-fr_FR-siwis-medium"]["readiness"],
+        serde_json::Value::String("blocked:bundle-not-validated".to_string())
+    );
+    // Hungarian: in neither voicegarden manifest
+    assert_eq!(
+        registry["piper-hu_HU-berta-medium"]["readiness"],
+        serde_json::Value::String("blocked:no-bundle".to_string())
+    );
+    // deprecated supertonic: ready-looking archive, retired upstream
+    assert_eq!(
+        registry["supertonic-3-multilingual"]["readiness"],
+        serde_json::Value::String("blocked:deprecated".to_string())
+    );
+    // pl HAS an expanded bundle (pol.tar.gz) — not validated yet
+    assert_eq!(
+        registry["piper-pl_PL-gosia-medium"]["readiness"],
+        serde_json::Value::String("blocked:bundle-not-validated".to_string())
+    );
+    assert_eq!(
+        registry["kokoro-zh_en-int8"]["readiness"],
+        serde_json::Value::String("ready".to_string())
+    );
+    // MMS: no sha256 in the registry, native front-end
+    assert_eq!(
+        registry["mms_abp"]["readiness"],
+        serde_json::Value::String("unverified".to_string())
     );
 
     // additive shape: re-serializing the raw snapshot minus g2p fields
@@ -50,6 +102,7 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
     }
     for m in got.as_object_mut().unwrap().values_mut() {
         m.as_object_mut().unwrap().remove("g2p_enabled");
+        m.as_object_mut().unwrap().remove("readiness");
     }
     assert_eq!(raw, got, "the enrichment must be purely additive");
 }

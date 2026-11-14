@@ -1366,8 +1366,9 @@ fn is_piper_or_github_model(model_id: &str) -> bool {
 /// English-market model id? Matches the id spellings the registry
 /// actually uses (`en_US`/`en_GB` locales, `-en-` segments, `-en`
 /// suffixes). Deliberately NOT a bare "en" substring — that would
-/// match "thorsten_emotional" and friends.
-fn is_english_model_id(mid: &str) -> bool {
+/// match "thorsten_emotional" and friends. Shared with the catalog
+/// readiness surface (#92) — pub(crate) for that.
+pub(crate) fn is_english_model_id(mid: &str) -> bool {
     ["-en-", "en_us", "en_gb", "en-us", "en-gb"]
         .iter()
         .any(|m| mid.contains(m))

@@ -89,6 +89,8 @@ pub mod floravox_engine;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
+pub mod sherpa_catalog;
+#[cfg(feature = "sherpaonnx")]
 pub mod sherpa_convention;
 #[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
 pub mod sherpa_g2p;
@@ -1532,14 +1534,17 @@ pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         #[cfg(feature = "sherpaonnx")]
         {
-            // The registry snapshot, enriched with one wrapper-computed
-            // field per model: `g2p_enabled` — true when this build can
-            // phonemize the model's language from a validated
+            // The registry snapshot, enriched with two wrapper-computed
+            // fields per model (#92): `g2p_enabled` — true when this
+            // build can phonemize the model's language from a validated
             // VoiceGarden bundle (#82: the `sherpa-g2p` feature AND a
-            // validated allowlist row). Download surfaces (Dasher's
-            // catalog decodes snake_case → `g2pEnabled`) consult this
-            // instead of re-implementing the gate; unknown fields are
-            // ignored by older consumers, so the shape is additive.
+            // validated allowlist row); `readiness` — the installer's
+            // question (ready / needs_bundle / needs_assets:* /
+            // unverified / blocked:<reason>, see sherpa_catalog).
+            // Download surfaces (Dasher's catalog decodes snake_case →
+            // `g2pEnabled`/`readiness`) consult these instead of
+            // re-implementing the gates; unknown fields are ignored by
+            // older consumers, so the shape is additive.
             let Ok(mut registry) =
                 serde_json::from_str::<serde_json::Value>(sherpa_onnx_models::MODELS_JSON)
             else {
@@ -1555,11 +1560,17 @@ pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
                 let info = sherpa_registry_info(model);
                 let enabled =
                     cfg!(feature = "sherpa-g2p") && crate::sherpa_lang::g2p_enabled_for(&info);
+                let readiness = crate::sherpa_catalog::readiness_for(
+                    &info,
+                    model.sha256.as_deref().is_some_and(|s| !s.is_empty()),
+                    model.deprecated,
+                );
                 // get_mut: never auto-vivify an entry if the JSON and
                 // models() ever diverge (impossible today — same source
                 // string — but the defensive form fails loudly instead)
                 if let Some(entry) = registry.get_mut(id.as_str()) {
                     entry["g2p_enabled"] = serde_json::Value::Bool(enabled);
+                    entry["readiness"] = serde_json::Value::String(readiness.clone());
                 }
             }
             let Ok(json) = CString::new(registry.to_string()) else {

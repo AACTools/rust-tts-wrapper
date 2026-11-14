@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# pre-commit: fast gate — format check + clippy on the default feature
+# set. The full feature-combo matrix runs at pre-push (see
+# scripts/git-hooks/pre-push). Install once:
+#   git config core.hooksPath scripts/git-hooks
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if ! command -v cargo >/dev/null; then
+    echo "pre-commit: cargo not found — skipping (install Rust to enable)" >&2
+    exit 0
+fi
+
+# fmt: whole tree, cheap
+if ! cargo fmt --all -- --check; then
+    echo "pre-commit: cargo fmt --check failed — run 'cargo fmt --all' and re-stage" >&2
+    exit 1
+fi
+
+# clippy: default features only (fast; incremental after the first run).
+# Non-default combos are the pre-push job — they force full rebuilds and
+# would make every commit take minutes.
+if ! cargo clippy --all-targets -- -D warnings >/dev/null 2>&1; then
+    echo "pre-commit: clippy (default features) failed — fix before committing" >&2
+    cargo clippy --all-targets -- -D warnings 2>&1 | grep -E '^error' -A 4 | head -30 || true
+    exit 1
+fi
+
+exit 0
