@@ -144,6 +144,31 @@ both), `blocked:no-sha` where checksums are missing.
 English to the codepoints path (fixing English OOV/numbers the same
 way) folds into item A as locale `en`.
 
+## Phoneme-mapping audit (2026-11-14, work item A part 2)
+
+Representative piper models per candidate locale (tokens.txt from the
+real archives), bundle phones run through the RUNTIME ladder
+(`G2pFrontend.phonemize` decides, `lookup_key` attributes — the same
+decision order as production):
+
+| locale | representative model | corpus drop (words, digits excluded) | verdict |
+|---|---|---|---|
+| fr | `piper-fr_FR-gilles-low` | **0.000%** | ✅ phones map cleanly |
+| pt | `piper-pt_BR-cadu-medium` | **0.000%** | ✅ |
+| es | `piper-es-glados-medium` | **0.000%** | ✅ |
+| it | `piper-it_IT-dii-high` | **0.000%** | ✅ (high WFST share on tiny word list — dictionary/stress conventions; the ladder decomposes `ˈt` → `ˈ`+`t`) |
+| ru | `piper-ru_RU-denis-medium` | **0.000%** | ✅ |
+
+Every unmapped phone in the raw scan decomposes into single-char
+vocab entries (my python approximation over-counted: the real ladder's
+char-split covers `ɐ̃w̃` → `ɐ̃ w̃`, `lʲ` → `l ʲ`, `t͡ɕ` → `t ɕ`). **The
+wrapper needs no per-locale phone-mapping work for fr/pt/es/it/ru** —
+the Phase 2 ladder is locale-agnostic. The per-locale gaps are:
+normalizers (digits — the Identity drop is visible in the numbers) and
+the licensing relabel (voicegarden-lexicons#1) before any locale is
+enabled. pl has an expanded bundle (not fetched in this pass) — same
+treatment when the relabel lands.
+
 ## Next PRs
 
 1. **Readiness surface** — extend the catalog enrichment with
