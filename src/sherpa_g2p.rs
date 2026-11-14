@@ -184,10 +184,706 @@ impl LangNormalizer for IdentityNormalizer {
 /// own; everything else gets the identity (drop-count) behavior.
 #[must_use]
 pub fn normalizer_for(lang: &str) -> Box<dyn LangNormalizer> {
-    match primary_subtag(lang).as_str() {
-        "de" | "deu" => Box::new(GermanNormalizer), // deu = corpus-tag key
+    match iso639_3_to_primary(&primary_subtag(lang)).as_str() {
+        "de" => Box::new(GermanNormalizer),
+        "fr" => Box::new(FrenchNormalizer),
+        "es" => Box::new(SpanishNormalizer),
+        "pt" => Box::new(PortugueseNormalizer),
+        "it" => Box::new(ItalianNormalizer),
         _ => Box::new(IdentityNormalizer),
     }
+}
+
+/// Fold an ISO 639-3 corpus tag to its 639-1 primary (deu→de, fra→fr,
+/// spa→es, …) so bundle keys route once regardless of which manifest
+/// they come from. Sync when voicegarden-lexicons adds languages.
+fn iso639_3_to_primary(tag: &str) -> String {
+    const T3_TO_T2: &[(&str, &str)] = &[
+        ("ara", "ar"),
+        ("ben", "bn"),
+        ("cat", "ca"),
+        ("ces", "cs"),
+        ("dan", "da"),
+        ("deu", "de"),
+        ("ell", "el"),
+        ("eng", "en"),
+        ("fas", "fa"),
+        ("fin", "fi"),
+        ("fra", "fr"),
+        ("heb", "he"),
+        ("hin", "hi"),
+        ("ind", "id"),
+        ("isl", "is"),
+        ("ita", "it"),
+        ("nld", "nl"),
+        ("nob", "nb"),
+        ("pol", "pl"),
+        ("por", "pt"),
+        ("ron", "ro"),
+        ("rus", "ru"),
+        ("slk", "sk"),
+        ("slv", "sl"),
+        ("spa", "es"),
+        ("swe", "sv"),
+        ("tam", "ta"),
+        ("tur", "tr"),
+        ("urd", "ur"),
+    ];
+    T3_TO_T2
+        .iter()
+        .find(|(t3, _)| *t3 == tag)
+        .map_or_else(|| tag.to_string(), |(_, t2)| (*t2).to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────
+// French
+// ──────────────────────────────────────────────────────────────────
+
+/// French digits: decimal comma, space/dot thousands, vigesimal
+/// cardinals (quatre-vingt-dix), mille not "un mille".
+struct FrenchNormalizer;
+
+impl LangNormalizer for FrenchNormalizer {
+    fn lang(&self) -> &'static str {
+        "fr"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        fr_normalize(core)
+    }
+}
+
+fn fr_normalize(core: &str) -> Option<String> {
+    if let Some((int_part, frac)) = core.split_once(',') {
+        let ok = !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && !int_part.is_empty()
+            && fr_int_ok(int_part);
+        if !ok {
+            return None;
+        }
+        let mut out = fr_integer(&int_part.replace(['.', ' ', '\u{00A0}'], ""))?;
+        out.push_str("virgule");
+        for c in frac.chars() {
+            out.push_str(fr_d(c));
+        }
+        return Some(out);
+    }
+    if !fr_int_ok(core) {
+        return None;
+    }
+    fr_integer(&core.replace(['.', ' ', '\u{00A0}'], ""))
+}
+
+fn fr_int_ok(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    // digits with optional dot/space/NBSP thousands separators
+    let mut prev_digit = false;
+    for c in s.chars() {
+        match c {
+            '0'..='9' => prev_digit = true,
+            '.' | ' ' | '\u{00A0}' if prev_digit => prev_digit = false,
+            _ => return false,
+        }
+    }
+    prev_digit
+}
+
+fn fr_d(c: char) -> &'static str {
+    const D: [&str; 10] = [
+        "zéro", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf",
+    ];
+    D[c.to_digit(10).unwrap_or(0) as usize]
+}
+
+fn fr_integer(digits: &str) -> Option<String> {
+    let n: u64 = digits.parse().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("zéro".into());
+    }
+    let mut out = String::new();
+    let m = n / 1_000_000;
+    let r = n % 1_000_000;
+    if m == 1 {
+        out.push_str("unmillion");
+    } else if m > 1 {
+        out.push_str(&fr_m(m));
+        out.push_str("millions");
+    }
+    if r > 0 {
+        out.push_str(&fr_m(r));
+    }
+    Some(out)
+}
+
+fn fr_m(n: u64) -> String {
+    let t = n / 1000;
+    let rest = n % 1000;
+    let mut out = String::new();
+    if t == 1 {
+        out.push_str("mille");
+    } else if t > 1 {
+        out.push_str(&fr_1000(t));
+        out.push_str("mille");
+    }
+    if rest > 0 {
+        out.push_str(&fr_1000(rest));
+    }
+    out
+}
+
+fn fr_1000(n: u64) -> String {
+    let h = n / 100;
+    let r = n % 100;
+    let mut out = String::new();
+    if h == 1 {
+        out.push_str("cent");
+    } else if h > 1 {
+        out.push_str(&fr_100(r_1(h))); // need fr_100 for hundreds digit too
+        out.push_str("cent");
+        if r == 0 {
+            out.push('s');
+        } // deuxcents
+    }
+    if r > 0 {
+        out.push_str(&fr_100(r));
+    }
+    out
+}
+
+fn r_1(n: u64) -> u64 {
+    n
+} // passthrough for now — fr_100 is recursive
+
+fn fr_100(n: u64) -> String {
+    const U: [&str; 20] = [
+        "", "un", "deux", "trois", "quatre", "cinq", "six", "sept", "huit", "neuf", "dix", "onze",
+        "douze", "treize", "quatorze", "quinze", "seize", "dix-sept", "dix-huit", "dix-neuf",
+    ];
+    if n < 20 {
+        return U[n as usize].into();
+    }
+    match n {
+        20 => "vingt".into(),
+        21 => "vingt et un".into(),
+        22..=29 => format!("vingt-{}", U[(n - 20) as usize]),
+        30 => "trente".into(),
+        31 => "trente et un".into(),
+        32..=39 => format!("trente-{}", U[(n - 30) as usize]),
+        40 => "quarante".into(),
+        41 => "quarante et un".into(),
+        42..=49 => format!("quarante-{}", U[(n - 40) as usize]),
+        50 => "cinquante".into(),
+        51 => "cinquante et un".into(),
+        52..=59 => format!("cinquante-{}", U[(n - 50) as usize]),
+        60 => "soixante".into(),
+        61 => "soixante et un".into(),
+        62..=79 => format!("soixante-{}", U[(n - 60) as usize]),
+        // 80-89 = quatre-vingt + 0-9
+        80 => "quatre-vingts".into(),
+        81..=99 => format!("quatre-vingt-{}", U[(n - 80) as usize]),
+        _ => String::new(),
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Spanish
+// ──────────────────────────────────────────────────────────────────
+
+struct SpanishNormalizer;
+
+impl LangNormalizer for SpanishNormalizer {
+    fn lang(&self) -> &'static str {
+        "es"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        es_normalize(core)
+    }
+}
+
+fn es_normalize(core: &str) -> Option<String> {
+    if let Some((int_part, frac)) = core.split_once(',') {
+        let ok = !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit() || c == '.');
+        if !ok {
+            return None;
+        }
+        let mut out = es_integer(&int_part.replace('.', ""))?;
+        out.push_str("coma");
+        for c in frac.chars() {
+            out.push_str(es_d(c));
+        }
+        return Some(out);
+    }
+    if core.is_empty() || core.chars().any(|c| !c.is_ascii_digit() && c != '.') {
+        return None;
+    }
+    let groups: Vec<&str> = core.split('.').collect();
+    if groups.len() > 1
+        && !groups.iter().enumerate().all(|(i, g)| {
+            !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()) && (i == 0 || g.len() == 3)
+        })
+    {
+        return None;
+    }
+    es_integer(&core.replace('.', ""))
+}
+
+fn es_d(c: char) -> &'static str {
+    const D: [&str; 10] = [
+        "cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve",
+    ];
+    D[c.to_digit(10).unwrap_or(0) as usize]
+}
+
+fn es_integer(digits: &str) -> Option<String> {
+    let n: u64 = digits.parse().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("cero".into());
+    }
+    let mut out = String::new();
+    let m = n / 1_000_000;
+    let r = n % 1_000_000;
+    if m == 1 {
+        out.push_str("unmillón");
+    } else if m > 1 {
+        out.push_str(&es_m(m));
+        out.push_str("millones");
+    }
+    if r > 0 {
+        out.push_str(&es_m(r));
+    }
+    Some(out)
+}
+
+fn es_m(n: u64) -> String {
+    let t = n / 1000;
+    let rest = n % 1000;
+    let mut out = String::new();
+    if t > 1 {
+        out.push_str(&es_1000(t));
+    }
+    if t > 0 {
+        out.push_str("mil");
+    }
+    if rest > 0 {
+        out.push_str(&es_1000(rest));
+    }
+    out
+}
+
+fn es_1000(n: u64) -> String {
+    let h = n / 100;
+    let r = n % 100;
+    if h == 1 && r == 0 {
+        return "cien".into(); // exact 100
+    }
+    let mut out = String::new();
+    if h == 1 {
+        out.push_str("ciento");
+    } else if h > 1 {
+        out.push_str(&es_100(h));
+        out.push_str("cientos");
+    }
+    if r > 0 {
+        out.push_str(&es_100(r));
+    }
+    out
+}
+
+fn es_100(n: u64) -> String {
+    const U: [&str; 30] = [
+        "cero",
+        "uno",
+        "dos",
+        "tres",
+        "cuatro",
+        "cinco",
+        "seis",
+        "siete",
+        "ocho",
+        "nueve",
+        "diez",
+        "once",
+        "doce",
+        "trece",
+        "catorce",
+        "quince",
+        "dieciséis",
+        "diecisiete",
+        "dieciocho",
+        "diecinueve",
+        "veinte",
+        "veintiuno",
+        "veintidós",
+        "veintitrés",
+        "veinticuatro",
+        "veinticinco",
+        "veintiséis",
+        "veintisiete",
+        "veintiocho",
+        "veintinueve",
+    ];
+    const T: [&str; 10] = [
+        "",
+        "",
+        "",
+        "treinta",
+        "cuarenta",
+        "cincuenta",
+        "sesenta",
+        "setenta",
+        "ochenta",
+        "noventa",
+    ];
+    if n < 30 {
+        return U[n as usize].into();
+    }
+    if n == 100 {
+        return "cien".into();
+    }
+    let t = (n / 10) as usize;
+    let u = (n % 10) as usize;
+    if u == 0 {
+        return T[t].into();
+    }
+    format!("{} y {}", T[t], U[u])
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Portuguese
+// ──────────────────────────────────────────────────────────────────
+
+struct PortugueseNormalizer;
+
+impl LangNormalizer for PortugueseNormalizer {
+    fn lang(&self) -> &'static str {
+        "pt"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        pt_normalize(core)
+    }
+}
+
+fn pt_normalize(core: &str) -> Option<String> {
+    // Portuguese uses comma decimals, dot thousands (like Spanish)
+    if let Some((int_part, frac)) = core.split_once(',') {
+        let ok = !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit() || c == '.');
+        if !ok {
+            return None;
+        }
+        let mut out = pt_integer(&int_part.replace('.', ""))?;
+        out.push_str("vírgula");
+        for c in frac.chars() {
+            out.push_str(pt_d(c));
+        }
+        return Some(out);
+    }
+    if core.is_empty() || core.chars().any(|c| !c.is_ascii_digit() && c != '.') {
+        return None;
+    }
+    let groups: Vec<&str> = core.split('.').collect();
+    if groups.len() > 1
+        && !groups.iter().enumerate().all(|(i, g)| {
+            !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()) && (i == 0 || g.len() == 3)
+        })
+    {
+        return None;
+    }
+    pt_integer(&core.replace('.', ""))
+}
+
+fn pt_d(c: char) -> &'static str {
+    const D: [&str; 10] = [
+        "zero", "um", "dois", "três", "quatro", "cinco", "seis", "sete", "oito", "nove",
+    ];
+    D[c.to_digit(10).unwrap_or(0) as usize]
+}
+
+fn pt_integer(digits: &str) -> Option<String> {
+    let n: u64 = digits.parse().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("zero".into());
+    }
+    let mut out = String::new();
+    let m = n / 1_000_000;
+    let r = n % 1_000_000;
+    if m == 1 {
+        out.push_str("ummilhão");
+    } else if m > 1 {
+        out.push_str(&pt_m(m));
+        out.push_str("milhões");
+    }
+    if r > 0 {
+        out.push_str(&pt_m(r));
+    }
+    Some(out)
+}
+
+fn pt_m(n: u64) -> String {
+    let t = n / 1000;
+    let rest = n % 1000;
+    let mut out = String::new();
+    if t > 1 {
+        out.push_str(&pt_1000(t));
+    }
+    if t > 0 {
+        out.push_str("mil");
+    }
+    if rest > 0 {
+        out.push_str(&pt_1000(rest));
+    }
+    out
+}
+
+fn pt_1000(n: u64) -> String {
+    let h = n / 100;
+    let r = n % 100;
+    if h == 1 && r == 0 {
+        return "cem".into(); // exact 100
+    }
+    let mut out = String::new();
+    if h == 1 {
+        out.push_str("cento");
+    } else if h > 1 {
+        out.push_str(&pt_100(h));
+        out.push_str("centos");
+    }
+    if r > 0 {
+        out.push_str(&pt_100(r));
+    }
+    out
+}
+
+fn pt_100(n: u64) -> String {
+    const U: [&str; 20] = [
+        "",
+        "um",
+        "dois",
+        "três",
+        "quatro",
+        "cinco",
+        "seis",
+        "sete",
+        "oito",
+        "nove",
+        "dez",
+        "onze",
+        "doze",
+        "treze",
+        "quatorze",
+        "quinze",
+        "dezesseis",
+        "dezessete",
+        "dezoito",
+        "dezenove",
+    ];
+    const T: [&str; 10] = [
+        "",
+        "",
+        "vinte",
+        "trinta",
+        "quarenta",
+        "cinquenta",
+        "sessenta",
+        "setenta",
+        "oitenta",
+        "noventa",
+    ];
+    if n < 20 {
+        return U[n as usize].into();
+    }
+    if n == 100 {
+        return "cem".into();
+    }
+    let t = (n / 10) as usize;
+    let u = (n % 10) as usize;
+    if u == 0 {
+        return T[t].into();
+    }
+    if u == 1 && n != 21 && n != 31 {
+        // "e um" for 31, 61, etc but "vinte e um"
+        return format!("{} e um", T[t]);
+    }
+    format!("{} e {}", T[t], U[u])
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Italian
+// ──────────────────────────────────────────────────────────────────
+
+struct ItalianNormalizer;
+
+impl LangNormalizer for ItalianNormalizer {
+    fn lang(&self) -> &'static str {
+        "it"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        it_normalize(core)
+    }
+}
+
+fn it_normalize(core: &str) -> Option<String> {
+    // Italian uses comma decimals, dot thousands
+    if let Some((int_part, frac)) = core.split_once(',') {
+        let ok = !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit() || c == '.');
+        if !ok {
+            return None;
+        }
+        let mut out = it_integer(&int_part.replace('.', ""))?;
+        out.push_str("virgola");
+        for c in frac.chars() {
+            out.push_str(it_d(c));
+        }
+        return Some(out);
+    }
+    if core.is_empty() || core.chars().any(|c| !c.is_ascii_digit() && c != '.') {
+        return None;
+    }
+    let groups: Vec<&str> = core.split('.').collect();
+    if groups.len() > 1
+        && !groups.iter().enumerate().all(|(i, g)| {
+            !g.is_empty() && g.chars().all(|c| c.is_ascii_digit()) && (i == 0 || g.len() == 3)
+        })
+    {
+        return None;
+    }
+    it_integer(&core.replace('.', ""))
+}
+
+fn it_d(c: char) -> &'static str {
+    const D: [&str; 10] = [
+        "zero", "uno", "due", "tre", "quattro", "cinque", "sei", "sette", "otto", "nove",
+    ];
+    D[c.to_digit(10).unwrap_or(0) as usize]
+}
+
+fn it_integer(digits: &str) -> Option<String> {
+    let n: u64 = digits.parse().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("zero".into());
+    }
+    let mut out = String::new();
+    let m = n / 1_000_000;
+    let r = n % 1_000_000;
+    if m == 1 {
+        out.push_str("unmilione");
+    } else if m > 1 {
+        out.push_str(&it_m(m));
+        out.push_str("milioni");
+    }
+    if r > 0 {
+        out.push_str(&it_m(r));
+    }
+    Some(out)
+}
+
+fn it_m(n: u64) -> String {
+    let t = n / 1000;
+    let rest = n % 1000;
+    let mut out = String::new();
+    if t > 1 {
+        out.push_str(&it_1000(t));
+    }
+    if t > 0 {
+        out.push_str("mila");
+    } // "mila" plural
+    if rest > 0 {
+        out.push_str(&it_1000(rest));
+    }
+    out
+}
+
+fn it_1000(n: u64) -> String {
+    let h = n / 100;
+    let r = n % 100;
+    let mut out = String::new();
+    if h == 1 {
+        out.push_str("cento");
+    } else if h > 1 {
+        out.push_str(&it_100(h));
+        // vowel elision: trecento not "trecento"
+        if out.ends_with('e') && r > 0 {
+            out.pop();
+        }
+        out.push_str("cento");
+    }
+    if r > 0 {
+        out.push_str(&it_100(r));
+    }
+    out
+}
+
+fn it_100(n: u64) -> String {
+    const U: [&str; 20] = [
+        "",
+        "uno",
+        "due",
+        "tre",
+        "quattro",
+        "cinque",
+        "sei",
+        "sette",
+        "otto",
+        "nove",
+        "dieci",
+        "undici",
+        "dodici",
+        "tredici",
+        "quattordici",
+        "quindici",
+        "sedici",
+        "diciassette",
+        "diciotto",
+        "diciannove",
+    ];
+    const T: [&str; 10] = [
+        "",
+        "",
+        "venti",
+        "trenta",
+        "quaranta",
+        "cinquanta",
+        "sessanta",
+        "settanta",
+        "ottanta",
+        "novanta",
+    ];
+    if n < 20 {
+        return U[n as usize].into();
+    }
+    let t = (n / 10) as usize;
+    let u = (n % 10) as usize;
+    if u == 0 {
+        return T[t].into();
+    }
+    // vowel elision: ventuno not "ventiuno", ventotto not "ventiotto"
+    let tens = T[t];
+    if (u == 1 || u == 8) && tens.ends_with('i') {
+        return format!("{}{}", &tens[..tens.len() - 1], U[u]);
+    }
+    format!("{}{}", T[t], U[u])
 }
 
 fn primary_subtag(lang_code: &str) -> String {
@@ -1250,9 +1946,91 @@ mod tests {
             "de",
             "corpus-tag keys route too"
         );
-        assert_eq!(normalizer_for("fr").lang(), "", "unhandled → identity");
-        assert_eq!(normalizer_for("fr-FR").lang(), "");
-        // identity never expands
-        assert!(normalizer_for("fr").normalize_numeric("42").is_none());
+        assert_eq!(normalizer_for("fr").lang(), "fr", "French routes");
+        assert_eq!(normalizer_for("fra").lang(), "fr", "corpus-tag fra routes");
+        assert_eq!(normalizer_for("es").lang(), "es");
+        assert_eq!(normalizer_for("spa").lang(), "es", "corpus-tag spa routes");
+        assert_eq!(normalizer_for("pt").lang(), "pt");
+        assert_eq!(normalizer_for("por").lang(), "pt");
+        assert_eq!(normalizer_for("it").lang(), "it");
+        assert_eq!(normalizer_for("ita").lang(), "it");
+        // still-unhandled → identity
+        assert_eq!(normalizer_for("nl").lang(), "", "unhandled → identity");
+        assert!(normalizer_for("nl").normalize_numeric("42").is_none());
+    }
+
+    #[test]
+    fn french_digit_normalizer() {
+        let f = |t: &str| FrenchNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("0"), "zéro");
+        assert_eq!(f("1"), "un");
+        assert_eq!(f("5"), "cinq");
+        assert_eq!(f("16"), "seize");
+        assert_eq!(f("17"), "dix-sept");
+        assert_eq!(f("20"), "vingt");
+        assert_eq!(f("21"), "vingt et un");
+        assert_eq!(f("22"), "vingt-deux");
+        assert_eq!(f("70"), "soixante-dix");
+        assert_eq!(f("71"), "soixante-onze");
+        assert_eq!(f("72"), "soixante-douze");
+        assert_eq!(f("80"), "quatre-vingts");
+        assert_eq!(f("81"), "quatre-vingt-un");
+        assert_eq!(f("91"), "quatre-vingt-onze");
+        assert_eq!(f("92"), "quatre-vingt-douze");
+        assert_eq!(f("99"), "quatre-vingt-dix-neuf");
+        assert_eq!(f("100"), "cent");
+        assert_eq!(f("200"), "deuxcents");
+        assert_eq!(f("1000"), "mille");
+        assert_eq!(f("2000"), "deuxmille");
+        assert_eq!(f("1,5"), "unvirgulecinq");
+        assert_eq!(f("42"), "quarante-deux");
+        // out of range → None → drop
+        assert!(FrenchNormalizer.normalize_numeric("1000000000").is_none());
+    }
+
+    #[test]
+    fn spanish_digit_normalizer() {
+        let f = |t: &str| SpanishNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("0"), "cero");
+        assert_eq!(f("5"), "cinco");
+        assert_eq!(f("15"), "quince");
+        assert_eq!(f("16"), "dieciséis");
+        assert_eq!(f("20"), "veinte");
+        assert_eq!(f("21"), "veintiuno");
+        assert_eq!(f("30"), "treinta");
+        assert_eq!(f("42"), "cuarenta y dos");
+        assert_eq!(f("100"), "cien");
+        assert_eq!(f("1000"), "mil");
+        assert_eq!(f("1,5"), "unocomacinco");
+        assert!(SpanishNormalizer.normalize_numeric("1000000000").is_none());
+    }
+
+    #[test]
+    fn portuguese_digit_normalizer() {
+        let f = |t: &str| PortugueseNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("0"), "zero");
+        assert_eq!(f("3"), "três");
+        assert_eq!(f("16"), "dezesseis");
+        assert_eq!(f("20"), "vinte");
+        assert_eq!(f("21"), "vinte e um");
+        assert_eq!(f("42"), "quarenta e dois");
+        assert_eq!(f("100"), "cem");
+        assert_eq!(f("1000"), "mil");
+        assert_eq!(f("1,5"), "umvírgulacinco");
+    }
+
+    #[test]
+    fn italian_digit_normalizer() {
+        let f = |t: &str| ItalianNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("0"), "zero");
+        assert_eq!(f("3"), "tre");
+        assert_eq!(f("16"), "sedici");
+        assert_eq!(f("20"), "venti");
+        assert_eq!(f("21"), "ventuno"); // vowel elision
+        assert_eq!(f("28"), "ventotto"); // vowel elision
+        assert_eq!(f("42"), "quarantadue");
+        assert_eq!(f("100"), "cento");
+        assert_eq!(f("1000"), "mila");
+        assert_eq!(f("1,5"), "unovirgolacinque");
     }
 }
