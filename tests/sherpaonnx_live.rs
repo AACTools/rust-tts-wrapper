@@ -68,7 +68,91 @@ fn model_present(id: &str) -> bool {
 //   SHERPA_DE_MODEL_DIR=/path/to/vits-piper-de_DE-thorsten-medium \
 //   SHERPA_DE_BUNDLE_DIR=/path/to/voicegarden-lexicons/de \
 //   SHERPA_DE_MANIFEST=/path/to/voicegarden-lexicons/expanded.json \
-//   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- --ignored german
+//   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- \
+//   --ignored german --test-threads=1
+// (--test-threads=1: the g2p tests swap VOICEGARDEN_LEXICON_DIR
+// process-wide; parallel runs race and silently downgrade to the
+// text path)
+
+/// Stage a provisioned cache for a DEFAULT allowlist row: manifest
+/// staged under its cache name, bundle copied under the row's key,
+/// stamp = the REAL manifest sha (provisioning verifies stamp == sha,
+/// so a placeholder would trigger a network fetch). Returns the cache
+/// dir and the model parent staged under the registry id name.
+#[cfg(feature = "sherpa-g2p")]
+fn stage_g2p_cache(
+    bundle_dir: &std::path::Path,
+    manifest: &std::path::Path,
+    model_dir: &std::path::Path,
+    model_id: &str,
+) -> (tempfile::TempDir, std::path::PathBuf) {
+    let bundle_key = bundle_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("deu")
+        .to_string();
+    let sha: String = {
+        let m: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+        m["languages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| l["lang"] == bundle_key)
+            .and_then(|l| l["sha256"].as_str())
+            .unwrap_or_else(|| panic!("{bundle_key} entry in the manifest"))
+            .to_string()
+    };
+    let cache = tempfile::tempdir().unwrap();
+    std::fs::copy(manifest, cache.path().join(manifest.file_name().unwrap())).unwrap();
+    // COPY (not symlink) the bundle and model into the temp cache —
+    // symlinks staged zero tests on Windows (Mac-team review), and a
+    // copy exercises the same provisioning path everywhere
+    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().filter_map(Result::ok) {
+            let to = dst.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_dir(&entry.path(), &to);
+            } else {
+                std::fs::copy(entry.path(), &to).unwrap();
+            }
+        }
+    }
+    let bundle_cache = cache.path().join(&bundle_key);
+    copy_dir(bundle_dir, &bundle_cache);
+    std::fs::write(bundle_cache.join(".sha256"), sha.as_bytes()).unwrap();
+    let parent = cache.path().join("models");
+    std::fs::create_dir_all(&parent).unwrap();
+    copy_dir(model_dir, &parent.join(model_id));
+    (cache, parent)
+}
+
+/// speak() with VOICEGARDEN_LEXICON_DIR pointed at the staged cache,
+/// restoring any prior value afterwards (tests share one process env).
+#[cfg(feature = "sherpa-g2p")]
+fn speak_with_cache(
+    engine: &dyn rust_tts_wrapper::engine::TtsEngine,
+    cache: &std::path::Path,
+    text: &str,
+) -> usize {
+    let sink = std::sync::Arc::new(std::sync::Mutex::new(AudioSink::new()));
+    let sink_for_cb = sink.clone();
+    let mut cb = move |chunk: &[u8]| {
+        sink_for_cb.lock().unwrap().total_bytes += chunk.len();
+    };
+    let previous_cache = std::env::var_os("VOICEGARDEN_LEXICON_DIR");
+    std::env::set_var("VOICEGARDEN_LEXICON_DIR", cache);
+    let result = engine.speak(text, None, 1.0, 1.0, 1.0, Some(&mut cb), None, None);
+    if let Some(path) = previous_cache {
+        std::env::set_var("VOICEGARDEN_LEXICON_DIR", path);
+    } else {
+        std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
+    }
+    result.expect("speak");
+    let sink = sink.lock().unwrap();
+    sink.total_bytes
+}
 
 #[cfg(feature = "sherpa-g2p")]
 #[test]
@@ -95,56 +179,12 @@ fn vits_piper_german_g2p_synthesizes() {
         "bundle dir"
     );
 
-    // stage a provisioned cache for the DEFAULT allowlist row — the
-    // Phase 4 bake-off made that deu (expanded): manifest staged under
-    // its cache name, bundle symlinked under the row's key, stamp =
-    // the REAL manifest sha (provisioning verifies stamp == sha, so a
-    // placeholder would trigger a network fetch)
-    let manifest_name = manifest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("expanded.json")
-        .to_string();
-    let bundle_key = bundle_dir
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("deu")
-        .to_string();
-    let sha: String = {
-        let m: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
-        m["languages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|l| l["lang"] == bundle_key)
-            .and_then(|l| l["sha256"].as_str())
-            .unwrap_or_else(|| panic!("{bundle_key} entry in the manifest"))
-            .to_string()
-    };
-    let cache = tempfile::tempdir().unwrap();
-    std::fs::copy(&manifest, cache.path().join(&manifest_name)).unwrap();
-    // COPY (not symlink) the bundle and model into the temp cache —
-    // symlinks staged zero tests on Windows (Mac-team review), and a
-    // copy exercises the same provisioning path everywhere
-    fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
-        std::fs::create_dir_all(dst).unwrap();
-        for entry in std::fs::read_dir(src).unwrap().filter_map(Result::ok) {
-            let to = dst.join(entry.file_name());
-            if entry.path().is_dir() {
-                copy_dir(&entry.path(), &to);
-            } else {
-                std::fs::copy(entry.path(), &to).unwrap();
-            }
-        }
-    }
-    let bundle_cache = cache.path().join(&bundle_key);
-    copy_dir(&bundle_dir, &bundle_cache);
-    std::fs::write(bundle_cache.join(".sha256"), sha.as_bytes()).unwrap();
-    // stage the model under its registry id name
-    let parent = cache.path().join("models");
-    std::fs::create_dir_all(&parent).unwrap();
-    copy_dir(&model_dir, &parent.join("piper-de_DE-thorsten-medium"));
+    let (cache, parent) = stage_g2p_cache(
+        &bundle_dir,
+        &manifest,
+        &model_dir,
+        "piper-de_DE-thorsten-medium",
+    );
 
     // serialize with serde_json: a raw format! interpolates the path
     // into JSON, and Windows backslashes (C:\Users\…) become invalid
@@ -158,34 +198,68 @@ fn vits_piper_german_g2p_synthesizes() {
     .to_string();
     let engine = create_engine("sherpaonnx", &credentials).expect("sherpaonnx engine");
 
-    let sink = std::sync::Arc::new(std::sync::Mutex::new(AudioSink::new()));
-    let sink_for_cb = sink.clone();
-    let mut cb = move |chunk: &[u8]| {
-        sink_for_cb.lock().unwrap().total_bytes += chunk.len();
-    };
     // dictionary words, digits, a nonce OOV word (must be SPOKEN via
     // the WFST, not dropped), a capitalized noun
-    let previous_cache = std::env::var_os("VOICEGARDEN_LEXICON_DIR");
-    std::env::set_var("VOICEGARDEN_LEXICON_DIR", cache.path());
-    let result = engine.speak(
+    let bytes = speak_with_cache(
+        engine.as_ref(),
+        cache.path(),
         "Guten Morgen! Ich habe 42 Häuser. Das Blorpinxel ist neu.",
-        None,
-        1.0,
-        1.0,
-        1.0,
-        Some(&mut cb),
-        None,
-        None,
     );
-    if let Some(path) = previous_cache {
-        std::env::set_var("VOICEGARDEN_LEXICON_DIR", path);
-    } else {
-        std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
-    }
-    result.expect("speak");
+    assert!(bytes > 0, "expected non-empty audio");
+}
 
-    let sink = sink.lock().unwrap();
-    assert!(sink.total_bytes > 0, "expected non-empty audio");
+/// The #92 English migration: English piper through the codepoints
+/// path with the eng-US bundle — digits must be SPOKEN (the #66/#67
+/// auto-lexicon path drops them), OOV through the WFST.
+///
+///   SHERPA_EN_MODEL_DIR=/path/to/vits-piper-en_US-amy-low \
+///   SHERPA_EN_BUNDLE_DIR=/path/to/voicegarden-lexicons/eng-US \
+///   SHERPA_EN_MANIFEST=/path/to/voicegarden-lexicons/expanded.json \
+///   cargo test --features sherpaonnx,sherpa-g2p --test sherpaonnx_live -- \
+///   --ignored english --test-threads=1  (see the German note above)
+#[cfg(feature = "sherpa-g2p")]
+#[test]
+#[ignore = "live: needs amy model + eng-US bundle + manifest (SHERPA_EN_MODEL_DIR, SHERPA_EN_BUNDLE_DIR, SHERPA_EN_MANIFEST)"]
+fn vits_piper_english_g2p_synthesizes() {
+    use std::path::PathBuf;
+    let (Some(model_dir), Some(bundle_dir), Some(manifest)) = (
+        std::env::var_os("SHERPA_EN_MODEL_DIR").map(PathBuf::from),
+        std::env::var_os("SHERPA_EN_BUNDLE_DIR").map(PathBuf::from),
+        std::env::var_os("SHERPA_EN_MANIFEST").map(PathBuf::from),
+    ) else {
+        eprintln!(
+            "skipping: SHERPA_EN_MODEL_DIR / SHERPA_EN_BUNDLE_DIR / SHERPA_EN_MANIFEST not set"
+        );
+        return;
+    };
+    assert!(model_dir.join("tokens.txt").is_file(), "model dir");
+    let key = bundle_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("eng-US");
+    assert!(
+        bundle_dir.join(format!("{key}.fst")).is_file(),
+        "bundle dir"
+    );
+
+    let (cache, parent) =
+        stage_g2p_cache(&bundle_dir, &manifest, &model_dir, "piper-en_US-amy-low");
+
+    let credentials = serde_json::json!({
+        "modelId": "piper-en_US-amy-low",
+        "modelPath": parent.display().to_string(),
+    })
+    .to_string();
+    let engine = create_engine("sherpaonnx", &credentials).expect("sherpaonnx engine");
+
+    // dictionary words, digits (dropped by the auto-lexicon path — the
+    // migration's core fix), a hyphenated compound, a nonce OOV word
+    let bytes = speak_with_cache(
+        engine.as_ref(),
+        cache.path(),
+        "Hello world! I have 42 houses. The well-known Blorpinxel is new.",
+    );
+    assert!(bytes > 0, "expected non-empty audio");
 }
 
 macro_rules! skip_if_missing {
@@ -909,4 +983,95 @@ fn pocket_synthesises_with_bundled_reference() {
         )
         .expect("pocket speak");
     assert!(*total.lock().unwrap() > 0, "pocket produced no audio");
+}
+
+// ===== MMS spot-validation (#92) — native character front-end, no bundle =====
+//
+// MMS models have their own text front-end; the wrapper's vits-family
+// config already handles them. These tests verify offline synthesis
+// works on representative languages. The model dirs contain
+// model.onnx + tokens.txt downloaded from the HF repo.
+//
+//   SHERPA_MMS_MODEL_DIR=/path/to/mms/models SHERPA_MMS_LANG=eng \
+//   cargo test --features sherpaonnx --test sherpaonnx_live -- --ignored mms
+
+#[cfg(feature = "sherpaonnx")]
+#[test]
+#[ignore = "live: needs MMS models (SHERPA_MMS_MODEL_DIR, SHERPA_MMS_LANG: eng|spa|deu)"]
+fn mms_speaks_offline() {
+    use std::path::PathBuf;
+    let (Some(model_root), Some(lang)) = (
+        std::env::var_os("SHERPA_MMS_MODEL_DIR").map(PathBuf::from),
+        std::env::var_os("SHERPA_MMS_LANG").map(|s| s.to_string_lossy().into_owned()),
+    ) else {
+        eprintln!("skipping: SHERPA_MMS_MODEL_DIR / SHERPA_MMS_LANG not set");
+        return;
+    };
+    // Engine convention: models live at {modelPath}/{modelId}/ — the
+    // download layout the provisioner creates
+    let model_dir = model_root.join(format!("mms_{lang}"));
+    assert!(
+        model_dir.join("model.onnx").is_file(),
+        "model dir: {}",
+        model_dir.display()
+    );
+
+    let texts: &[&str] = match lang.as_str() {
+        "eng" => &["Hello world, this is a test.", "The number 42 is spoken."],
+        "spa" => &["Hola mundo, esto es una prueba."],
+        "deu" => &["Hallo Welt, dies ist ein Test."],
+        _ => &["Test sentence."],
+    };
+
+    for (i, text) in texts.iter().enumerate() {
+        let sink = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let sink_for_cb = sink.clone();
+        let mut cb = move |chunk: &[u8]| sink_for_cb.lock().unwrap().extend_from_slice(chunk);
+        let engine = create_engine(
+            "sherpaonnx",
+            &format!(
+                r#"{{"modelId":"mms_{lang}","modelPath":"{}"}}"#,
+                model_root.display()
+            ),
+        )
+        .expect("engine for mms");
+        engine
+            .speak(text, None, 1.0, 1.0, 1.0, Some(&mut cb), None, None)
+            .unwrap_or_else(|e| panic!("mms_{lang} speak: {e}"));
+        let pcm = sink.lock().unwrap().clone();
+        assert!(!pcm.is_empty(), "mms_{lang}: expected audio for {text:?}");
+        // Optional WAV dump for ear-checks / whisper round-trips:
+        //   SHERPA_MMS_OUT_DIR=/tmp/x cargo test ... -- --ignored mms
+        if let Some(out) = std::env::var_os("SHERPA_MMS_OUT_DIR") {
+            let path = std::path::Path::new(&out).join(format!("mms_{lang}_{i}.wav"));
+            if let Err(e) = std::fs::create_dir_all(&out) {
+                eprintln!("wav dump mkdir failed: {e}");
+            }
+            write_pcm_wav(path, &pcm, 16_000); // registry MMS: 16 kHz mono i16
+        }
+    }
+}
+
+/// Minimal RIFF writer: 16-bit PCM mono — enough for whisper and
+/// ear-checks; no dependencies.
+fn write_pcm_wav(path: std::path::PathBuf, pcm: &[u8], sample_rate: u32) {
+    let data_len = pcm.len() as u32;
+    let byte_rate = sample_rate * 2;
+    let mut wav = Vec::with_capacity(44 + pcm.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+    wav.extend_from_slice(&sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(pcm);
+    if let Err(e) = std::fs::write(&path, wav) {
+        eprintln!("wav dump failed ({}): {e}", path.display());
+    }
 }

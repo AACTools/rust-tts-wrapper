@@ -33,7 +33,8 @@ const PUBLISHED_BUNDLE_LOCALES: &[&str] = &[
     // expanded-only additions (bcp47 primary subtags)
     "ar", "bn", "da", "el", "fi", "he", "hi", "id", "is", "nb", "pl", "ro", "sk", "sl", "ta", "tr",
     "ur",
-    // de appears in both; en excluded — English rides the auto-lexicon
+    // de appears in both; en has a validated allowlist row since the
+    // codepoints migration, so English never reaches this set
 ];
 
 /// Compute the readiness value for one registry model.
@@ -79,6 +80,16 @@ pub fn readiness_for(model: &SherpaModelInfo, has_sha256: bool, deprecated: bool
 
 fn vits_readiness(model: &SherpaModelInfo) -> String {
     let validated_g2p = crate::sherpa_lang::g2p_enabled_for(model);
+    // English (id-detected, as before): the #66/#67 auto-lexicon path
+    // speaks in EVERY build, so the bundle is an upgrade rather than a
+    // requirement — with the G2P front-end compiled in the installer
+    // provisions it (codepoints path); without it English stays ready.
+    if crate::sherpaonnx_engine::is_english_model_id(&model.id.to_ascii_lowercase()) {
+        if validated_g2p && cfg!(feature = "sherpa-g2p") {
+            return "needs_bundle".to_string();
+        }
+        return "ready".to_string();
+    }
     if validated_g2p && cfg!(feature = "sherpa-g2p") {
         // validated VoiceGarden locale (German today): the installer
         // calls tts_provision_sherpa_g2p_bundle after the download
@@ -96,10 +107,6 @@ fn vits_readiness(model: &SherpaModelInfo) -> String {
     let lang = first.lang_code.to_ascii_lowercase();
     // Chinese voices ship their own dict/jieba front-end
     if lang.starts_with("zh") || lang == "cantonese" {
-        return "ready".to_string();
-    }
-    if crate::sherpaonnx_engine::is_english_model_id(&model.id.to_ascii_lowercase()) {
-        // English: the #66/#67 auto-lexicon path (validated in CI)
         return "ready".to_string();
     }
     // non-English without a validated bundle: a bundle either exists
@@ -197,7 +204,14 @@ mod tests {
             );
         }
 
-        // English piper: auto-lexicon path
+        // English piper: now routes to the codepoints path (the
+        // auto-lexicon remains the fallback when the feature is off)
+        #[cfg(feature = "sherpa-g2p")]
+        assert_eq!(
+            readiness_for(&model("piper-en_US-amy-low", "vits", "en"), true, false),
+            "needs_bundle"
+        );
+        #[cfg(not(feature = "sherpa-g2p"))]
         assert_eq!(
             readiness_for(&model("piper-en_US-amy-low", "vits", "en"), true, false),
             "ready"

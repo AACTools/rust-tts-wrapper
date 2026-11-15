@@ -60,9 +60,23 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
         registry["piper-de_DE-thorsten-medium"]["readiness"],
         serde_json::Value::String("blocked:g2p-unavailable".to_string())
     );
+    // English: needs_bundle with the front-end compiled in (provision
+    // the eng-US bundle for the codepoints path); without it the
+    // #66/#67 auto-lexicon path still speaks → ready (unlike German,
+    // where the absence of the front-end blocks quality speech)
+    #[cfg(feature = "sherpa-g2p")]
+    assert_eq!(
+        registry["piper-en_US-amy-low"]["readiness"],
+        serde_json::Value::String("needs_bundle".to_string())
+    );
+    #[cfg(not(feature = "sherpa-g2p"))]
     assert_eq!(
         registry["piper-en_US-amy-low"]["readiness"],
         serde_json::Value::String("ready".to_string())
+    );
+    assert_eq!(
+        registry["piper-en_US-amy-low"]["g2p_enabled"],
+        serde_json::Value::Bool(cfg!(feature = "sherpa-g2p"))
     );
     assert_eq!(
         registry["piper-fr_FR-siwis-medium"]["readiness"],
@@ -138,10 +152,9 @@ fn provision_reports_errors_for_ineligible_models() {
     assert_eq!(code, 5, "ModelNotFound: {detail}");
     assert!(detail.contains("not found"), "{detail}");
 
-    // English model (in the registry, no validated bundle row) →
-    // ModelNotFound per the header contract, with a distinct message
+    // pl model: bundle exists but is not validated → no row resolves
     assert!(!tts_provision_sherpa_g2p_bundle(
-        c"piper-en_US-amy-low".as_ptr()
+        c"piper-pl_PL-gosia-medium".as_ptr()
     ));
     let (code, detail) = last_detail();
     assert_eq!(code, 5, "{detail}");
@@ -160,6 +173,17 @@ fn provision_fetches_the_german_bundle() {
     use rust_tts_wrapper::tts_provision_sherpa_g2p_bundle;
     assert!(tts_provision_sherpa_g2p_bundle(
         c"piper-de_DE-thorsten-medium".as_ptr()
+    ));
+}
+
+#[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
+#[test]
+#[ignore = "live: provisions from the network or cache (set VOICEGARDEN_LEXICON_DIR to skip the download)"]
+fn provision_fetches_the_english_bundle() {
+    // the #92 English migration: eng-US (expanded), same ABI as German
+    use rust_tts_wrapper::tts_provision_sherpa_g2p_bundle;
+    assert!(tts_provision_sherpa_g2p_bundle(
+        c"piper-en_US-amy-low".as_ptr()
     ));
 }
 

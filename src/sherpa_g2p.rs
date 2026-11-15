@@ -7,7 +7,9 @@
 //! from the voicegarden bundle, mapped through the Phase 2 vocabulary
 //! ladder, handed to sherpa as per-sentence Unicode codepoints. OOV
 //! words are SPOKEN (the lexicon front-end drops them — upstream
-//! k2-fsa/sherpa-onnx#4139); numbers are normalized to German words.
+//! k2-fsa/sherpa-onnx#4139); numbers are normalized to words in the
+//! bundle's language (per-language `LangNormalizer`s; German since
+//! #82, English since the #92 codepoints migration).
 //!
 //! The codepoint contract (pinned from sherpa-onnx 2.0.1
 //! `PiperPhonemesToIdsVits`): the caller supplies the BARE phoneme
@@ -190,6 +192,7 @@ pub fn normalizer_for(lang: &str) -> Box<dyn LangNormalizer> {
         "es" => Box::new(SpanishNormalizer),
         "pt" => Box::new(PortugueseNormalizer),
         "it" => Box::new(ItalianNormalizer),
+        "en" => Box::new(EnglishNormalizer),
         _ => Box::new(IdentityNormalizer),
     }
 }
@@ -835,6 +838,241 @@ fn it_1000(n: u64) -> String {
     out
 }
 
+// ──────────────────────────────────────────────────────────────────
+// English
+// ──────────────────────────────────────────────────────────────────
+
+/// English digits: point decimals (1.5), comma thousands in some
+/// locales but dot is standard; no vigesimal; straightforward
+/// cardinals. Hyphenated compounds (forty-two).
+struct EnglishNormalizer;
+
+impl LangNormalizer for EnglishNormalizer {
+    fn lang(&self) -> &'static str {
+        "en"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        en_normalize(core).or_else(|| en_split_digit_runs(core))
+    }
+}
+
+fn en_normalize(core: &str) -> Option<String> {
+    // decimal: dot (1.5 → "one point five"). "3.500" reads as a
+    // decimal in en-US convention ("three point five zero zero") —
+    // NOT European thousands (English strict thousands use commas);
+    // pinned as such below.
+    if let Some((int_part, frac)) = core.split_once('.') {
+        let ok = !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit())
+            && !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit() || c == ',')
+            && en_groups_ok(int_part);
+        if ok {
+            let mut out = en_integer(&int_part.replace(',', ""))?;
+            out.push_str(" point");
+            for c in frac.chars() {
+                out.push(' ');
+                out.push_str(en_d(c));
+            }
+            return Some(out);
+        }
+        return None; // malformed separators — drop, not guess
+    }
+    // comma thousands (1,000) or plain integer
+    let plain = core.replace(',', "");
+    if plain.is_empty() || plain.chars().any(|c| !c.is_ascii_digit()) {
+        return None;
+    }
+    // strict comma groups if commas present (matches the German
+    // policy: first group 1..=3 digits, every later group exactly 3)
+    if core.contains(',') && !en_groups_ok(core) {
+        return None;
+    }
+    en_integer(&plain)
+}
+
+/// Comma-group shape for English numerals: every group all-digits,
+/// first 1..=3 long, every later exactly 3 ("1,000,000" ✓,
+/// "12,34" ✗, "1," ✗).
+fn en_groups_ok(int_part: &str) -> bool {
+    int_part.split(',').enumerate().all(|(i, g)| {
+        !g.is_empty()
+            && g.chars().all(|c| c.is_ascii_digit())
+            && (if i == 0 {
+                (1..=3).contains(&g.len())
+            } else {
+                g.len() == 3
+            })
+    })
+}
+
+/// Mixed alphanumerics split into alphabetic runs (words) + digit runs
+/// (expanded): "COVID-19" → "covid nineteen", "A4" → "a four", "MP3"
+/// → "mp three", "b2b" → "b two b". Mirrors the German
+/// `split_digit_runs` (#82 loop reviews); the alphabetic runs are
+/// words the dictionary/WFST answers (or letter-spells — never a
+/// wrong number). Ordinal-shaped tokens (digits first, short alpha
+/// suffix last: "48th", "1920s") DROP rather than speak a wrong
+/// cardinal + letter names — proper ordinals need their own rules.
+fn en_split_digit_runs(core: &str) -> Option<String> {
+    // only for ALPHA+digit mixes ("MP3", "COVID-19") — a pure-digit
+    // core that en_normalize already rejected (malformed separators
+    // like "12,34.5") must stay dropped, not resurrect run-by-run
+    if !core.chars().any(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    let mut runs: Vec<String> = Vec::new();
+    let mut run = String::new();
+    let mut run_is_digits = false;
+    for ch in core.chars() {
+        let is_digit = ch.is_ascii_digit();
+        if !is_digit && !ch.is_ascii_alphabetic() {
+            // inner separators (the hyphen in "COVID-19") end the run
+            if !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+            continue;
+        }
+        if !run.is_empty() && is_digit != run_is_digits {
+            runs.push(std::mem::take(&mut run));
+        }
+        run_is_digits = is_digit;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    // ordinal shape: digit run first, short alphabetic suffix last
+    // ("48th", "1920s") — a cardinal + letter names would be wrong
+    if runs.len() >= 2
+        && runs[0].chars().next().is_some_and(|c| c.is_ascii_digit())
+        && runs
+            .last()
+            .is_some_and(|r| r.chars().all(|c| c.is_ascii_alphabetic()) && r.len() <= 2)
+    {
+        return None;
+    }
+    let mut joined: Vec<String> = Vec::with_capacity(runs.len());
+    for part in runs {
+        if part.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            joined.push(en_integer(&part)?);
+        } else {
+            joined.push(part.to_lowercase());
+        }
+    }
+    (!joined.is_empty()).then(|| joined.join(" "))
+}
+
+fn en_d(c: char) -> &'static str {
+    const D: [&str; 10] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    ];
+    D[c.to_digit(10).unwrap_or(0) as usize]
+}
+
+/// English cardinals are MULTI-WORD ("one hundred fifteen") — the
+/// bundle lexicon answers individual words, never compounds, so the
+/// parts are space-separated here (token_parts_with splits them into
+/// separate dictionary lookups). Only the tens-units compound keeps
+/// its standard hyphen ("forty-two"), which token_parts_with also
+/// splits. US convention: no "and" after hundreds.
+fn en_integer(digits: &str) -> Option<String> {
+    let n: u64 = digits.parse().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("zero".into());
+    }
+    let mut out = String::new();
+    let m = n / 1_000_000;
+    let r = n % 1_000_000;
+    if m > 0 {
+        out.push_str(&en_m(m));
+        out.push_str(" million");
+    }
+    if r > 0 {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&en_m(r));
+    }
+    Some(out)
+}
+
+/// 1..=999_999
+fn en_m(n: u64) -> String {
+    let t = n / 1000;
+    let rest = n % 1000;
+    let mut out = String::new();
+    if t > 0 {
+        out.push_str(&en_1000(t));
+        out.push_str(" thousand");
+    }
+    if rest > 0 {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&en_1000(rest));
+    }
+    out
+}
+
+/// 1..=999
+fn en_1000(n: u64) -> String {
+    let h = n / 100;
+    let r = n % 100;
+    let mut out = String::new();
+    if h > 0 {
+        out.push_str(en_d(char::from_digit(h as u32, 10).unwrap()));
+        out.push_str(" hundred");
+    }
+    if r > 0 {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&en_100(r));
+    }
+    out
+}
+
+fn en_100(n: u64) -> String {
+    const U: [&str; 20] = [
+        "",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const T: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    if n < 20 {
+        return U[n as usize].into();
+    }
+    let t = (n / 10) as usize;
+    let u = (n % 10) as usize;
+    if u == 0 {
+        return T[t].into();
+    }
+    format!("{}-{}", T[t], U[u])
+}
+
 fn it_100(n: u64) -> String {
     const U: [&str; 20] = [
         "",
@@ -935,8 +1173,9 @@ impl G2pFrontend {
     }
 
     /// Phonemize an utterance into per-sentence codepoint streams.
-    /// Tokens that are all digits are first expanded to German words
-    /// (minimal normalizer); each remaining token is looked up in the
+    /// Tokens with digits are first expanded to words in the bundle's
+    /// language (`LangNormalizer`); each remaining token is looked up
+    /// in the
     /// bundle dictionary (case-insensitive, NFC-normalized input),
     /// falling through to the Phonetisaurus WFST on a miss; every
     /// emitted symbol is mapped through the vocabulary ladder and
@@ -1047,11 +1286,38 @@ pub fn token_parts_with(norm: &dyn LangNormalizer, token: &str) -> Option<Vec<St
         Some(
             reattach_punct(token, &expanded)
                 .split_whitespace()
-                .map(str::to_string)
+                .flat_map(split_hyphenated)
                 .collect(),
         )
     } else {
-        Some(vec![token.to_string()])
+        Some(split_hyphenated(token))
+    }
+}
+
+/// Split a token on interior hyphen runs. Audited: neither bundle
+/// lexicon carries a hyphenated entry (eng-US 0/133,637, deu
+/// 0/333,945 — Wiktionary headwords are single words), so
+/// `forty-two` or `Kfz-Kennzeichen` as ONE lookup key misses the
+/// dictionary and the WFST fallback letter-spells the compound
+/// (`f-o-r-t-y t-w-o`). The parts are separate dictionary words; the
+/// caller inserts the inter-word space token between parts, exactly
+/// as between original tokens. Punctuation-only tokens (`--`) pass
+/// through unchanged.
+fn split_hyphenated(token: &str) -> Vec<String> {
+    // guard must cover every split character — an ASCII-only `contains('-')`
+    // would let U+2010/2011/en/em dashes pass through unsplit
+    if !token.contains(['-', '‐', '‑', '–', '—']) {
+        return vec![token.to_string()];
+    }
+    let parts: Vec<String> = token
+        .split(['-', '‐', '‑', '–', '—'])
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    if parts.is_empty() {
+        vec![token.to_string()]
+    } else {
+        parts
     }
 }
 
@@ -1061,6 +1327,34 @@ pub fn token_parts_with(norm: &dyn LangNormalizer, token: &str) -> Option<Vec<St
 #[must_use]
 pub fn token_parts(token: &str) -> Option<Vec<String>> {
     token_parts_with(&GermanNormalizer, token)
+}
+
+/// Text-level digit normalization for front-ends that read raw
+/// characters (MMS): expand digit-bearing tokens to words in the
+/// model's language ("42" → "forty two"), because MMS token files
+/// carry `0`..`9` — raw digits articulate ONE BY ONE ("four two"),
+/// and the models were trained on Bible audio, never on digit words.
+/// Unhandled numerics (malformed separators, out-of-range, no rules
+/// for the locale yet) drop with a count — never wrong-language
+/// expansion. Non-digit tokens pass through (hyphen compounds split,
+/// as everywhere). Returns the rewritten text and the dropped count.
+#[must_use]
+pub fn normalize_digits_in_text(text: &str, lang: &str) -> (String, usize) {
+    let norm = normalizer_for(lang);
+    let mut out = String::with_capacity(text.len());
+    let mut dropped = 0usize;
+    for token in text.split_whitespace() {
+        match token_parts_with(norm.as_ref(), token) {
+            Some(parts) => {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(&parts.join(" "));
+            }
+            None => dropped += 1,
+        }
+    }
+    (out, dropped)
 }
 
 /// The dictionary lookup key for one [`token_parts`] part: NFC-
@@ -2032,5 +2326,115 @@ mod tests {
         assert_eq!(f("100"), "cento");
         assert_eq!(f("1000"), "mila");
         assert_eq!(f("1,5"), "unovirgolacinque");
+    }
+
+    #[test]
+    fn english_digit_normalizer() {
+        let f = |t: &str| EnglishNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("0"), "zero");
+        assert_eq!(f("3"), "three");
+        assert_eq!(f("13"), "thirteen");
+        assert_eq!(f("20"), "twenty");
+        assert_eq!(f("21"), "twenty-one");
+        assert_eq!(f("42"), "forty-two");
+        assert_eq!(f("100"), "one hundred");
+        assert_eq!(f("115"), "one hundred fifteen");
+        assert_eq!(f("1000"), "one thousand");
+        assert_eq!(f("1,000"), "one thousand");
+        assert_eq!(f("1.5"), "one point five");
+        assert_eq!(f("1,000,000"), "one million");
+        assert_eq!(
+            f("1234567"),
+            "one million two hundred thirty-four thousand five hundred sixty-seven"
+        );
+        // "3.500" is a decimal in en-US convention (dot decimal) —
+        // spoken digit-by-digit after the point, not European thousands
+        assert_eq!(f("3.500"), "three point five zero zero");
+        // malformed separators drop rather than guess a number
+        assert!(EnglishNormalizer.normalize_numeric("12,34.5").is_none());
+        assert!(EnglishNormalizer.normalize_numeric("1,.5").is_none());
+        assert!(EnglishNormalizer.normalize_numeric("1234,567").is_none());
+        assert!(EnglishNormalizer.normalize_numeric("1000000000").is_none());
+        // mixed alphanumerics split (mirrors the German path)
+        assert_eq!(f("A4"), "a four");
+        assert_eq!(f("MP3"), "mp three");
+        assert_eq!(f("COVID-19"), "covid nineteen");
+        assert_eq!(f("b2b"), "b two b");
+        // ordinals still drop rather than guess ("forty-eight th")
+        assert!(EnglishNormalizer.normalize_numeric("48th").is_none());
+    }
+
+    #[test]
+    fn english_normalizer_routes() {
+        assert_eq!(normalizer_for("en").lang(), "en");
+        assert_eq!(normalizer_for("en-US").lang(), "en");
+        assert_eq!(normalizer_for("en-GB").lang(), "en");
+        assert_eq!(normalizer_for("eng").lang(), "en");
+    }
+
+    #[test]
+    fn mms_digit_words_normalization() {
+        // English: digits expand to words; other tokens untouched
+        let (t, dropped) = normalize_digits_in_text("The number 42 is spoken.", "eng");
+        assert_eq!(t, "The number forty two is spoken.");
+        assert_eq!(dropped, 0);
+        // decimals + thousands
+        let (t, _) = normalize_digits_in_text("1.5 of 1,000 things", "en-US");
+        assert_eq!(t, "one point five of one thousand things");
+        // a locale with no rules: the numeric drops (counted), words pass
+        let (t, dropped) = normalize_digits_in_text("abc 42 def", "zul");
+        assert_eq!(t, "abc def");
+        assert_eq!(dropped, 1);
+        // German MMS: lang code routes to the German rules
+        let (t, _) = normalize_digits_in_text("Ich habe 42 Häuser.", "deu");
+        assert_eq!(t, "Ich habe zweiundvierzig Häuser.");
+        // all-numeric unknown-locale text: everything drops (the
+        // engine falls back to the original text rather than silence)
+        let (t, dropped) = normalize_digits_in_text("1e9", "zul");
+        assert_eq!(t, "");
+        assert_eq!(dropped, 1);
+    }
+
+    #[test]
+    fn hyphenated_tokens_split_for_dictionary_lookup() {
+        // typed compound — no lexicon carries hyphenated entries
+        assert_eq!(
+            token_parts_with(&EnglishNormalizer, "forty-two"),
+            Some(vec!["forty".to_string(), "two".to_string()])
+        );
+        // digit expansion output splits the same way
+        assert_eq!(
+            token_parts_with(&EnglishNormalizer, "42."),
+            Some(vec!["forty".to_string(), "two.".to_string()])
+        );
+        // trailing punctuation stays attached to the LAST part
+        assert_eq!(
+            token_parts_with(&EnglishNormalizer, "well-known,"),
+            Some(vec!["well".to_string(), "known,".to_string()])
+        );
+        // German compounds equally
+        assert_eq!(
+            token_parts_with(&GermanNormalizer, "Kfz-Kennzeichen"),
+            Some(vec!["Kfz".to_string(), "Kennzeichen".to_string()])
+        );
+        // punctuation-only tokens pass through unchanged
+        assert_eq!(
+            token_parts_with(&GermanNormalizer, "--"),
+            Some(vec!["--".to_string()])
+        );
+        // plain tokens untouched
+        assert_eq!(
+            token_parts_with(&GermanNormalizer, "Haus"),
+            Some(vec!["Haus".to_string()])
+        );
+        // Unicode dashes split too (U+2010 hyphen, U+2013 en dash)
+        assert_eq!(
+            token_parts_with(&GermanNormalizer, "Kfz‐Kennzeichen"),
+            Some(vec!["Kfz".to_string(), "Kennzeichen".to_string()])
+        );
+        assert_eq!(
+            token_parts_with(&EnglishNormalizer, "well–known"),
+            Some(vec!["well".to_string(), "known".to_string()])
+        );
     }
 }
