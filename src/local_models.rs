@@ -2,7 +2,7 @@
 //! catalogue, ONE availability vocabulary, ONE install path for every
 //! local engine compiled into the build.
 //!
-//! The unified [`Availability`] is a superset RENAME of the sherpa
+//! The unified `Availability` enum is a superset RENAME of the sherpa
 //! `readiness` vocabulary (v1.10.0), not a parallel taxonomy —
 //! `needs_bundle` keeps its name, `blocked` keeps its parameterized
 //! reasons as data (`reason`), `needs_assets` generalizes
@@ -511,10 +511,9 @@ pub(crate) mod install {
             .create(true)
             .open(dest)
             .map_err(|e| InstallError::Io("part open".into(), e))?;
-        if have == 0 {
-            file.set_len(0)
-                .map_err(|e| InstallError::Io("part truncate".into(), e))?;
-        }
+        // NOTE: no truncate — an append-mode handle cannot set_len on
+        // Windows (ERROR_ACCESS_DENIED), and `have == 0` already means
+        // the file is empty; create() gave us a fresh one otherwise
         let mut hasher = sha2::Sha256::new();
         // hashing a resumed download needs the bytes we already have
         if have > 0 {
@@ -557,7 +556,9 @@ pub(crate) mod install {
             Ok(_) => {}
             Err(e) if e == "cancelled" => return Err(InstallError::Cancelled),
             Err(e) if e == "resume-not-supported" => {
-                // server ignored Range: truncate and fetch whole
+                // server ignored Range: drop the handle (Windows will
+                // not truncate an open file), reset, fetch whole
+                drop(file);
                 std::fs::write(dest, []).map_err(|e| InstallError::Io("part reset".into(), e))?;
                 return fetch_verified(
                     fetcher,
@@ -571,6 +572,10 @@ pub(crate) mod install {
             }
             Err(e) => return Err(InstallError::Network(e)),
         }
+        // release the handle BEFORE any removal/rotation — Windows
+        // refuses to delete an open file (the .ok()s would silently
+        // leave failed-download parts behind)
+        drop(file);
         // size floor: a 200-with-"Not Found" body is tiny
         let got_len = dest.metadata().map_or(0, |m| m.len());
         if got_len < MIN_DOWNLOAD_BYTES {

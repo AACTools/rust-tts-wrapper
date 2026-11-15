@@ -229,6 +229,7 @@ fn reports_when_sherpa_is_disabled() {
 
 /// Read the global error detail as (code, message) — file-level twin
 /// of the local helper in the provision tests.
+#[cfg(feature = "sherpaonnx")]
 fn global_detail() -> (u32, String) {
     use rust_tts_wrapper::{tts_free_string, tts_get_last_error_detail_json};
     let err = tts_get_last_error_detail_json(std::ptr::null_mut());
@@ -250,9 +251,10 @@ fn global_detail() -> (u32, String) {
 // Engine-agnostic model surface (#102 Phase 1)
 // ══════════════════════════════════════════════════════════════════
 
+use rust_tts_wrapper::tts_installed_voice_catalog_json;
+#[cfg(feature = "sherpaonnx")]
 use rust_tts_wrapper::{
-    tts_installed_voice_catalog_json, tts_model_info_json, tts_models_dir, tts_models_json,
-    tts_search_models_json,
+    tts_model_info_json, tts_models_dir, tts_models_json, tts_search_models_json,
 };
 
 /// Read + parse + free a JSON string from the FFI.
@@ -264,6 +266,7 @@ fn json_from_ffi(ptr: *mut std::os::raw::c_char) -> serde_json::Value {
     serde_json::from_slice(&bytes).expect("valid JSON")
 }
 
+#[cfg(feature = "sherpaonnx")]
 #[test]
 fn models_catalogue_has_unified_availability() {
     let all = json_from_ffi(tts_models_json(std::ptr::null()));
@@ -288,6 +291,7 @@ fn models_catalogue_has_unified_availability() {
     assert_eq!(none.as_array().unwrap().len(), 0);
 }
 
+#[cfg(feature = "sherpaonnx")]
 #[test]
 fn model_info_and_search_agree() {
     let amy = json_from_ffi(tts_model_info_json(
@@ -297,14 +301,17 @@ fn model_info_and_search_agree() {
     assert_eq!(amy["id"], "piper-en_US-amy-low");
     assert!(amy["availability"].is_string());
 
-    let hits = json_from_ffi(tts_search_models_json(c"amy".as_ptr(), 5));
+    // a needle unique to one id — "amy" alone also matches "Saamya"
+    // names, and models() iterates a HashMap (per-process order), so
+    // a take(limited) result must never be order-dependent
+    let hits = json_from_ffi(tts_search_models_json(c"piper-en_US-amy-low".as_ptr(), 5));
     let arr = hits.as_array().unwrap();
     assert!(
         arr.iter().any(|e| e["id"] == "piper-en_US-amy-low"),
         "{hits}"
     );
     // language search hits Spanish voices
-    let es = json_from_ffi(tts_search_models_json(c"spanish".as_ptr(), 3));
+    let es = json_from_ffi(tts_search_models_json(c"spanish".as_ptr(), 50));
     assert!(es.as_array().is_some_and(|a| !a.is_empty()));
 
     // unknown model → NULL + ModelNotFound detail
@@ -313,6 +320,7 @@ fn model_info_and_search_agree() {
     assert_eq!(code, 5, "{detail}");
 }
 
+#[cfg(feature = "sherpaonnx")]
 #[test]
 fn models_dir_points_at_the_sherpa_layout() {
     let dir = json_from_ffi_str(tts_models_dir(c"sherpaonnx".as_ptr()));
@@ -323,6 +331,7 @@ fn models_dir_points_at_the_sherpa_layout() {
     assert_eq!(code, 7);
 }
 
+#[cfg(feature = "sherpaonnx")]
 fn json_from_ffi_str(ptr: *mut std::os::raw::c_char) -> String {
     assert!(!ptr.is_null());
     // SAFETY: owned NUL-terminated string per the FFI contract

@@ -40,7 +40,7 @@
 //! this with a `floravox-wasm` crate bridging ORT to onnxruntime-web
 //! (ort's `disable-linking` + JS glue); when that lands, the swap
 //! happens in voice loading and this module's `std::fs` use — which is
-//! already confined to [`FloravoxEngine::resolve_model`] and voice
+//! already confined to `FloravoxEngine::resolve_model` (private) and voice
 //! discovery, i.e. caller-controlled paths — moves with it.
 
 use crate::engine::TtsEngine;

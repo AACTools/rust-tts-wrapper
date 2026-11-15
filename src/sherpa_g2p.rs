@@ -16,7 +16,7 @@
 //! `PiperPhonemesToIdsVits`): the caller supplies the BARE phoneme
 //! stream per sentence — words joined by literal space codepoints,
 //! punctuation as its own token (`,` short pause, `.` long pause,
-//! `-` break, the piper convention [`punct_phonemes`] already
+//! `-` break, the piper convention `punct_phonemes` already
 //! emits). sherpa adds BOS/EOS/pad itself and SKIPS unknown
 //! codepoints with a log — which is why every symbol this module
 //! emits is validated single-codepoint AND in the model's

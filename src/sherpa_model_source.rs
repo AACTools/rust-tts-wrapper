@@ -1,5 +1,4 @@
-//! The sherpa-onnx [`ModelSource`](crate::local_models::ModelSource)
-//! implementation (#102 Phase 1): catalogue from the embedded registry,
+//! The sherpa-onnx `ModelSource` implementation (#102 Phase 1): catalogue from the embedded registry,
 //! install state from the models dir, installs through the shared
 //! machinery (resume, preflight, checksum gate, atomic swap, neutral
 //! `.installed` manifest), post-install G2P bundle provisioning via

@@ -1,5 +1,4 @@
-//! The floravox [`ModelSource`](crate::local_models::ModelSource)
-//! implementation (#102 Phase 1): catalogue from the shared embedded
+//! The floravox `ModelSource` implementation (#102 Phase 1): catalogue from the shared embedded
 //! registry (entries whose `engines` field names floravox — the
 //! student tier plus the floravox-compatible patched piper voices),
 //! single-file installs through the SHARED machinery, and an

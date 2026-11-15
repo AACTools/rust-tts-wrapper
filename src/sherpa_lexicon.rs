@@ -723,8 +723,9 @@ pub struct CompatLexiconResult {
 
 /// Generate a sherpa `lexicon.txt` for a non-English model from its
 /// language bundle (the `lexiconCompat: true` option, plan Phase 2).
-/// Resolves the bundle via [`discover_bundle_lexicon`] and delegates to
-/// [`ensure_compat_lexicon_from`]. Purely local: the bundle must already
+/// Resolves the bundle via `discover_bundle_lexicon` (private) and
+/// delegates to [`ensure_compat_lexicon_from`]. Purely local: the
+/// bundle must already
 /// be cached (fetched by provisioning, Phase 3) — no download happens
 /// here. See [`ensure_compat_lexicon_from`] for the write-target and
 /// atomicity contract.
