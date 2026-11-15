@@ -1,9 +1,11 @@
 //! Model-language → VoiceGarden bundle resolution: the validated-language
-//! allowlist for non-English Piper G2P under sherpa-onnx 2.x (#82).
+//! allowlist for Piper G2P under sherpa-onnx 2.x (#82, English migration
+//! #92).
 //!
 //! sherpa-onnx 2.0 removed the espeak-ng phonemizer, so non-English
 //! piper voices synthesize silence unless the caller supplies a phonetic
-//! front-end. The front-end (later phases, see
+//! front-end (English voices degrade instead: the #66/#67 auto-lexicon
+//! drops OOV/number words). The front-end (later phases, see
 //! `SHERPA_NONENGLISH_G2P_PLAN.md`) is built from the published
 //! voicegarden-lexicons bundles; this module is the single gate that
 //! decides which model languages get one.
@@ -88,6 +90,19 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         archive: Archive::Base,
         key: "de",
         validated: false,
+    },
+    // English migration to the codepoints path (#92): the eng-US
+    // bundle is what the A/B + whisper round-trip validated (lexicon
+    // path drops "42"/"1,000"; codepoints speaks both through the
+    // dictionary). Expanded mirrors the German deu decision: the
+    // distilled additions shrink the WFST-fallback share. The
+    // auto-lexicon still generates (compat artifact for bare-sherpa
+    // consumers) — the bundle is an upgrade, not a requirement.
+    LangBundle {
+        bcp47: "en",
+        archive: Archive::Expanded,
+        key: "eng-US",
+        validated: true, // A/B + whisper round-trip (piper-en_US-amy-low)
     },
 ];
 
@@ -215,7 +230,7 @@ mod tests {
     fn download_enablement_gates_on_validation() {
         let m = model("piper-de_DE-thorsten-medium", "de", "DE");
         assert!(g2p_enabled_for(&m));
-        assert!(!g2p_enabled_for(&model("piper-en_US-amy-low", "en", "US")));
+        assert!(g2p_enabled_for(&model("piper-en_US-amy-low", "en", "US")));
         assert!(!g2p_enabled_for(&model(
             "piper-pl_PL-gosia-medium",
             "pl",
@@ -314,10 +329,11 @@ mod tests {
     }
 
     #[test]
-    fn english_and_unknown_languages_have_no_rows() {
-        // English stays on the #66/#67 lexicon path — no rows here
+    fn english_and_unknown_languages_resolve_correctly() {
+        // English now has a validated row (the codepoints migration)
         let m = model("piper-en_US-amy-low", "en", "US");
-        assert!(default_bundle_for_model(&m).is_none());
+        let b = default_bundle_for_model(&m).expect("english resolves");
+        assert_eq!((b.key, b.archive), ("eng-US", Archive::Expanded));
         // Polish piper voices exist but no pl bundle is published
         let m = model("piper-pl_PL-gosia-medium", "pl", "PL");
         assert!(default_bundle_for_model(&m).is_none());
@@ -356,6 +372,7 @@ mod tests {
     /// spelling) fails here instead of surprising a user.
     #[test]
     fn resolution_against_full_registry() {
+        // English vits models now resolve to the en bundle row
         let mut de_single = 0;
         for (id, m) in sherpa_onnx_models::models() {
             let info = SherpaModelInfo {
@@ -382,35 +399,46 @@ mod tests {
                 license_url: String::new(),
             };
             let resolved = default_bundle_for_model(&info);
-            let single_german = info.language.len() == 1
-                && primary_subtag(&info.language[0].lang_code) == "de"
+            let single_enabled = info.language.len() == 1
+                && matches!(
+                    primary_subtag(&info.language[0].lang_code).as_str(),
+                    "de" | "en"
+                )
                 && !crate::sherpaonnx_engine::is_bilingual_en_compound(&id.to_ascii_lowercase());
-            if single_german {
+            if single_enabled {
                 de_single += 1;
-                let b = resolved.expect("single-language German model resolves");
-                assert_eq!((b.key, b.archive), ("deu", Archive::Expanded), "id {id}");
+                let b = resolved.expect("single-language enabled model resolves");
+                assert!(
+                    matches!((b.key, b.archive), ("deu" | "eng-US", Archive::Expanded)),
+                    "id {id}"
+                );
             } else {
                 assert!(resolved.is_none(), "id {id} must not resolve");
             }
         }
-        // the pinned registry has 52 German vits + 1 supertonic entry;
-        // supertonic is multilingual → excluded, so expect 52. If a
-        // legitimate de+de-AT (same primary) entry ever lands, the
-        // implementation resolves it but this pin fails first — review
-        // the pin deliberately, exactly like the gate-test count pins.
-        assert_eq!(de_single, 52, "German single-language model count moved");
+        // 52 de + 170 en single-language entries resolve (en added in
+        // the codepoints migration; resolution is NOT family-gated, so
+        // the 222 includes 22 non-vits en models — matcha/kokoro/
+        // pocket/kitten/mms_* — that the engine's 200-strong
+        // compat-lexicon pin excludes). Review on registry bumps.
+        assert_eq!(
+            de_single, 222,
+            "de+en single-language model count moved (52 de + 170 en)"
+        );
     }
 
     #[test]
     fn allowlist_rows_match_their_archive_key_pairs() {
         // the archive trap, stated as data: each key must belong to its
-        // named archive (de↔base, deu↔expanded). If a row ever pairs a
-        // key with the wrong archive, fetch would silently resolve the
-        // other bundle via bcp47 matching.
+        // named archive (de↔base, deu/eng-US↔expanded). If a row ever
+        // pairs a key with the wrong archive, fetch would silently
+        // resolve the other bundle via bcp47 matching.
         for b in LANG_BUNDLES {
             match b.archive {
-                Archive::Base => assert!(!b.key.contains("deu"), "{:?}", b.key),
-                Archive::Expanded => assert_eq!(b.key, "deu"),
+                Archive::Base => assert_eq!(b.key, "de"),
+                Archive::Expanded => {
+                    assert!(matches!(b.key, "deu" | "eng-US"), "{}", b.key);
+                }
             }
             assert_eq!(primary_subtag(b.bcp47), b.bcp47, "rows use minimal tags");
         }

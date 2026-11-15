@@ -140,6 +140,9 @@ pub struct SherpaOnnxEngine {
     g2p_all_dropped_logged: std::sync::atomic::AtomicBool,
     #[cfg(feature = "sherpa-g2p")]
     g2p_dropped_words_logged: std::sync::atomic::AtomicBool,
+    /// once-latch for the MMS digit-normalization drop log (the
+    /// codebase's once rule — see `g2p_dropped_words_logged`)
+    mms_dropped_logged: std::sync::atomic::AtomicBool,
     provider: Option<String>,
     // Cached ONNX runtime instance. Recreating OfflineTts per speak() is
     // expensive (model loading + ONNX init). Cache it so the first speak()
@@ -294,6 +297,7 @@ impl SherpaOnnxEngine {
             g2p_all_dropped_logged: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "sherpa-g2p")]
             g2p_dropped_words_logged: std::sync::atomic::AtomicBool::new(false),
+            mms_dropped_logged: std::sync::atomic::AtomicBool::new(false),
             tts_instance: Mutex::new(None),
         }
     }
@@ -740,12 +744,47 @@ impl SherpaOnnxEngine {
         let phoneme_codepoints = self.phonemize_for_model(&model_dir, model_info, text);
         #[cfg(not(feature = "sherpa-g2p"))]
         let phoneme_codepoints: Option<Vec<Vec<i32>>> = None;
+        // MMS front-ends read raw characters and have NO number rules
+        // — their token files carry `0`..`9`, so raw digits articulate
+        // one-by-one and garble (whisper round-trip: "The number 42 is
+        // spoken" loses the 42 entirely). Expand digits to words in
+        // the model's language when rules exist; unhandled numerics
+        // drop (counted) rather than garble. Same "never
+        // wrong-language expansion" policy as the codepoints path.
+        #[cfg(feature = "sherpa-g2p")]
+        let mms_digit_words: Option<String> =
+            if model_info.model_type == "mms" || id_lower.starts_with("mms_") {
+                let lang = model_info
+                    .language
+                    .first()
+                    .map_or("", |l| l.lang_code.as_str());
+                let (normalized, dropped) = crate::sherpa_g2p::normalize_digits_in_text(text, lang);
+                if dropped > 0 && !self.mms_dropped_logged.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "sherpa: MMS digit normalization dropped {dropped} \
+                         unhandled numeric tokens ('{lang}')"
+                    );
+                }
+                // all tokens dropped would hand sherpa empty text →
+                // silence; the un-normalized original is the safer
+                // degradation (mirrors the codepoints all-dropped
+                // guard)
+                if normalized.is_empty() && !text.trim().is_empty() {
+                    Some(text.to_string())
+                } else {
+                    Some(normalized)
+                }
+            } else {
+                None
+            };
+        #[cfg(not(feature = "sherpa-g2p"))]
+        let mms_digit_words: Option<String> = None;
         // codepoints replace the text argument (crate contract); the
         // ORIGINAL text stays bound for both EstimatePlan::build sites
         let tts_text = if phoneme_codepoints.is_some() {
             ""
         } else {
-            text
+            mms_digit_words.as_deref().unwrap_or(text)
         };
 
         let config = sherpa_onnx::OfflineTtsConfig {
@@ -3102,11 +3141,13 @@ mod tests {
         );
     }
 
-    /// The compat gate over the full pinned registry: exactly the 52
-    /// German single-language vits-family models qualify (51 piper +
-    /// coqui-de-css10); the multilingual supertonic and every
-    /// non-German model do not. German resolution itself is pinned in
-    /// sherpa_lang's registry test; this pins the model-family half.
+    /// The compat gate over the full pinned registry: exactly the
+    /// German + English single-language vits-family models qualify
+    /// (German: 51 piper + coqui-de-css10; English: the piper en
+    /// voices added by the codepoints migration); the multilingual
+    /// supertonic and every other model do not. Resolution itself is
+    /// pinned in sherpa_lang's registry test; this pins the
+    /// model-family half.
     #[test]
     fn test_compat_gate_against_full_registry() {
         let mut eligible = 0;
@@ -3139,10 +3180,16 @@ mod tests {
             let gated = row.is_some() && should_compat_generate_lexicon(&m.model_type, &lower);
             if gated {
                 eligible += 1;
-                assert!(row.is_some_and(|b| b.bcp47 == "de"), "id {id}");
+                assert!(
+                    row.is_some_and(|b| matches!(b.bcp47, "de" | "en")),
+                    "id {id}"
+                );
             }
         }
-        assert_eq!(eligible, 52, "German compat-eligible model count moved");
+        assert_eq!(
+            eligible, 200,
+            "de+en compat-eligible model count moved (52 de + 148 en)"
+        );
     }
 
     #[test]
