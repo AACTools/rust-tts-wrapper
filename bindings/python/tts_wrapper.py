@@ -20,7 +20,7 @@ import os
 import platform
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # ctypes setup
@@ -56,6 +56,11 @@ VISEME_CB = ctypes.CFUNCTYPE(
     ctypes.c_void_p,   # userdata
 )
 VOID_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p)
+# #102 model install: (fraction, stage, userdata) / cancelled(userdata)
+INSTALL_PROGRESS_CB = ctypes.CFUNCTYPE(
+    None, ctypes.c_double, ctypes.c_char_p, ctypes.c_void_p
+)
+INSTALL_CANCEL_CB = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p)
 ERROR_CB = ctypes.CFUNCTYPE(None, ctypes.c_char_p, ctypes.c_void_p)
 
 
@@ -175,10 +180,47 @@ def _load_lib():
     _lib.tts_get_engine_setups_json.argtypes = []
     _lib.tts_check_credentials.restype = ctypes.c_int32
     _lib.tts_check_credentials.argtypes = [ctypes.c_void_p]
+    # #102 model-management additions (ABI-additive).
+    _lib.tts_models_json.restype = ctypes.c_void_p  # owned char*
+    _lib.tts_models_json.argtypes = [ctypes.c_char_p]
+    _lib.tts_model_info_json.restype = ctypes.c_void_p
+    _lib.tts_model_info_json.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    _lib.tts_model_install.restype = ctypes.c_bool
+    _lib.tts_model_install.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        INSTALL_PROGRESS_CB,
+        INSTALL_CANCEL_CB,
+        ctypes.c_void_p,
+    ]
+    _lib.tts_model_uninstall.restype = ctypes.c_bool
+    _lib.tts_model_uninstall.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+    _lib.tts_models_dir.restype = ctypes.c_void_p
+    _lib.tts_models_dir.argtypes = [ctypes.c_char_p]
+    _lib.tts_search_models_json.restype = ctypes.c_void_p
+    _lib.tts_search_models_json.argtypes = [ctypes.c_char_p, ctypes.c_int32]
+    _lib.tts_installed_voice_catalog_json.restype = ctypes.c_void_p
+    _lib.tts_installed_voice_catalog_json.argtypes = []
+    _lib.tts_create_for_model.restype = ctypes.c_void_p
+    _lib.tts_create_for_model.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 
     # The GH #68/#69 symbols are additive: an older native build (pre
     # PR #72) does not export them. Probe and give callers a clear
     # error instead of a cryptic AttributeError later (GH #73 review).
+    global _models_abi_available
+    _models_abi_available = all(
+        hasattr(_lib, sym)
+        for sym in (
+            "tts_models_json",
+            "tts_model_info_json",
+            "tts_model_install",
+            "tts_model_uninstall",
+            "tts_models_dir",
+            "tts_search_models_json",
+            "tts_installed_voice_catalog_json",
+            "tts_create_for_model",
+        )
+    )
     global _parity_available
     _parity_available = all(
         hasattr(_lib, sym)
@@ -195,6 +237,13 @@ def _load_lib():
 
 _parity_available: Optional[bool] = None
 
+_models_abi_available: Optional[bool] = None
+
+_MODELS_ABI_PRECEDES = (
+    "native rust_tts_wrapper predates the #102 model-management ABI "
+    "(PR #103); rebuild the library"
+)
+
 _PARITY_PRECEDES = (
     "native rust_tts_wrapper predates the GH #68/#69 ABI (PR #72); "
     "rebuild the library"
@@ -204,6 +253,11 @@ _PARITY_PRECEDES = (
 def _require_parity() -> None:
     if _load_lib() and not _parity_available:
         raise TTSError(_PARITY_PRECEDES)
+
+
+def _require_models_abi() -> None:
+    if _load_lib() and not _models_abi_available:
+        raise TTSError(_MODELS_ABI_PRECEDES)
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +405,68 @@ class EngineCapabilities:
     requires_internet: bool = False
     static_voice_catalog: bool = False
     notes: Optional[str] = None
+
+
+@dataclass
+class LocalModel:
+    """One catalogue entry (#102): install state + unified availability.
+
+    ``availability`` is one of ready / needs_download / needs_bundle /
+    needs_assets / unverified / blocked / wrong_engine; ``missing``
+    (needs_assets) and ``reason`` (blocked) carry the data companions.
+    """
+
+    engine: str
+    id: str
+    name: str
+    model_type: str
+    quality: str
+    languages: List[Tuple[str, str]]
+    num_speakers: int
+    sample_rate: int
+    filesize_mb: float
+    license: str
+    installed: bool
+    update_available: bool
+    experimental: bool
+    availability: str
+    missing: Optional[List[str]] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class InstalledVoice:
+    """One speakable installed voice from the ctx-free catalogue (#102)."""
+
+    engine: str
+    model: str
+    voice: str
+    name: str
+    languages: List[Tuple[str, str]]
+
+
+def _model_from_json(m: dict) -> LocalModel:
+    return LocalModel(
+        engine=str(m.get("engine", "")),
+        id=str(m.get("id", "")),
+        name=str(m.get("name", "")),
+        model_type=str(m.get("model_type", "")),
+        quality=str(m.get("quality", "")),
+        languages=[
+            (str(l.get("code", "")), str(l.get("name", "")))
+            for l in (m.get("languages") or [])
+        ],
+        num_speakers=int(m.get("num_speakers", 1)),
+        sample_rate=int(m.get("sample_rate", 0)),
+        filesize_mb=float(m.get("filesize_mb", 0.0)),
+        license=str(m.get("license", "")),
+        installed=bool(m.get("installed", False)),
+        update_available=bool(m.get("update_available", False)),
+        experimental=bool(m.get("experimental", False)),
+        availability=str(m.get("availability", "")),
+        missing=[str(x) for x in (m.get("missing") or [])] or None,
+        reason=str(m.get("reason")) if m.get("reason") else None,
+    )
 
 
 @dataclass
@@ -728,6 +844,182 @@ class TTSClient:
         return CredentialCheckResult(
             status="error", error=self.get_last_error_detail()
         )
+
+    # --- engine-agnostic local-model management (#102) -----------------
+
+    @classmethod
+    def _read_models_json(cls, ptr, what: str):
+        """Read, parse and free an owned JSON payload."""
+        lib = _load_lib()
+        if not ptr:
+            # NULL carries a structured reason (ModelNotFound, …) —
+            # attach it like the install path does
+            detail = cls.get_global_last_error_detail()
+            raise TTSError(
+                f"{what} failed: {detail.message if detail and detail.message else 'null'}",
+                detail,
+            )
+        try:
+            raw = ctypes.cast(ptr, ctypes.c_char_p).value
+            return json.loads(raw.decode("utf-8", "replace")) if raw else None
+        except json.JSONDecodeError as e:
+            raise TTSError(f"{what} JSON failed to parse: {e}") from e
+        finally:
+            lib.tts_free_string(ptr)
+
+    @classmethod
+    def local_models(cls, engine_id: Optional[str] = None) -> List[LocalModel]:
+        """The local-model catalogue (every compiled-in engine when
+        ``engine_id`` is None). An empty list is success."""
+        _require_models_abi()
+        lib = _load_lib()
+        ptr = lib.tts_models_json(engine_id.encode() if engine_id else None)
+        parsed = cls._read_models_json(ptr, "tts_models_json")
+        if not isinstance(parsed, list):
+            raise TTSError("tts_models_json returned unparseable JSON")
+        return [_model_from_json(m) for m in parsed]
+
+    @classmethod
+    def local_model(cls, engine_id: Optional[str], model_id: str) -> LocalModel:
+        """One catalogue entry; ``TTSError`` (ModelNotFound) when absent."""
+        _require_models_abi()
+        lib = _load_lib()
+        ptr = lib.tts_model_info_json(
+            engine_id.encode() if engine_id else None, model_id.encode()
+        )
+        parsed = cls._read_models_json(ptr, "tts_model_info_json")
+        if not isinstance(parsed, dict):
+            raise TTSError("tts_model_info_json returned unparseable JSON")
+        return _model_from_json(parsed)
+
+    @classmethod
+    def search_models(cls, query: str, limit: int = 50) -> List[LocalModel]:
+        """Case-insensitive substring search across every catalogue."""
+        _require_models_abi()
+        lib = _load_lib()
+        ptr = lib.tts_search_models_json(query.encode(), limit)
+        parsed = cls._read_models_json(ptr, "tts_search_models_json")
+        if not isinstance(parsed, list):
+            raise TTSError("tts_search_models_json returned unparseable JSON")
+        return [_model_from_json(m) for m in parsed]
+
+    @classmethod
+    def models_dir(cls, engine_id: str) -> str:
+        """The engine's models directory (``TTS_MODELS_DIR`` honored)."""
+        _require_models_abi()
+        lib = _load_lib()
+        ptr = lib.tts_models_dir(engine_id.encode())
+        if not ptr:
+            detail = cls.get_global_last_error_detail()
+            raise TTSError(
+                "tts_models_dir failed: "
+                f"{detail.message if detail and detail.message else 'null'}",
+                detail,
+            )
+        try:
+            return ctypes.cast(ptr, ctypes.c_char_p).value.decode("utf-8", "replace")
+        finally:
+            lib.tts_free_string(ptr)
+
+    @classmethod
+    def installed_voices(cls) -> List[InstalledVoice]:
+        """The ctx-free installed-voice catalogue (no credentials)."""
+        _require_models_abi()
+        lib = _load_lib()
+        ptr = lib.tts_installed_voice_catalog_json()
+        parsed = cls._read_models_json(ptr, "tts_installed_voice_catalog_json")
+        if not isinstance(parsed, list):
+            raise TTSError("tts_installed_voice_catalog_json returned unparseable JSON")
+        return [
+            InstalledVoice(
+                engine=str(v.get("engine", "")),
+                model=str(v.get("model", "")),
+                voice=str(v.get("voice", "")),
+                name=str(v.get("name", "")),
+                languages=[
+                    (str(l.get("bcp47", "")), str(l.get("display", "")))
+                    for l in (v.get("languages") or [])
+                ],
+            )
+            for v in parsed
+        ]
+
+    @classmethod
+    def install_model(
+        cls,
+        engine_id: str,
+        model_id: str,
+        progress: Optional[Callable[[float, str], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Install a model (synchronous; callbacks fire on this thread).
+
+        Raises ``TTSError`` (network / checksum / insufficient disk /
+        install-in-progress / cancelled) with the structured detail.
+        """
+        _require_models_abi()
+        lib = _load_lib()
+        # strong refs so the GC cannot collect the trampolines mid-call
+        progress_ref = (
+            INSTALL_PROGRESS_CB(lambda frac, stage, _ud: progress(frac, stage.decode("utf-8", "replace")))
+            if progress
+            else None
+        )
+        cancel_ref = INSTALL_CANCEL_CB(lambda _ud: bool(cancelled())) if cancelled else None
+        # ctypes typed-callback args reject None — a default-constructed
+        # CFUNCTYPE instance IS the null function pointer
+        ok = lib.tts_model_install(
+            engine_id.encode(),
+            model_id.encode(),
+            progress_ref if progress_ref is not None else INSTALL_PROGRESS_CB(),
+            cancel_ref if cancel_ref is not None else INSTALL_CANCEL_CB(),
+            None,
+        )
+        if not ok:
+            detail = cls.get_global_last_error_detail()
+            raise TTSError(
+                f"installing '{model_id}' failed: "
+                f"{detail.message if detail and detail.message else 'unknown error'}",
+                detail,
+            )
+
+    @classmethod
+    def uninstall_model(cls, engine_id: str, model_id: str) -> None:
+        """Remove an installed model (files + `.installed` manifest)."""
+        _require_models_abi()
+        lib = _load_lib()
+        if not lib.tts_model_uninstall(engine_id.encode(), model_id.encode()):
+            detail = cls.get_global_last_error_detail()
+            raise TTSError(
+                f"uninstalling '{model_id}' failed: "
+                f"{detail.message if detail and detail.message else 'unknown error'}",
+                detail,
+            )
+
+    @classmethod
+    def for_model(cls, engine_id: str, model_id: str) -> "TTSClient":
+        """Create a client for a catalogued model (the credentials
+        format stays private to the native layer — #102 F5)."""
+        _require_models_abi()
+        lib = _load_lib()
+        ctx = lib.tts_create_for_model(engine_id.encode(), model_id.encode())
+        if not ctx:
+            detail = cls.get_global_last_error_detail()
+            message = (detail.message if detail and detail.message else None) or (
+                f"tts_create_for_model('{engine_id}', '{model_id}') returned null"
+            )
+            raise TTSError(message, detail)
+        client = cls.__new__(cls)
+        client._lib = lib
+        client._ctx = ctx
+        client._audio_cb_ref = None
+        client._boundary_cb_ref = None
+        client._start_cb_ref = None
+        client._end_cb_ref = None
+        client._error_cb_ref = None
+        client._mark_cb_ref = None
+        client._viseme_cb_ref = None
+        return client
 
     # --- engine setup schema (GH #68) -----------------------------------
 

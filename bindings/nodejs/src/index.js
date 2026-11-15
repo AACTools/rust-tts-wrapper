@@ -114,6 +114,10 @@ function getKoffiTypes() {
       start: koffi.proto("void start_cb(void *userdata)"),
       end: koffi.proto("void end_cb(void *userdata)"),
       error: koffi.proto("void error_cb(const char *message, void *userdata)"),
+      installProgress: koffi.proto(
+        "void install_progress_cb(double fraction, const char *stage, void *userdata)",
+      ),
+      installCancel: koffi.proto("bool install_cancel_cb(void *userdata)"),
     },
   };
   return koffiTypes;
@@ -175,6 +179,36 @@ function loadLibrary(explicitPath) {
       return null;
     }
   };
+  // The #102 model-management symbols are additive (PR #103): probe
+  // like the parity set so an older native build gets a clear error.
+  const MODELS_PRECEDES =
+    "native rust_tts_wrapper predates the #102 model-management ABI (PR #103); rebuild the library";
+  const modelsFns = {
+    tts_models_json: optional("void *tts_models_json(const char *engine_id)"),
+    tts_model_info_json: optional(
+      "void *tts_model_info_json(const char *engine_id, const char *model_id)",
+    ),
+    tts_model_install: optional(
+      "bool tts_model_install(const char *engine_id, const char *model_id, install_progress_cb *progress, install_cancel_cb *cancelled, void *userdata)",
+    ),
+    tts_model_uninstall: optional(
+      "bool tts_model_uninstall(const char *engine_id, const char *model_id)",
+    ),
+    tts_models_dir: optional("void *tts_models_dir(const char *engine_id)"),
+    tts_search_models_json: optional(
+      "void *tts_search_models_json(const char *query, int32_t limit)",
+    ),
+    tts_installed_voice_catalog_json: optional(
+      "void *tts_installed_voice_catalog_json()",
+    ),
+    tts_create_for_model: optional(
+      "void *tts_create_for_model(const char *engine_id, const char *model_id)",
+    ),
+  };
+  const needModels = (name) => {
+    if (!modelsFns[name]) throw new Error(MODELS_PRECEDES);
+    return modelsFns[name];
+  };
   const parity = {
     tts_get_last_error_code: optional("uint32_t tts_get_last_error_code(void *ctx)"),
     tts_get_last_error_detail_json: optional(
@@ -196,6 +230,7 @@ function loadLibrary(explicitPath) {
     cbProtos,
     setters,
     parity: { fns: parity, needParity },
+    models: { fns: modelsFns, needModels },
     TtsVoice,
     TtsEngineInfo,
   };
@@ -260,6 +295,34 @@ function readOwnedJson(abi, ptr) {
   } catch {
     return null;
   }
+}
+
+/**
+ * Normalise one #102 catalogue entry: tolerant of missing properties
+ * (forward compatible with newer natives).
+ */
+function normalizeModel(m) {
+  return {
+    engine: cstr(m.engine),
+    id: cstr(m.id),
+    name: cstr(m.name),
+    modelType: cstr(m.model_type),
+    quality: cstr(m.quality),
+    languages: (Array.isArray(m.languages) ? m.languages : []).map((l) => ({
+      code: cstr(l.code),
+      name: cstr(l.name),
+    })),
+    numSpeakers: typeof m.num_speakers === "number" ? m.num_speakers : 1,
+    sampleRate: typeof m.sample_rate === "number" ? m.sample_rate : 0,
+    filesizeMb: typeof m.filesize_mb === "number" ? m.filesize_mb : 0,
+    license: cstr(m.license),
+    installed: m.installed === true,
+    updateAvailable: m.update_available === true,
+    experimental: m.experimental === true,
+    availability: cstr(m.availability),
+    missing: Array.isArray(m.missing) ? m.missing.map(cstr) : undefined,
+    reason: typeof m.reason === "string" ? m.reason : undefined,
+  };
 }
 
 /**
@@ -414,6 +477,177 @@ class TtsClient extends EventEmitter {
   }
 
   /** @returns {{id:string,name:string,needsCredentials:boolean,credentialKeys:string[]}[]} */
+  // --- engine-agnostic local-model management (#102) ------------------
+
+  /**
+   * The local-model catalogue. `engineId` null/undefined = every
+   * compiled-in local engine. Returns normalised entries; an empty
+   * array is success (no local engines in this build).
+   * @param {string|null} [engineId]
+   * @param {object} [library] preloaded ABI
+   * @returns {Array<object>}
+   */
+  static localModels(engineId, library) {
+    const a = library ?? loadLibrary();
+    const ptr = a.models.needModels("tts_models_json")(engineId ?? null);
+    const parsed = readOwnedJson(a, ptr);
+    if (!Array.isArray(parsed)) {
+      throw new TtsError("tts_models_json returned unparseable JSON");
+    }
+    return parsed.map(normalizeModel);
+  }
+
+  /**
+   * One catalogue entry, or null when the id is unknown.
+   * @param {string|null} engineId
+   * @param {string} modelId
+   * @param {object} [library]
+   * @returns {object|null}
+   */
+  static localModel(engineId, modelId, library) {
+    const a = library ?? loadLibrary();
+    const ptr = a.models.needModels("tts_model_info_json")(engineId ?? null, modelId);
+    const parsed = readOwnedJson(a, ptr);
+    return parsed ? normalizeModel(parsed) : null;
+  }
+
+  /**
+   * Case-insensitive substring search over every compiled-in catalogue.
+   * @param {string} query
+   * @param {number} [limit=50]
+   * @param {object} [library]
+   * @returns {Array<object>}
+   */
+  static searchModels(query, limit = 50, library) {
+    const a = library ?? loadLibrary();
+    const ptr = a.models.needModels("tts_search_models_json")(query, limit);
+    const parsed = readOwnedJson(a, ptr);
+    if (!Array.isArray(parsed)) {
+      throw new TtsError("tts_search_models_json returned unparseable JSON");
+    }
+    return parsed.map(normalizeModel);
+  }
+
+  /**
+   * The engine's models directory (TTS_MODELS_DIR honored), or null
+   * when the engine has no model source in this build.
+   * @param {string} engineId
+   * @param {object} [library]
+   * @returns {string|null}
+   */
+  static modelsDir(engineId, library) {
+    const a = library ?? loadLibrary();
+    const ptr = a.models.needModels("tts_models_dir")(engineId);
+    const s = readOwnedCString(a, ptr);
+    return s.length ? s : null;
+  }
+
+  /**
+   * The ctx-free installed-voice catalogue (no credentials payload).
+   * @param {object} [library]
+   * @returns {Array<object>}
+   */
+  static installedVoices(library) {
+    const a = library ?? loadLibrary();
+    const ptr = a.models.needModels("tts_installed_voice_catalog_json")();
+    const parsed = readOwnedJson(a, ptr);
+    if (!Array.isArray(parsed)) {
+      throw new TtsError("tts_installed_voice_catalog_json returned unparseable JSON");
+    }
+    return parsed.map((v) => ({
+      engine: cstr(v.engine),
+      model: cstr(v.model),
+      voice: cstr(v.voice),
+      name: cstr(v.name),
+      languages: (Array.isArray(v.languages) ? v.languages : []).map((l) => ({
+        bcp47: cstr(l.bcp47),
+        display: cstr(l.display),
+      })),
+    }));
+  }
+
+  /**
+   * Install a model. SYNCHRONOUS on the caller's thread; `onProgress`
+   * (fraction, stage) and `cancelled` fire on that same thread.
+   * Throws TtsError (network / checksum / insufficient disk /
+   * install-in-progress / cancelled) with the structured detail.
+   * @param {string} engineId
+   * @param {string} modelId
+   * @param {object} [options]
+   * @param {(fraction: number, stage: string) => void} [options.onProgress]
+   * @param {() => boolean} [options.cancelled]
+   * @param {object} [options.library]
+   */
+  static installModel(engineId, modelId, { onProgress, cancelled, library } = {}) {
+    const a = library ?? loadLibrary();
+    const progressCb = onProgress
+      ? a.cbProtos.installProgress((fraction, stage) => onProgress(fraction, cstr(stage)))
+      : null;
+    const cancelCb = cancelled ? a.cbProtos.installCancel(() => !!cancelled()) : null;
+    const ok = a.models.needModels("tts_model_install")(
+      engineId,
+      modelId,
+      progressCb,
+      cancelCb,
+      null,
+    );
+    if (!ok) {
+      const detail = TtsClient.globalLastErrorDetail(a);
+      throw new TtsError(
+        `installing '${modelId}' failed: ${detail?.message ?? "unknown error"}`,
+        detail,
+      );
+    }
+  }
+
+  /**
+   * Remove an installed model (files + neutral `.installed` manifest).
+   * @param {string} engineId
+   * @param {string} modelId
+   * @param {object} [library]
+   */
+  static uninstallModel(engineId, modelId, library) {
+    const a = library ?? loadLibrary();
+    const ok = a.models.needModels("tts_model_uninstall")(engineId, modelId);
+    if (!ok) {
+      const detail = TtsClient.globalLastErrorDetail(a);
+      throw new TtsError(
+        `uninstalling '${modelId}' failed: ${detail?.message ?? "unknown error"}`,
+        detail,
+      );
+    }
+  }
+
+  /**
+   * Create a client for a catalogued model — the credentials format
+   * stays private to the native layer (#102 F5).
+   * @param {string} engineId
+   * @param {string} modelId
+   * @param {object} [library]
+   * @returns {TtsClient}
+   */
+  static forModel(engineId, modelId, library) {
+    const a = library ?? loadLibrary();
+    const ctx = a.models.needModels("tts_create_for_model")(engineId, modelId);
+    if (!ctx) {
+      const detail = TtsClient.globalLastErrorDetail(a);
+      throw new TtsError(
+        `tts_create_for_model(${engineId}, ${modelId}) failed: ${
+          TtsClient.globalLastError(a) ?? "unknown"
+        }`,
+        detail,
+      );
+    }
+    const client = Object.create(TtsClient.prototype);
+    EventEmitter.call(client);
+    client._abi = a;
+    client._ctx = ctx;
+    client._registered = [];
+    client._closed = false;
+    client._registerAllEvents();
+    return client;
+  }
+
   static listEngines(abi) {
     const a = abi ?? loadLibrary();
     const out = [null];

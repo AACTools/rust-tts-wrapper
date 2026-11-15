@@ -187,3 +187,68 @@ class Callbacks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelManagement(unittest.TestCase):
+    """The #102 engine-agnostic model surface (PR #103).
+
+    Holds under any build: with no local engine compiled in the
+    catalogues are EMPTY and that is success; when sherpaonnx is
+    compiled in (the local dev build), the deeper catalogue contract
+    is asserted too.
+    """
+
+    def test_catalogue_and_voice_catalog_are_lists(self):
+        models = TTSClient.local_models()
+        voices = TTSClient.installed_voices()
+        self.assertIsInstance(models, list)
+        self.assertIsInstance(voices, list)
+        for m in models:
+            self.assertTrue(m.engine)
+            self.assertTrue(m.id)
+            self.assertTrue(m.availability)
+        for v in voices:
+            self.assertTrue(v.engine)
+            self.assertTrue(v.model)
+            self.assertTrue(v.voice)
+
+    def test_search_returns_list_and_unknown_engine_dir_raises(self):
+        self.assertIsInstance(TTSClient.search_models("zzz-no-such-model"), list)
+        with self.assertRaises(TTSError):
+            TTSClient.models_dir("no-such-engine")
+
+    def test_unknown_model_raises_model_not_found(self):
+        with self.assertRaises(TTSError):
+            TTSClient.local_model(None, "zzz-no-such-model")
+
+    def test_install_unknown_model_raises(self):
+        with self.assertRaises(TTSError):
+            TTSClient.install_model("sherpaonnx", "zzz-no-such-model")
+
+    def _sherpa_present(self) -> bool:
+        return any(m.engine == "sherpaonnx" for m in TTSClient.local_models())
+
+    def test_sherpa_catalogue_contract_when_compiled_in(self):
+        if not self._sherpa_present():
+            self.skipTest("sherpaonnx not compiled into this build")
+        sherpa = TTSClient.local_models("sherpaonnx")
+        self.assertTrue(sherpa)
+        amy = TTSClient.local_model("sherpaonnx", "piper-en_US-amy-low")
+        self.assertEqual(amy.id, "piper-en_US-amy-low")
+        self.assertIn(
+            amy.availability,
+            ("needs_download", "ready", "needs_bundle", "unverified"),
+        )
+        # search finds by id (a unique needle — order is per-process)
+        hits = TTSClient.search_models("piper-en_US-amy-low")
+        self.assertTrue(any(h.id == "piper-en_US-amy-low" for h in hits))
+        # the models dir ends with the engine layout segment
+        self.assertTrue(TTSClient.models_dir("sherpaonnx").endswith("sherpaonnx"))
+        # floravox-student rows never appear in the sherpa catalogue
+        self.assertFalse(
+            any(m.id.startswith("willwade-student-") for m in sherpa)
+        )
+        # floravox rows (when compiled in) are badged experimental
+        fv = [m for m in TTSClient.local_models() if m.engine == "floravox"]
+        for m in fv:
+            self.assertTrue(m.experimental)

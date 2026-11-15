@@ -140,6 +140,38 @@ export declare class TtsError extends Error {
   displayMessage: string | null;
 }
 
+/** One #102 catalogue entry (normalised). `availability` is one of
+ * ready / needs_download / needs_bundle / needs_assets / unverified /
+ * blocked / wrong_engine; `missing` (needs_assets) and `reason`
+ * (blocked) carry the data companions. */
+export interface LocalModel {
+  engine: string;
+  id: string;
+  name: string;
+  modelType: string;
+  quality: string;
+  languages: Array<{ code: string; name: string }>;
+  numSpeakers: number;
+  sampleRate: number;
+  filesizeMb: number;
+  license: string;
+  installed: boolean;
+  updateAvailable: boolean;
+  experimental: boolean;
+  availability: string;
+  missing?: string[];
+  reason?: string;
+}
+
+/** One speakable installed voice from the ctx-free catalogue (#102). */
+export interface InstalledVoice {
+  engine: string;
+  model: string;
+  voice: string;
+  name: string;
+  languages: Array<{ bcp47: string; display: string }>;
+}
+
 declare class TtsClient extends NodeJS.EventEmitter {
   constructor(options?: TtsClientOptions);
 
@@ -185,6 +217,35 @@ declare class TtsClient extends NodeJS.EventEmitter {
   static globalLastError(): string | null;
   static globalLastErrorCode(): TtsErrorCode;
   static globalLastErrorDetail(): TtsErrorDetail | null;
+
+  // --- engine-agnostic local-model management (#102) -------------------
+
+  /** The local-model catalogue (every compiled-in local engine when
+   * engineId is omitted). An empty array is success. */
+  static localModels(engineId?: string | null): LocalModel[];
+  /** One catalogue entry, or null when unknown. */
+  static localModel(engineId?: string | null, modelId: string): LocalModel | null;
+  /** Case-insensitive substring search across every catalogue. */
+  static searchModels(query: string, limit?: number): LocalModel[];
+  /** The engine's models directory (TTS_MODELS_DIR honored), or null. */
+  static modelsDir(engineId: string): string | null;
+  /** The ctx-free installed-voice catalogue (no credentials payload). */
+  static installedVoices(): InstalledVoice[];
+  /** Install a model. Synchronous; callbacks fire on the caller's
+   * thread; throws TtsError with the structured detail on failure. */
+  static installModel(
+    engineId: string,
+    modelId: string,
+    options?: {
+      onProgress?: (fraction: number, stage: string) => void;
+      cancelled?: () => boolean;
+    },
+  ): void;
+  /** Remove an installed model (files + neutral manifest). */
+  static uninstallModel(engineId: string, modelId: string): void;
+  /** Create a client for a catalogued model (credentials stay
+   * private to the native layer — #102 F5). */
+  static forModel(engineId: string, modelId: string): TtsClient;
 }
 
 /** Preload the shared library (throws with guidance if not found). */

@@ -333,3 +333,67 @@ public sealed class BindingsExtrasTests : IDisposable
         rust.Stop();
     }
 }
+
+// --- engine-agnostic local-model management (#102, PR #103) ------------
+// Holds under any build: with no local engines compiled in the
+// catalogues are EMPTY and that is success. When sherpaonnx is in the
+// build (the CI .NET job), the deeper catalogue contract is asserted.
+
+public class ModelManagementTests
+{
+    [Fact]
+    public void Catalogues_And_Voices_Are_Well_Formed()
+    {
+        var models = TtsClient.GetLocalModels();
+        var voices = TtsClient.GetInstalledVoices();
+        Assert.All(models, m =>
+        {
+            Assert.False(string.IsNullOrEmpty(m.Engine));
+            Assert.False(string.IsNullOrEmpty(m.Id));
+            Assert.False(string.IsNullOrEmpty(m.Availability));
+        });
+        Assert.All(voices, v =>
+        {
+            Assert.False(string.IsNullOrEmpty(v.Engine));
+            Assert.False(string.IsNullOrEmpty(v.Model));
+            Assert.False(string.IsNullOrEmpty(v.Voice));
+        });
+    }
+
+    [Fact]
+    public void Search_Lists_And_Unknowns_Behave()
+    {
+        Assert.NotNull(TtsClient.SearchModels("zzz-no-such-model"));
+        Assert.Null(TtsClient.GetModelsDir("no-such-engine"));
+        Assert.Null(TtsClient.GetLocalModel(null, "zzz-no-such-model"));
+        Assert.Throws<TtsException>(() =>
+            TtsClient.InstallModel("sherpaonnx", "zzz-no-such-model"));
+    }
+
+    [Fact]
+    public void Sherpa_Catalogue_Contract_When_Compiled_In()
+    {
+        var sherpa = TtsClient.GetLocalModels("sherpaonnx");
+        if (sherpa.Count == 0)
+        {
+            // no local engines in this build — covered above
+            return;
+        }
+        Assert.All(sherpa, m => Assert.Equal("sherpaonnx", m.Engine));
+        var amy = TtsClient.GetLocalModel("sherpaonnx", "piper-en_US-amy-low");
+        Assert.NotNull(amy);
+        Assert.Equal("piper-en_US-amy-low", amy!.Id);
+        Assert.Contains(amy.Availability,
+            new[] { "needs_download", "ready", "needs_bundle", "unverified" });
+        // a unique needle (catalogue order is per-process)
+        Assert.Contains(TtsClient.SearchModels("piper-en_US-amy-low"),
+            m => m.Id == "piper-en_US-amy-low");
+        Assert.EndsWith("sherpaonnx", TtsClient.GetModelsDir("sherpaonnx"));
+        // floravox-student rows never appear in the sherpa catalogue
+        Assert.DoesNotContain(sherpa, m => m.Id.StartsWith("willwade-student-"));
+        // floravox rows (when compiled in) are badged experimental
+        Assert.All(
+            TtsClient.GetLocalModels().Where(m => m.Engine == "floravox"),
+            m => Assert.True(m.Experimental));
+    }
+}

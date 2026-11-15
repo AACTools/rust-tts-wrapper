@@ -108,6 +108,35 @@ main and on PRs.
   and import the header as module `rust_tts_wrapper`.
 - **Node/Electron:** `@aactools/tts-wrapper` (koffi-based; no node-gyp).
 
+## Local-model management (#102)
+
+One engine-agnostic surface for every local engine compiled into the
+build — catalogue, unified availability, one install path, ctx-free
+installed-voice catalogue:
+
+| FFI | what it does |
+|---|---|
+| `tts_models_json(engine_id?)` | catalogue (install state + `availability`) |
+| `tts_model_info_json(engine_id?, model_id)` | one entry |
+| `tts_model_install(engine_id, model_id, progress, cancelled, ud)` | verify → fetch (resumable, sha256) → extract → atomic swap; synchronous, one install per process |
+| `tts_model_uninstall(engine_id, model_id)` | remove files + neutral manifest |
+| `tts_models_dir(engine_id)` | models dir (`TTS_MODELS_DIR` override) |
+| `tts_search_models_json(query, limit)` | substring search |
+| `tts_installed_voice_catalog_json()` | installed models as voices — no credentials |
+| `tts_create_for_model(engine_id, model_id)` | client for a catalogued model |
+
+Bindings wrap it idiomatically:
+
+- **Node:** `TtsClient.localModels()` / `.installModel(id, {onProgress, cancelled})` / `.forModel()` (koffi-probed, additive)
+- **Python:** `TTSClient.local_models()` / `.install_model(progress=, cancelled=)` / `.for_model()`
+- **.NET:** `TtsClient.GetLocalModels()` / `.InstallModelAsync(progress, cancellationToken)` / `.CreateForModel()`
+- **Swift:** `TtsClient.localModelsJSON()` / `.installModel(onProgress:cancelled:)` / `.createForModel()`
+
+Availability vocabulary (a superset rename of the sherpa `readiness`):
+`ready | needs_download | needs_bundle | needs_assets` (+ `missing`) `|
+unverified | blocked` (+ `reason`) `| wrong_engine`. Floravox entries
+carry `experimental: true`.
+
 ## Engine feature sets
 
 Engines are compile-time cargo features; the `tts_get_engines` enumeration
