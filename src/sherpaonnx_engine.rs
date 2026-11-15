@@ -528,24 +528,30 @@ impl SherpaOnnxEngine {
         // Dispatch model config by model_type. The branches below mirror the
         // file-layout conventions used by js-tts-wrapper and dotnet-tts-wrapper:
         //
-        //   kokoro  → model.onnx + voices.bin + tokens.txt + espeak-ng-data/
+        //   kokoro  → model.onnx + voices.bin + tokens.txt (+ lexicon*.txt
+        //             for multilingual builds)
         //   matcha  → acoustic-model.onnx + vocoder.onnx + tokens.txt
         //             (vocoder may be hifigan_v2.onnx, vocos-22khz-univ.onnx,
         //              or live in a shared base dir)
-        //   vits    → model.onnx + tokens.txt + (lexicon.txt | espeak-ng-data/)
-        //             Piper / GitHub models prefer espeak-ng-data and ignore
-        //             dict_dir; Chinese models want a dict/ directory for
+        //   vits    → model.onnx + tokens.txt + lexicon.txt;
+        //             Chinese models want a dict/ directory for
         //             jieba segmentation.
         //   zipvoice→ encoder/decoder .onnx (int8 variants preferred) +
-        //             tokens.txt + lexicon.txt + espeak-ng-data/ + a shared
+        //             tokens.txt + lexicon.txt + a shared
         //             vocos_24khz.onnx vocoder (base dir). Zero-shot cloning:
         //             speak() needs a reference clip + its transcript.
         //   pocket  → lm_flow/lm_main/encoder/decoder/text_conditioner .onnx
         //             (int8 where shipped) + vocab.json + token_scores.json.
         //             Zero-shot cloning from a reference clip alone.
-        //   mms /   → MMS models use the VITS config but typically have no
-        //   unknown   espeak-ng-data; they ship just model.onnx + tokens.txt
-        //             + lexicon.txt.
+        //   mms /   → MMS models use the VITS config; they ship just
+        //   unknown   model.onnx + tokens.txt + lexicon.txt.
+        //
+        // No model family consults espeak-ng-data: sherpa-onnx 2.x removed
+        // the runtime phonemizer, so the wrapper never passes the
+        // deprecated data_dir. lexicon.txt is the only phonetic front-end
+        // — espeak-orphaned models (piper, matcha-en, kokoro-en, kitten)
+        // get one generated from their own assets (sherpa_lexicon.rs) or
+        // from a provisioned voicegarden bundle (sherpa-g2p feature).
         //
         // The registry has ~1143 MMS entries that omit
         // `model_type`, so empty/unknown falls through to VITS handling.
@@ -1116,24 +1122,35 @@ impl TtsEngine for SherpaOnnxEngine {
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
+        // No modelId configured, or an id that is not in the registry:
+        // report zero voices rather than a phantom "Speaker 0" (the old
+        // `map_or(1, …)` fallback did exactly that). speak() already
+        // errors with the reason; a UI listing voices must not offer
+        // one that cannot speak.
+        if self.loaded_model_id.is_empty() {
+            return Ok(Vec::new());
+        }
         let model_info = self.models.get(&self.loaded_model_id);
+        let Some(model_info) = model_info else {
+            return Ok(Vec::new());
+        };
 
         // Supertonic is addressed by (speaker, language) rather than a bare
         // speaker id. Emit one voice per speaker × language pair, encoding
         // both in the id as "sid:lang" so speak() can route the language
         // through GenerationConfig.extra.
-        if let Some(info) = model_info {
-            if info.model_type == "supertonic" {
-                return Ok(supertonic_voices(info));
-            }
+        if model_info.model_type == "supertonic" {
+            return Ok(supertonic_voices(model_info));
         }
 
-        let num_speakers = model_info.map_or(1, |m| m.num_speakers);
+        let num_speakers = model_info.num_speakers;
         let lang = model_info
-            .and_then(|m| m.language.first())
+            .language
+            .first()
             .map_or(String::new(), |l| l.language_name.clone());
         let lang_code = model_info
-            .and_then(|m| m.language.first())
+            .language
+            .first()
             .map_or(String::new(), |l| l.lang_code.clone());
         let iso639 = iso639_3(&lang_code);
         let mut voices = Vec::new();
@@ -1564,9 +1581,11 @@ fn find_dict_dir(dir: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Kokoro config: model.onnx + voices.bin + tokens.txt + (espeak-ng-data/ |
-/// lexicon-*.txt + dict_dir). Quantised releases ship `model.int8.onnx`;
-/// `find_primary_model_onnx` resolves both layouts.
+/// Kokoro config: model.onnx + voices.bin + tokens.txt (+ lexicon-*.txt +
+/// dict_dir on multilingual builds; English-only ships neither — it is an
+/// espeak orphan speaking via the generated lexicon.txt). Quantised
+/// releases ship `model.int8.onnx`; `find_primary_model_onnx` resolves
+/// both layouts.
 fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKokoroModelConfig {
     // Prefer the canonical model.onnx; fall back to a directory scan that
     // skips vocoders and matcha acoustic models (handles model.int8.onnx).
@@ -1575,10 +1594,13 @@ fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKo
         model: Some(model.to_string_lossy().to_string()),
         voices: existing_path(model_dir, "voices.bin"),
         tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-        data_dir: existing_path(model_dir, "espeak-ng-data"),
-        // Multilingual Kokoro (e.g. zh_en) ships lexicon-*.txt and Chinese FST
-        // normalisation; English-only Kokoro uses espeak-ng-data instead, in
-        // which case these resolve to None.
+        // No espeak: sherpa-onnx 2.x removed the runtime phonemizer, so
+        // data_dir (deprecated, ignored, warns on every load) is never
+        // set. English-only Kokoro is an espeak orphan — it speaks via
+        // the generated lexicon.txt (voicegarden-derived, see
+        // sherpa_lexicon.rs). Multilingual Kokoro (e.g. zh_en) ships
+        // lexicon-*.txt + Chinese dict; on English-only builds those
+        // resolve to None.
         lexicon: collect_lexicons(model_dir),
         dict_dir: find_dict_dir(model_dir),
         // length_scale left at default — rate is applied via GenerationConfig.speed.
@@ -1619,7 +1641,7 @@ fn build_supertonic_config(
 }
 
 /// Zipvoice config: encoder + decoder (int8 variants preferred) + tokens +
-/// lexicon + espeak-ng-data, plus the shared `vocos_24khz.onnx` vocoder.
+/// lexicon, plus the shared `vocos_24khz.onnx` vocoder.
 ///
 /// The vocoder is *not* bundled in the zipvoice archive — it lives in the
 /// separate `vocoder-models` release, so it's resolved from the model dir
@@ -1654,7 +1676,8 @@ fn build_zipvoice_config(
         encoder: quant_onnx("encoder"),
         decoder: quant_onnx("decoder"),
         vocoder: Some(vocoder.to_string_lossy().to_string()),
-        data_dir: existing_path(model_dir, "espeak-ng-data"),
+        // No espeak (see build_kokoro_config): lexicon.txt is the only
+        // phonetic front-end under sherpa-onnx 2.x.
         lexicon: existing_path(model_dir, "lexicon.txt"),
         // feat_scale / t_shift / target_rms / guidance_scale: 0.0 makes the
         // C API fall back to the model's trained defaults (same behaviour as
@@ -1876,19 +1899,24 @@ fn build_matcha_config(
         vocoder: vocoder.as_ref().map(|p| p.to_string_lossy().to_string()),
         lexicon: existing_path(model_dir, "lexicon.txt"),
         tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
-        data_dir: existing_path(model_dir, "espeak-ng-data"),
+        // No espeak (see build_kokoro_config): matcha-en is an espeak
+        // orphan speaking via the generated lexicon.txt.
         dict_dir: existing_path(model_dir, "dict"),
         ..Default::default()
     })
 }
 
-/// VITS-family config. The right combination of lexicon / data_dir / dict_dir
+/// VITS-family config. The right combination of lexicon / dict_dir
 /// depends on where the model came from:
 ///
-/// - Piper / GitHub models → espeak-ng-data under 1.x; under 2.x the
-///   lexicon is the only front-end (see the note in the function body).
+/// - Piper / GitHub models → espeak orphans; the lexicon (generated or
+///   bundled) is the only front-end under sherpa-onnx 2.x.
 /// - Chinese/Cantonese models → use `dict/` for jieba segmentation.
 /// - MMS and other VITS → `lexicon.txt` if present, else nothing.
+///
+/// `data_dir` (espeak-ng-data) is never set: sherpa-onnx 2.x removed the
+/// runtime phonemizer, so the field is deprecated, ignored, and only
+/// produces a stderr WARNING when populated.
 fn build_vits_config(
     model_dir: &std::path::Path,
     is_piper_or_github: bool,
@@ -1904,17 +1932,21 @@ fn build_vits_config(
     // Pick the right phonetic back-end.
     //
     // sherpa-onnx 2.x removed the bundled espeak-ng phonemizer: `data_dir`
-    // is deprecated and ignored at runtime, and the text front-ends are
-    // the built-in lexicon (lexicon.txt) or caller-side phonemization.
-    // Piper models ship espeak-ng-data only, so under 2.x they speak only
-    // when a lexicon.txt is supplied alongside — the engine drops one in
-    // from the voicegarden lexicon cache when available (Phase 2).
-    let (data_dir, dict_dir) = if is_piper_or_github {
-        // Piper & friends ship espeak-ng-data; jieba would just complain.
-        (existing_path(model_dir, "espeak-ng-data"), None)
+    // is deprecated and ignored at runtime (every model load prints a
+    // WARNING from offline-tts-vits-model-config.cc when it is set), and
+    // the text front-ends are the built-in lexicon (lexicon.txt) or
+    // caller-side phonemization. Piper models ship espeak-ng-data only,
+    // so under 2.x they speak only when a lexicon.txt is supplied
+    // alongside — the engine drops one in from the voicegarden lexicon
+    // cache when available (Phase 2). We therefore pass data_dir: None
+    // and keep only the dict_dir (jieba) plumbing, which is NOT
+    // deprecated.
+    let dict_dir = if is_piper_or_github {
+        // Piper & friends would use espeak-ng-data; jieba would just complain.
+        None
     } else if is_chinese {
         // Chinese voices need jieba — point dict_dir at the bundled `dict/`.
-        let dict = existing_path(model_dir, "dict").or_else(|| {
+        existing_path(model_dir, "dict").or_else(|| {
             // Some archives nest the dict directory under a child folder.
             std::fs::read_dir(model_dir).ok().and_then(|entries| {
                 entries.filter_map(Result::ok).find_map(|e| {
@@ -1926,18 +1958,16 @@ fn build_vits_config(
                     }
                 })
             })
-        });
-        (existing_path(model_dir, "espeak-ng-data"), dict)
+        })
     } else {
-        // MMS / vanilla VITS: use espeak-ng-data if present, fall back to
-        // a sibling dict/ directory only when lexicon.txt is absent.
+        // MMS / vanilla VITS: fall back to a sibling dict/ directory only
+        // when lexicon.txt is absent.
         let has_lexicon = model_dir.join("lexicon.txt").exists();
-        let dict = if has_lexicon {
+        if has_lexicon {
             None
         } else {
             existing_path(model_dir, "dict")
-        };
-        (existing_path(model_dir, "espeak-ng-data"), dict)
+        }
     };
 
     sherpa_onnx::OfflineTtsVitsModelConfig {
@@ -1950,7 +1980,9 @@ fn build_vits_config(
         // explicit compat lexicon (#82) is merged in when it had to be
         // written outside the model dir.
         lexicon: collect_lexicons_with(model_dir, compat_lexicon),
-        data_dir,
+        // Deprecated + ignored by sherpa-onnx 2.x (see the note above);
+        // kept None so model loads don't warn on stderr.
+        data_dir: None,
         dict_dir,
         ..Default::default()
     }
@@ -2302,15 +2334,15 @@ mod tests {
             cfg.tokens.as_deref(),
             Some(d.path().join("tokens.txt").to_str().unwrap())
         );
-        assert_eq!(
-            cfg.data_dir.as_deref(),
-            Some(d.path().join("espeak-ng-data").to_str().unwrap())
-        );
+        // data_dir (espeak-ng-data) is never set — deprecated + ignored
+        // under sherpa-onnx 2.x, and the no-espeak policy keeps the
+        // voicegarden lexicon as the only front-end.
+        assert!(cfg.data_dir.is_none());
     }
 
     #[test]
     fn test_build_kokoro_config_missing_files_are_none() {
-        // Voices/data_dir are optional — their absence must surface as None
+        // Voices are optional — their absence must surface as None
         // rather than a path to a nonexistent file.
         let d = tempfile::tempdir().unwrap();
         fs::write(d.path().join("model.onnx"), b"x").unwrap();
@@ -2345,6 +2377,9 @@ mod tests {
         assert!(cfg.vocoder.as_deref().unwrap().ends_with("hifigan_v2.onnx"));
         assert!(cfg.lexicon.is_some());
         assert!(cfg.tokens.is_some());
+        // data_dir (espeak-ng-data) is never set — deprecated + ignored
+        // under sherpa-onnx 2.x (pinned for EVERY family)
+        assert!(cfg.data_dir.is_none());
     }
 
     #[test]
@@ -2518,10 +2553,8 @@ mod tests {
             .lexicon
             .as_deref()
             .is_some_and(|p| p.ends_with("lexicon.txt")));
-        assert!(cfg
-            .data_dir
-            .as_deref()
-            .is_some_and(|p| p.ends_with("espeak-ng-data")));
+        // data_dir (espeak-ng-data) never set — see the kokoro test.
+        assert!(cfg.data_dir.is_none());
     }
 
     #[test]
@@ -2848,7 +2881,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_vits_config_piper_uses_espeak_data_no_dict() {
+    fn test_build_vits_config_piper_no_deprecated_data_dir() {
         let d = fake_piper_dir();
         let cfg = build_vits_config(d.path(), true, false, None);
         // The model is found by scanning for the first non-vocoder .onnx.
@@ -2858,8 +2891,9 @@ mod tests {
             .unwrap()
             .ends_with("en_US-amy-low.onnx"));
         assert!(
-            cfg.data_dir.is_some(),
-            "Piper ships espeak-ng-data (data_dir is set but ignored at runtime under 2.x)"
+            cfg.data_dir.is_none(),
+            "data_dir is deprecated and ignored by sherpa-onnx 2.x — passing \
+             it only prints a WARNING on every model load"
         );
         assert!(
             cfg.dict_dir.is_none(),
@@ -2997,6 +3031,16 @@ mod tests {
     }
 
     #[test]
+    fn test_engine_get_voices_without_model_id_is_empty() {
+        // No modelId configured → zero voices, not a phantom "Speaker 0"
+        // that a UI would happily list and then fail to speak with
+        // (mirrors the speak() guard; found by the Dasher-GTK
+        // v1.11.0 integration).
+        let engine = SherpaOnnxEngine::new("{}");
+        assert!(engine.get_voices().expect("voices").is_empty());
+    }
+
+    #[test]
     fn test_engine_construction_accepts_numeric_credential_values() {
         // JSON numbers must be coerced to strings, not silently dropped
         // (a strict HashMap<String, String> parse rejects the whole object).
@@ -3101,12 +3145,13 @@ mod tests {
     }
 
     #[test]
-    fn test_engine_get_voices_for_unloaded_model_id_returns_one_default() {
-        // Unknown modelId: get_voices() still returns one voice (the
-        // default speaker 0) rather than panicking.
+    fn test_engine_get_voices_for_unloaded_model_id_is_empty() {
+        // Unknown modelId: get_voices() must stay total (no panic) but
+        // reports zero voices — a UI must not list a "Speaker 0" that
+        // speak() would then reject with ModelNotFound.
         let engine = SherpaOnnxEngine::new(r#"{"modelId":"doesnt-matter"}"#);
         let voices = engine.get_voices().expect("voices");
-        assert_eq!(voices.len(), 1);
+        assert!(voices.is_empty());
     }
 
     #[test]

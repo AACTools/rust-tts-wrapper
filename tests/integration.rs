@@ -183,10 +183,18 @@ fn test_create_polly_with_all_creds() {
 #[cfg(feature = "sherpaonnx")]
 #[test]
 fn test_sherpaonnx_engine_has_voices() {
-    let engine = factory::create_engine("sherpaonnx", "").expect("sherpaonnx engine");
+    // A configured registry modelId enumerates its speakers from
+    // registry metadata alone (no model download happens here).
+    let engine = factory::create_engine("sherpaonnx", r#"{"modelId":"piper-en_US-amy-low"}"#)
+        .expect("sherpaonnx engine");
     let voices = engine.get_voices().expect("voices");
     assert!(!voices.is_empty(), "SherpaONNX should have voices");
     assert_eq!(voices[0].provider, "sherpaonnx");
+
+    // No modelId configured → zero voices, not a phantom "Speaker 0"
+    // that a UI would list and speak() would then reject.
+    let bare = factory::create_engine("sherpaonnx", "").expect("sherpaonnx engine");
+    assert!(bare.get_voices().expect("voices").is_empty());
 }
 
 #[test]
