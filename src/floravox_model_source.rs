@@ -10,7 +10,7 @@ use crate::local_models::install::{
     MANIFEST_NAME,
 };
 use crate::local_models::{
-    Availability, CancelFn, CatalogueVoice, InstallError, ModelEntry, ModelSource, ProgressFn,
+    CancelFn, CatalogueVoice, InstallError, ModelEntry, ModelSource, ProgressFn,
 };
 use std::path::PathBuf;
 
@@ -56,23 +56,12 @@ fn entry_for(id: &str, m: &sherpa_onnx_models::ModelInfo) -> ModelEntry {
             .is_some_and(|reg| !reg.eq_ignore_ascii_case(&man.sha256))
     });
     let has_sha = m.sha256.as_deref().is_some_and(|s| !s.is_empty());
-    let availability = if installed {
-        Availability::Ready
-    } else if m.deprecated {
-        Availability::Blocked {
-            reason: "deprecated".into(),
-        }
-    } else if m.url.is_empty() {
-        Availability::Blocked {
-            reason: "no-url".into(),
-        }
-    } else if !has_sha {
-        Availability::Blocked {
-            reason: "no-sha256".into(),
-        }
-    } else {
-        Availability::NeedsDownload
-    };
+    let availability = crate::local_models::simple_availability(crate::local_models::ModelFacts {
+        installed,
+        deprecated: m.deprecated,
+        has_url: !m.url.is_empty(),
+        has_sha256: has_sha,
+    });
     ModelEntry {
         engine: "floravox",
         id: id.to_string(),

@@ -93,6 +93,8 @@ pub mod floravox_model_source;
 /// compiled — with no local engine features the catalogue is simply
 /// empty (the FFI symbols exist for ABI stability regardless).
 pub mod local_models;
+#[cfg(feature = "omnivoice-local")]
+pub mod omnivoice_model_source;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]

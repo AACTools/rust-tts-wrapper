@@ -234,7 +234,22 @@ pub fn create_engine(
             #[cfg(feature = "omnivoice-local")]
             {
                 use crate::omnivoice_local_engine::{OmniVoiceLocalEngine, OmniVoiceLocalParams};
-                let creds = parse_credentials(credentials_json);
+                let mut creds = parse_credentials(credentials_json);
+                // #102: a bare modelId resolves to an installed model's
+                // GGUF pair (tts_create_for_model / tts_model_install
+                // flow) — explicit modelPath/codecPath still win
+                if let Some(model_id) = creds.get("modelId").cloned() {
+                    let missing_paths = creds.get("modelPath").is_none_or(String::is_empty)
+                        || creds.get("codecPath").is_none_or(String::is_empty);
+                    if missing_paths {
+                        if let Some((base, codec)) =
+                            crate::omnivoice_model_source::resolve_installed_files(&model_id)
+                        {
+                            creds.entry("modelPath".to_string()).or_insert(base);
+                            creds.entry("codecPath".to_string()).or_insert(codec);
+                        }
+                    }
+                }
                 // Name the first missing path so the error carries the
                 // exact field key (GH #69).
                 for key in ["modelPath", "codecPath"] {
