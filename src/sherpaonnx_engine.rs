@@ -3089,13 +3089,15 @@ mod tests {
         assert!(models.len() > 1700, "registry shrank: {}", models.len());
         // engines matches the family rule: upstream graphs are
         // sherpa-onnx-drivable; AACTools artifacts may list floravox /
-        // rust-tts-wrapper (or a combination) instead
+        // rust-tts-wrapper (or a combination) instead; the GGUF engine
+        // rows (Phase 2) name their own engine
         for m in models.values() {
             assert!(!m.engines.is_empty(), "{} has no engines value", m.id);
             assert!(
                 m.engines.split(',').any(|e| e.trim() == "sherpa-onnx")
                     || m.engines.contains("floravox")
-                    || m.engines.contains("rust-tts-wrapper"),
+                    || m.engines.contains("rust-tts-wrapper")
+                    || m.engines.contains("omnivoice-local"),
                 "{} has an unknown engines value: {}",
                 m.id,
                 m.engines

@@ -16,6 +16,7 @@ mod sherpaonnx_tests {
     #[derive(Clone, Debug)]
     struct ModelInfo {
         model_type: String,
+        engines: String,
         name: String,
         sample_rate: u32,
         num_speakers: u32,
@@ -31,6 +32,7 @@ mod sherpaonnx_tests {
                 key.clone(),
                 ModelInfo {
                     model_type: m.model_type.clone(),
+                    engines: m.engines.clone(),
                     name: m.name.clone(),
                     sample_rate: m.sample_rate,
                     num_speakers: m.num_speakers,
@@ -113,6 +115,16 @@ mod sherpaonnx_tests {
             // student sidecars), not sherpa-onnx — registry 1.1.0 added
             // them; they are deliberately absent from this engine.
             if info.model_type.starts_with("floravox") {
+                continue;
+            }
+            // GGUF-engine rows (registry 1.3.0, #102 Phase 2): driven
+            // by their own engines via the model sources, never by
+            // the sherpa-onnx graph configs
+            if info
+                .engines
+                .split(',')
+                .any(|e| e.trim() == "omnivoice-local")
+            {
                 continue;
             }
             assert!(

@@ -68,7 +68,13 @@ ssml-expand = ["dep:floravox-ssml"]
 # 600+ languages, voice cloning, voice design, GGUF models.
 # Requires the omnivoice.cpp shared library; see VOICE_CLONING_PLAN.md
 # for build + model setup and the critical --duration finding.
-omnivoice-local = ["dep:hound", "ssml-expand"]
+omnivoice-local = [
+  "dep:hound",
+  "ssml-expand",
+  # the model installer (#102 Phase 2): shared machinery + registry rows
+  "dep:ureq", "dep:tar", "dep:bzip2-rs", "dep:flate2", "dep:fs2", "dep:sha2",
+  "dep:sherpa-onnx-models",
+]
 sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization",
     # the model installer (#102): HTTP with resume, archives, checksums,
     # disk preflight — same client family as voicegarden-lexicons (ureq)
@@ -159,7 +165,7 @@ ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, fea
 hound = { version = "3", optional = true }
 floravox-ssml = { version = "0.8.8", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
-sherpa-onnx-models = { version = "1.2", optional = true }
+sherpa-onnx-models = { version = "1.3", optional = true }
 # floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha, Kokoro)
 # with measured word timings. Default features (onnx, misaki, uroman)
 # are intentional: misaki is the only TokenPhonemizer available at this

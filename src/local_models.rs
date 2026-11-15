@@ -315,26 +315,58 @@ impl std::fmt::Display for InstallError {
 
 /// Every compiled-in local engine's model source, in stable order.
 #[must_use]
+// the push form is CORRECT here: the combinatorial-arm form silently
+// dropped engines in pairing builds (loop-1 review, proven by probe)
+#[allow(clippy::vec_init_then_push, unused_mut)]
 pub fn sources() -> Vec<&'static dyn ModelSource> {
-    #[cfg(all(feature = "sherpaonnx", feature = "floravox"))]
-    {
-        vec![
-            &crate::sherpa_model_source::SHERPA_SOURCE,
-            &crate::floravox_model_source::FLORAVOX_SOURCE,
-        ]
+    let mut v: Vec<&'static dyn ModelSource> = Vec::new();
+    #[cfg(feature = "sherpaonnx")]
+    v.push(&crate::sherpa_model_source::SHERPA_SOURCE);
+    #[cfg(feature = "floravox")]
+    v.push(&crate::floravox_model_source::FLORAVOX_SOURCE);
+    #[cfg(feature = "omnivoice-local")]
+    v.push(&crate::omnivoice_model_source::OMNIVOICE_SOURCE);
+    v
+}
+
+/// The direct availability ladder for engines without bundle tiers
+/// (floravox, omnivoice): installed → ready; registry-gated states →
+/// blocked with the parameterized reason; else installable now.
+/// (Sherpa's readiness ladder stays in sherpa_catalog — it has bundle
+/// tiers this one does not.)
+#[must_use]
+pub(crate) fn simple_availability(facts: ModelFacts) -> Availability {
+    if facts.installed {
+        Availability::Ready
+    } else if facts.deprecated {
+        Availability::Blocked {
+            reason: "deprecated".into(),
+        }
+    } else if !facts.has_url {
+        Availability::Blocked {
+            reason: "no-url".into(),
+        }
+    } else if !facts.has_sha256 {
+        Availability::Blocked {
+            reason: "no-sha256".into(),
+        }
+    } else {
+        Availability::NeedsDownload
     }
-    #[cfg(all(feature = "sherpaonnx", not(feature = "floravox")))]
-    {
-        vec![&crate::sherpa_model_source::SHERPA_SOURCE]
-    }
-    #[cfg(all(not(feature = "sherpaonnx"), feature = "floravox"))]
-    {
-        vec![&crate::floravox_model_source::FLORAVOX_SOURCE]
-    }
-    #[cfg(not(any(feature = "sherpaonnx", feature = "floravox")))]
-    {
-        Vec::new()
-    }
+}
+
+/// The registry facts the [`simple_availability`] ladder reads.
+#[derive(Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
+pub(crate) struct ModelFacts {
+    /// files present in the engine's model dir
+    pub installed: bool,
+    /// the registry row is deprecated
+    pub deprecated: bool,
+    /// the row carries a download url
+    pub has_url: bool,
+    /// the row carries a main-file sha256
+    pub has_sha256: bool,
 }
 
 /// Look an id up across every compiled-in engine (or in the one named
@@ -365,7 +397,11 @@ pub fn find_source(
 // via a shared internal feature.
 // ──────────────────────────────────────────────────────────────────
 
-#[cfg(any(feature = "sherpaonnx", feature = "floravox"))]
+#[cfg(any(
+    feature = "sherpaonnx",
+    feature = "floravox",
+    feature = "omnivoice-local"
+))]
 pub(crate) mod install {
     use super::{CancelFn, InstallError, ProgressFn};
     use std::io::{Read, Write as _};
@@ -795,15 +831,29 @@ pub(crate) mod install {
     }
 }
 
+/// Env-mutation serializer for tests that set TTS_MODELS_DIR
+/// (process-wide; parallel set/restore races make one test see
+/// another's restore). Shared by every model-source test module.
+#[cfg(test)]
+pub(crate) mod test_util {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the lock; poisoned locks recover (a panicked test must
+    /// not brick the others).
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Serializes the env-mutating catalogue tests (TTS_MODELS_DIR is
-    /// process-wide; parallel set/restore races make one test see the
-    /// other's restore — the live suites document the same constraint
-    /// with --test-threads=1; unit tests get a lock instead).
-    pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // env-mutating tests take crate::local_models::test_util::env_lock()
+    // (the ONE lock — a twin here would let a future test serialize on
+    // the wrong mutex and reintroduce the race; loop-2 review)
 
     // ── availability vocabulary ──
 
@@ -889,9 +939,7 @@ mod tests {
         // set/restore around the call (process env, like the
         // VOICEGARDEN_LEXICON_DIR tests — run with --test-threads=1
         // when combining env-sensitive suites)
-        let _env = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _env = crate::local_models::test_util::env_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prior = std::env::var_os("TTS_MODELS_DIR");
         std::env::set_var("TTS_MODELS_DIR", tmp.path());
@@ -1282,9 +1330,7 @@ mod install_tests {
 #[cfg(feature = "floravox")]
 #[test]
 fn floravox_catalogue_is_experimental() {
-    let _env = crate::local_models::tests::ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _env = crate::local_models::test_util::env_lock();
     let tmp = tempfile::tempdir().unwrap();
     let prior = std::env::var_os("TTS_MODELS_DIR");
     std::env::set_var("TTS_MODELS_DIR", tmp.path());
@@ -1317,4 +1363,41 @@ fn floravox_catalogue_is_experimental() {
         crate::floravox_model_source::FLORAVOX_SOURCE.engine_id(),
         "floravox"
     );
+}
+
+/// The omnivoice source (#102 Phase 2): the published GGUF pair,
+/// catalogue + two-file install, every byte checksum-gated.
+#[cfg(feature = "omnivoice-local")]
+#[test]
+fn omnivoice_catalogue_and_install_shape() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = crate::local_models::test_util::env_lock();
+    let prior = std::env::var_os("TTS_MODELS_DIR");
+    std::env::set_var("TTS_MODELS_DIR", tmp.path());
+    let source = &crate::omnivoice_model_source::OMNIVOICE_SOURCE;
+    let entries = source.list();
+    match prior {
+        Some(p) => std::env::set_var("TTS_MODELS_DIR", p),
+        None => std::env::remove_var("TTS_MODELS_DIR"),
+    }
+    // the registry (1.3.0) carries exactly one omnivoice row
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    let e = &entries[0];
+    assert_eq!(e.id, "omnivoice-base-q8_0");
+    assert_eq!(e.engine, "omnivoice-local");
+    assert_eq!(e.availability, Availability::NeedsDownload);
+    assert!(!e.installed);
+    assert!(!e.experimental);
+    // the download total covers base + codec
+    assert!(e.filesize_mb > 1300.0, "total MB: {}", e.filesize_mb);
+    // the models dir honors TTS_MODELS_DIR + the engine segment
+    let dir = source.models_dir();
+    assert!(dir.ends_with("omnivoice-local"), "{}", dir.display());
+    // uninstall of nothing is ModelNotFound
+    assert!(matches!(
+        source.uninstall("omnivoice-base-q8_0"),
+        Err(InstallError::ModelNotFound)
+    ));
+    // an unknown id never resolves
+    assert!(source.entry("zzz").is_none());
 }

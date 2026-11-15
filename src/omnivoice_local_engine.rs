@@ -391,9 +391,13 @@ impl TtsEngine for OmniVoiceLocalEngine {
         // 'british accent') when the runtime's vocabulary supports it.
         // An explicitly-set params.instruct always wins over the derived
         // accent (the user chose it deliberately).
-        let lang_override = voice.map(bcp47_to_omnivoice_lang);
+        // "default" (the installed-voice catalogue's id) means NO
+        // language override — engine auto-detect, not a doomed native
+        // call through the GH #64 retry (loop-1 review finding 6)
+        let voice_sel = voice.filter(|v| !v.is_empty() && *v != "default");
+        let lang_override = voice_sel.map(bcp47_to_omnivoice_lang);
         let lang_opt = lang_override.as_deref().filter(|s| !s.is_empty());
-        let accent_instruct = voice.and_then(bcp47_region_to_instruct);
+        let accent_instruct = voice_sel.and_then(bcp47_region_to_instruct);
 
         let pcm_f32 = self
             .synthesize_ov(&plain, lang_opt, rate, accent_instruct.as_deref())
@@ -520,7 +524,7 @@ mod tests {
     #[test]
     fn params_default() {
         let p = OmniVoiceLocalParams::default();
-        assert!(p.model_path.is_empty());
+        assert!(p.model_path.is_empty(), "default empty");
         assert_eq!(p.num_steps, 32);
         assert_eq!(p.seed, 42);
     }
