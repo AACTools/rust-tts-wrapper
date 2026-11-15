@@ -1581,9 +1581,11 @@ fn find_dict_dir(dir: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Kokoro config: model.onnx + voices.bin + tokens.txt + (espeak-ng-data/ |
-/// lexicon-*.txt + dict_dir). Quantised releases ship `model.int8.onnx`;
-/// `find_primary_model_onnx` resolves both layouts.
+/// Kokoro config: model.onnx + voices.bin + tokens.txt (+ lexicon-*.txt +
+/// dict_dir on multilingual builds; English-only ships neither — it is an
+/// espeak orphan speaking via the generated lexicon.txt). Quantised
+/// releases ship `model.int8.onnx`; `find_primary_model_onnx` resolves
+/// both layouts.
 fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKokoroModelConfig {
     // Prefer the canonical model.onnx; fall back to a directory scan that
     // skips vocoders and matcha acoustic models (handles model.int8.onnx).
@@ -1596,9 +1598,9 @@ fn build_kokoro_config(model_dir: &std::path::Path) -> sherpa_onnx::OfflineTtsKo
         // data_dir (deprecated, ignored, warns on every load) is never
         // set. English-only Kokoro is an espeak orphan — it speaks via
         // the generated lexicon.txt (voicegarden-derived, see
-        // sherpa_lexicon.rs).
-        // Multilingual Kokoro (e.g. zh_en) ships lexicon-*.txt and Chinese
-        // FST normalisation; in which case these resolve to None.
+        // sherpa_lexicon.rs). Multilingual Kokoro (e.g. zh_en) ships
+        // lexicon-*.txt + Chinese dict; on English-only builds those
+        // resolve to None.
         lexicon: collect_lexicons(model_dir),
         dict_dir: find_dict_dir(model_dir),
         // length_scale left at default — rate is applied via GenerationConfig.speed.
@@ -1639,7 +1641,7 @@ fn build_supertonic_config(
 }
 
 /// Zipvoice config: encoder + decoder (int8 variants preferred) + tokens +
-/// lexicon + espeak-ng-data, plus the shared `vocos_24khz.onnx` vocoder.
+/// lexicon, plus the shared `vocos_24khz.onnx` vocoder.
 ///
 /// The vocoder is *not* bundled in the zipvoice archive — it lives in the
 /// separate `vocoder-models` release, so it's resolved from the model dir
@@ -2375,6 +2377,9 @@ mod tests {
         assert!(cfg.vocoder.as_deref().unwrap().ends_with("hifigan_v2.onnx"));
         assert!(cfg.lexicon.is_some());
         assert!(cfg.tokens.is_some());
+        // data_dir (espeak-ng-data) is never set — deprecated + ignored
+        // under sherpa-onnx 2.x (pinned for EVERY family)
+        assert!(cfg.data_dir.is_none());
     }
 
     #[test]
