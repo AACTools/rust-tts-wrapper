@@ -25,16 +25,16 @@ use crate::types::SherpaModelInfo;
 /// each entry's `bcp47`). NOT the validated allowlist (that is
 /// [`crate::sherpa_lang::LANG_BUNDLES`]); this set distinguishes
 /// `blocked:bundle-not-validated` (data exists, validation pending)
-/// from `blocked:no-bundle` (no data at all). Sync when
+/// from `blocked:no-bundle` (no data at all). The seven validated
+/// locales (de en fr es pt it ru) never reach this set — their
+/// allowlist row answers first — so they are not listed. Sync when
 /// voicegarden-lexicons publishes new languages — both manifests.
 const PUBLISHED_BUNDLE_LOCALES: &[&str] = &[
-    // base manifest
-    "ca", "cs", "de", "es", "fa", "fr", "it", "nl", "pt", "ru", "sv", "sw",
+    // base manifest (unvalidated rows only)
+    "ca", "cs", "fa", "nl", "sv", "sw",
     // expanded-only additions (bcp47 primary subtags)
     "ar", "bn", "da", "el", "fi", "he", "hi", "id", "is", "nb", "pl", "ro", "sk", "sl", "ta", "tr",
     "ur",
-    // de appears in both; en has a validated allowlist row since the
-    // codepoints migration, so English never reaches this set
 ];
 
 /// Compute the readiness value for one registry model.
@@ -227,13 +227,27 @@ mod tests {
             ),
             "blocked:bundle-not-validated"
         );
+        // French flipped with the v0.4.0 locale validation: bundle
+        // data existed all along; the validation made it usable.
+        // Without the front-end the validated data exists but this
+        // build lacks it (same reason class as German)
+        #[cfg(feature = "sherpa-g2p")]
         assert_eq!(
             readiness_for(
                 &model("piper-fr_FR-siwis-medium", "vits", "fr"),
                 true,
                 false
             ),
-            "blocked:bundle-not-validated"
+            "needs_bundle"
+        );
+        #[cfg(not(feature = "sherpa-g2p"))]
+        assert_eq!(
+            readiness_for(
+                &model("piper-fr_FR-siwis-medium", "vits", "fr"),
+                true,
+                false
+            ),
+            "blocked:g2p-unavailable"
         );
 
         // no bundle for the locale at all (Hungarian: neither manifest)

@@ -3142,12 +3142,11 @@ mod tests {
     }
 
     /// The compat gate over the full pinned registry: exactly the
-    /// German + English single-language vits-family models qualify
-    /// (German: 51 piper + coqui-de-css10; English: the piper en
-    /// voices added by the codepoints migration); the multilingual
-    /// supertonic and every other model do not. Resolution itself is
-    /// pinned in sherpa_lang's registry test; this pins the
-    /// model-family half.
+    /// validated-locale single-language vits-family models qualify
+    /// (de/en since the codepoints migration; fr/es/pt/it/ru since
+    /// the v0.4.0 locale flips); the multilingual supertonic and
+    /// every other model do not. Resolution itself is pinned in
+    /// sherpa_lang's registry test; this pins the model-family half.
     #[test]
     fn test_compat_gate_against_full_registry() {
         let mut eligible = 0;
@@ -3181,14 +3180,17 @@ mod tests {
             if gated {
                 eligible += 1;
                 assert!(
-                    row.is_some_and(|b| matches!(b.bcp47, "de" | "en")),
+                    row.is_some_and(|b| matches!(
+                        b.bcp47,
+                        "de" | "en" | "fr" | "es" | "pt" | "it" | "ru"
+                    )),
                     "id {id}"
                 );
             }
         }
         assert_eq!(
-            eligible, 200,
-            "de+en compat-eligible model count moved (52 de + 148 en)"
+            eligible, 307,
+            "validated-locale compat-eligible model count moved"
         );
     }
 
