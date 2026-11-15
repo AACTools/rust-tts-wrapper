@@ -908,19 +908,25 @@ fn en_groups_ok(int_part: &str) -> bool {
     })
 }
 
-/// Mixed alphanumerics split into alphabetic runs (words) + digit runs
-/// (expanded): "COVID-19" → "covid nineteen", "A4" → "a four", "MP3"
-/// → "mp three", "b2b" → "b two b". Mirrors the German
-/// `split_digit_runs` (#82 loop reviews); the alphabetic runs are
-/// words the dictionary/WFST answers (or letter-spells — never a
-/// wrong number). Ordinal-shaped tokens (digits first, short alpha
-/// suffix last: "48th", "1920s") DROP rather than speak a wrong
-/// cardinal + letter names — proper ordinals need their own rules.
-fn en_split_digit_runs(core: &str) -> Option<String> {
-    // only for ALPHA+digit mixes ("MP3", "COVID-19") — a pure-digit
-    // core that en_normalize already rejected (malformed separators
-    // like "12,34.5") must stay dropped, not resurrect run-by-run
-    if !core.chars().any(|c| c.is_ascii_alphabetic()) {
+/// Shared alpha/digit run-splitting for mixed-alphanumeric numerals
+/// (`COVID-19` → covid + nineteen, `MP3` → mp + three). One
+/// core for every language — this was a near-verbatim duplicate between
+/// the German and English normalizers before the unification; the two
+/// per-language behaviors are flags, pinned byte-for-byte by both
+/// languages' existing tests:
+/// - `require_alpha`: English rejects pure-digit cores (the strict
+///   numeral shapes already failed `en_normalize`); German's chained
+///   try-order never routes pure digits here
+/// - `drop_ordinals`: English drops the digit-first/short-alpha-suffix
+///   shape ("48th" — a cardinal + letter names would be wrong); German
+///   has no such shape
+fn split_runs_with(
+    core: &str,
+    require_alpha: bool,
+    drop_ordinals: bool,
+    cardinal: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if require_alpha && !core.chars().any(|c| c.is_ascii_alphabetic()) {
         return None;
     }
     let mut runs: Vec<String> = Vec::new();
@@ -946,7 +952,8 @@ fn en_split_digit_runs(core: &str) -> Option<String> {
     }
     // ordinal shape: digit run first, short alphabetic suffix last
     // ("48th", "1920s") — a cardinal + letter names would be wrong
-    if runs.len() >= 2
+    if drop_ordinals
+        && runs.len() >= 2
         && runs[0].chars().next().is_some_and(|c| c.is_ascii_digit())
         && runs
             .last()
@@ -957,12 +964,24 @@ fn en_split_digit_runs(core: &str) -> Option<String> {
     let mut joined: Vec<String> = Vec::with_capacity(runs.len());
     for part in runs {
         if part.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            joined.push(en_integer(&part)?);
+            joined.push(cardinal(&part)?);
         } else {
             joined.push(part.to_lowercase());
         }
     }
     (!joined.is_empty()).then(|| joined.join(" "))
+}
+
+/// Mixed alphanumerics split into alphabetic runs (words) + digit runs
+/// (expanded): "COVID-19" → "covid nineteen", "A4" → "a four", "MP3"
+/// → "mp three", "b2b" → "b zwei b". Mirrors the #82 loop reviews; the
+/// alphabetic runs are words the dictionary/WFST answers (or
+/// letter-spells — never a wrong number). Ordinal-shaped tokens
+/// (digits first, short alpha suffix last: "48th", "1920s") DROP
+/// rather than speak a wrong cardinal + letter names — proper
+/// ordinals need their own rules.
+fn en_split_digit_runs(core: &str) -> Option<String> {
+    split_runs_with(core, true, true, en_integer)
 }
 
 fn en_d(c: char) -> &'static str {
@@ -1731,36 +1750,8 @@ fn digits_plus_suffix(core: &str) -> Option<String> {
 /// alphabet) — without this split such tokens fall through to the
 /// English letter-name speller (live-verified: "MP3" → "ɛmpiːθriː").
 fn split_digit_runs(core: &str) -> Option<String> {
-    let mut runs: Vec<String> = Vec::new();
-    let mut run = String::new();
-    let mut run_is_digits = false;
-    for ch in core.chars() {
-        let is_digit = ch.is_ascii_digit();
-        if !is_digit && !ch.is_ascii_alphabetic() {
-            // inner separators (the hyphen in "COVID-19") end the run
-            if !run.is_empty() {
-                runs.push(std::mem::take(&mut run));
-            }
-            continue;
-        }
-        if !run.is_empty() && is_digit != run_is_digits {
-            runs.push(std::mem::take(&mut run));
-        }
-        run_is_digits = is_digit;
-        run.push(ch);
-    }
-    if !run.is_empty() {
-        runs.push(run);
-    }
-    let mut joined: Vec<String> = Vec::with_capacity(runs.len());
-    for part in runs {
-        if part.chars().next().is_some_and(|c| c.is_ascii_digit()) {
-            joined.push(digits_to_german(&part)?);
-        } else {
-            joined.push(part.to_lowercase());
-        }
-    }
-    (!joined.is_empty()).then(|| joined.join(" "))
+    // German: no alpha gate, no ordinal shape (see split_runs_with)
+    split_runs_with(core, false, false, digits_to_german)
 }
 
 /// 0..=999_999_999 in German words (thousands dots stripped by the

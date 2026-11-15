@@ -721,8 +721,13 @@ impl FloravoxEngine {
     }
 }
 
-/// Default models dir: `~/.rust-tts-wrapper/floravox`.
-fn default_models_dir() -> PathBuf {
+/// Default models dir: `TTS_MODELS_DIR` overrides the base
+/// (sandbox/Flatpak — #102, same convention as sherpa), then
+/// `~/.rust-tts-wrapper/floravox`.
+pub(crate) fn default_models_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os("TTS_MODELS_DIR") {
+        return PathBuf::from(base).join("floravox");
+    }
     ["HOME", "USERPROFILE"]
         .iter()
         .find_map(|k| std::env::var_os(k).map(|h| (!h.is_empty()).then(|| PathBuf::from(h))))
