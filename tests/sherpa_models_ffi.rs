@@ -78,9 +78,18 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
         registry["piper-en_US-amy-low"]["g2p_enabled"],
         serde_json::Value::Bool(cfg!(feature = "sherpa-g2p"))
     );
+    // French flipped with the v0.4.0 locale validation: needs_bundle
+    // with the front-end, blocked:g2p-unavailable without (same
+    // reason class as German — validated data, absent front-end)
+    #[cfg(feature = "sherpa-g2p")]
     assert_eq!(
         registry["piper-fr_FR-siwis-medium"]["readiness"],
-        serde_json::Value::String("blocked:bundle-not-validated".to_string())
+        serde_json::Value::String("needs_bundle".to_string())
+    );
+    #[cfg(not(feature = "sherpa-g2p"))]
+    assert_eq!(
+        registry["piper-fr_FR-siwis-medium"]["readiness"],
+        serde_json::Value::String("blocked:g2p-unavailable".to_string())
     );
     // Hungarian: in neither voicegarden manifest
     assert_eq!(
@@ -184,6 +193,21 @@ fn provision_fetches_the_english_bundle() {
     use rust_tts_wrapper::tts_provision_sherpa_g2p_bundle;
     assert!(tts_provision_sherpa_g2p_bundle(
         c"piper-en_US-amy-low".as_ptr()
+    ));
+}
+
+#[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
+#[test]
+#[ignore = "live: provisions from the network or cache (set VOICEGARDEN_LEXICON_DIR to skip the download)"]
+fn provision_fetches_the_v040_locale_bundles() {
+    // the #92 v0.4.0 locale flips: one probe per archive family —
+    // fra (expanded) and ru (base, the only base-manifest row)
+    use rust_tts_wrapper::tts_provision_sherpa_g2p_bundle;
+    assert!(tts_provision_sherpa_g2p_bundle(
+        c"piper-fr_FR-siwis-medium".as_ptr()
+    ));
+    assert!(tts_provision_sherpa_g2p_bundle(
+        c"piper-ru_RU-dmitri-medium".as_ptr()
     ));
 }
 

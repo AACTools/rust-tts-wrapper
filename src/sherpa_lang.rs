@@ -104,6 +104,49 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         key: "eng-US",
         validated: true, // A/B + whisper round-trip (piper-en_US-amy-low)
     },
+    // ── v0.4.0 locale flips (#92 finale): A/B + whisper round-trips
+    // against the voicegarden-lexicons v0.4.0 bundles — 0 words
+    // dropped on every probe; whisper-small/medium confirm the
+    // numbers spoken in-language (es/ru exact, fr/it/pt number words
+    // audible). The RussianNormalizer lands with these rows (comma
+    // decimals, paucal agreement).
+    LangBundle {
+        bcp47: "fr",
+        archive: Archive::Expanded,
+        key: "fra",
+        validated: true, // piper-fr_FR-siwis-medium: quarante-deux + un virgule cinq
+    },
+    LangBundle {
+        bcp47: "es",
+        archive: Archive::Expanded,
+        // spa-ES is the default for ALL es voices incl. es_MX/es_AR —
+        // Castilian phonemes (θ, no seseo) for LatAm voices; primary-
+        // subtag resolution cannot split variants; a per-variant row
+        // needs region-aware resolution (follow-up)
+        key: "spa-ES",
+        validated: true, // piper-es_ES-sharvard-medium: "Tengo 42 casas" exact
+    },
+    LangBundle {
+        bcp47: "pt",
+        archive: Archive::Expanded,
+        // por-BR is the default for ALL pt voices incl. pt_PT —
+        // Brazilian phonemes for European voices (audible vowel /
+        // final-s differences); same variant-resolution follow-up
+        key: "por-BR",
+        validated: true, // piper-pt_BR-faber-medium: "Eu tenho 42 casas" (medium, exact)
+    },
+    LangBundle {
+        bcp47: "it",
+        archive: Archive::Expanded,
+        key: "ita",
+        validated: true, // piper-it_IT-paola-medium: "ho 42 case" (medium, exact)
+    },
+    LangBundle {
+        bcp47: "ru",
+        archive: Archive::Base,
+        key: "ru",
+        validated: true, // piper-ru_RU-dmitri-medium: "У меня 42 дома" exact
+    },
 ];
 
 /// Primary language subtag of a lang code, lowercased: `"de"` from
@@ -118,8 +161,9 @@ fn primary_subtag(lang_code: &str) -> String {
 }
 
 /// All allowlist rows for a language, in preference order (default
-/// first). Empty when the language has no bundle — English today, which
-/// stays on the #66/#67 lexicon path.
+/// first). Empty when the language has no bundle (any locale outside
+/// de/en/fr/es/pt/it/ru — pl has a published-but-unvalidated bundle,
+/// Hungarian has none at all).
 #[must_use]
 pub fn bundles_for_language(lang_code: &str) -> Vec<&'static LangBundle> {
     let primary = primary_subtag(lang_code);
@@ -127,8 +171,8 @@ pub fn bundles_for_language(lang_code: &str) -> Vec<&'static LangBundle> {
 }
 
 /// The default bundle row for a model: the first allowlist row for the
-/// model's language. `None` for languages without a bundle (English
-/// today), bilingual `<lang>_en` compounds (checked on the id, the only
+/// model's language. `None` for languages without a bundle, bilingual
+/// `<lang>_en` compounds (checked on the id, the only
 /// id-based decision here), models with no language metadata, and
 /// MULTI-language models: resolution requires every language entry to
 /// share one primary subtag. A 31-language supertonic voice or a zh_en
@@ -402,28 +446,33 @@ mod tests {
             let single_enabled = info.language.len() == 1
                 && matches!(
                     primary_subtag(&info.language[0].lang_code).as_str(),
-                    "de" | "en"
+                    "de" | "en" | "fr" | "es" | "pt" | "it" | "ru"
                 )
                 && !crate::sherpaonnx_engine::is_bilingual_en_compound(&id.to_ascii_lowercase());
             if single_enabled {
                 de_single += 1;
                 let b = resolved.expect("single-language enabled model resolves");
                 assert!(
-                    matches!((b.key, b.archive), ("deu" | "eng-US", Archive::Expanded)),
+                    matches!(
+                        (b.key, b.archive),
+                        (
+                            "deu" | "eng-US" | "fra" | "spa-ES" | "por-BR" | "ita",
+                            Archive::Expanded
+                        ) | ("ru", Archive::Base)
+                    ),
                     "id {id}"
                 );
             } else {
                 assert!(resolved.is_none(), "id {id} must not resolve");
             }
         }
-        // 52 de + 170 en single-language entries resolve (en added in
-        // the codepoints migration; resolution is NOT family-gated, so
-        // the 222 includes 22 non-vits en models — matcha/kokoro/
-        // pocket/kitten/mms_* — that the engine's 200-strong
-        // compat-lexicon pin excludes). Review on registry bumps.
+        // 52 de + 277 en/fr/es/pt/it/ru single-language entries
+        // resolve (the #92 v0.4.0 locale flips). Resolution is NOT
+        // family-gated — the engine's compat-lexicon pin covers the
+        // vits-family subset separately. Review on registry bumps.
         assert_eq!(
-            de_single, 222,
-            "de+en single-language model count moved (52 de + 170 en)"
+            de_single, 329,
+            "validated-locale single-language model count moved"
         );
     }
 
@@ -435,10 +484,15 @@ mod tests {
         // resolve the other bundle via bcp47 matching.
         for b in LANG_BUNDLES {
             match b.archive {
-                Archive::Base => assert_eq!(b.key, "de"),
-                Archive::Expanded => {
-                    assert!(matches!(b.key, "deu" | "eng-US"), "{}", b.key);
-                }
+                Archive::Base => assert!(matches!(b.key, "de" | "ru"), "{}", b.key),
+                Archive::Expanded => assert!(
+                    matches!(
+                        b.key,
+                        "deu" | "eng-US" | "fra" | "spa-ES" | "por-BR" | "ita"
+                    ),
+                    "{}",
+                    b.key
+                ),
             }
             assert_eq!(primary_subtag(b.bcp47), b.bcp47, "rows use minimal tags");
         }

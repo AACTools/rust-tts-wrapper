@@ -8,8 +8,9 @@
 //! ladder, handed to sherpa as per-sentence Unicode codepoints. OOV
 //! words are SPOKEN (the lexicon front-end drops them — upstream
 //! k2-fsa/sherpa-onnx#4139); numbers are normalized to words in the
-//! bundle's language (per-language `LangNormalizer`s; German since
-//! #82, English since the #92 codepoints migration).
+//! bundle's language (per-language `LangNormalizer`s: German since
+//! #82, English since the #92 codepoints migration, fr/es/pt/it/ru
+//! since the #92 v0.4.0 locale flips, Russian included).
 //!
 //! The codepoint contract (pinned from sherpa-onnx 2.0.1
 //! `PiperPhonemesToIdsVits`): the caller supplies the BARE phoneme
@@ -193,6 +194,7 @@ pub fn normalizer_for(lang: &str) -> Box<dyn LangNormalizer> {
         "pt" => Box::new(PortugueseNormalizer),
         "it" => Box::new(ItalianNormalizer),
         "en" => Box::new(EnglishNormalizer),
+        "ru" => Box::new(RussianNormalizer),
         _ => Box::new(IdentityNormalizer),
     }
 }
@@ -1071,6 +1073,212 @@ fn en_100(n: u64) -> String {
         return T[t].into();
     }
     format!("{}-{}", T[t], U[u])
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Russian
+// ──────────────────────────────────────────────────────────────────
+
+/// Russian digits: comma decimals ("3,5" → "три запятая пять", the
+/// Komma convention — post-comma digits read individually), no dot
+/// separator (a dot is not a Russian numeral separator → drop, never
+/// guess); space thousands cannot survive whitespace tokenization, so
+/// plain integers carry it. Cardinals are SPACE-SEPARATED words
+/// ("сорок два") — Russian orthography, and the lexicon answers
+/// individual words. Feminine одна/две in the thousands position
+/// ("двадцать одна тысяча"); thousand/million agreement follows the
+/// 1/2-4/5+ paucal rules.
+struct RussianNormalizer;
+
+impl LangNormalizer for RussianNormalizer {
+    fn lang(&self) -> &'static str {
+        "ru"
+    }
+    fn normalize_numeric(&self, core: &str) -> Option<String> {
+        ru_normalize(core)
+    }
+}
+
+fn ru_normalize(core: &str) -> Option<String> {
+    // decimal: comma ("3,5" → "три запятая пять")
+    if let Some((int_part, frac)) = core.split_once(',') {
+        let ok = !int_part.is_empty()
+            && int_part.chars().all(|c| c.is_ascii_digit())
+            && !frac.is_empty()
+            && frac.chars().all(|c| c.is_ascii_digit());
+        if !ok {
+            return None; // malformed separators — drop, not guess
+        }
+        let mut out = ru_integer(int_part)?;
+        out.push_str(" запятая");
+        for c in frac.chars() {
+            out.push(' ');
+            out.push_str(ru_d(c));
+        }
+        return Some(out);
+    }
+    // a dot is not a Russian numeral separator (space thousands
+    // cannot survive whitespace tokenization; dot decimals are not
+    // standard) — drop rather than guess which was meant
+    if core.contains('.') {
+        return None;
+    }
+    if core.is_empty() || core.chars().any(|c| !c.is_ascii_digit()) {
+        return None;
+    }
+    ru_integer(core)
+}
+
+fn ru_d(c: char) -> &'static str {
+    const D: [&str; 10] = [
+        "ноль",
+        "один",
+        "два",
+        "три",
+        "четыре",
+        "пять",
+        "шесть",
+        "семь",
+        "восемь",
+        "девять",
+    ];
+    D[c.to_digit(10).unwrap_or(0) as usize]
+}
+
+/// Russian plural agreement: 1/2-4/5+ (paucal), with the 11-14
+/// exception. 0 → form 3 ("пятью и более").
+fn ru_plural(n: u64) -> usize {
+    if n % 100 / 10 == 1 {
+        return 2;
+    }
+    match n % 10 {
+        1 => 0,
+        2..=4 => 1,
+        _ => 2,
+    }
+}
+
+/// 0..=999_999_999 as space-separated Russian words. `None` out of
+/// range or non-digit input.
+const RU_U: [&str; 10] = [
+    "ноль",
+    "один",
+    "два",
+    "три",
+    "четыре",
+    "пять",
+    "шесть",
+    "семь",
+    "восемь",
+    "девять",
+];
+/// feminine units (the thousands position: одна/две)
+const RU_UF: [&str; 10] = [
+    "ноль",
+    "одна",
+    "две",
+    "три",
+    "четыре",
+    "пять",
+    "шесть",
+    "семь",
+    "восемь",
+    "девять",
+];
+const RU_TEEN: [&str; 10] = [
+    "десять",
+    "одиннадцать",
+    "двенадцать",
+    "тринадцать",
+    "четырнадцать",
+    "пятнадцать",
+    "шестнадцать",
+    "семнадцать",
+    "восемнадцать",
+    "девятнадцать",
+];
+const RU_TENS: [&str; 10] = [
+    "",
+    "",
+    "двадцать",
+    "тридцать",
+    "сорок",
+    "пятьдесят",
+    "шестьдесят",
+    "семьдесят",
+    "восемьдесят",
+    "девяносто",
+];
+const RU_HUND: [&str; 10] = [
+    "",
+    "сто",
+    "двести",
+    "триста",
+    "четыреста",
+    "пятьсот",
+    "шестьсот",
+    "семьсот",
+    "восемьсот",
+    "девятьсот",
+];
+const RU_THOUSAND: [&str; 3] = ["тысяча", "тысячи", "тысяч"];
+const RU_MILLION: [&str; 3] = ["миллион", "миллиона", "миллионов"];
+
+/// 1..=999 as words; `fem` switches the final unit 1/2 to одна/две
+/// (the thousands position takes feminine agreement)
+fn ru_group(n: u64, fem: bool) -> String {
+    let mut words: Vec<&str> = Vec::new();
+    let h = (n / 100) as usize;
+    if h > 0 {
+        words.push(RU_HUND[h]);
+    }
+    let r = n % 100;
+    match r {
+        0 => {}
+        1..=9 => words.push(if fem {
+            RU_UF[r as usize]
+        } else {
+            RU_U[r as usize]
+        }),
+        10..=19 => words.push(RU_TEEN[(r - 10) as usize]),
+        _ => {
+            words.push(RU_TENS[(r / 10) as usize]);
+            let uidx = (r % 10) as usize;
+            if uidx > 0 {
+                words.push(if fem { RU_UF[uidx] } else { RU_U[uidx] });
+            }
+        }
+    }
+    words.join(" ")
+}
+
+/// 0..=999_999_999 as space-separated Russian words. `None` out of
+/// range or non-digit input.
+fn ru_integer(digits: &str) -> Option<String> {
+    let n: u64 = digits.parse().ok()?;
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some(RU_U[0].into());
+    }
+    let mut words: Vec<String> = Vec::new();
+    let millions = n / 1_000_000;
+    let rest = n % 1_000_000;
+    if millions > 0 {
+        words.push(ru_group(millions, false));
+        words.push(RU_MILLION[ru_plural(millions)].to_string());
+    }
+    let thousands = rest / 1000;
+    let tail = rest % 1000;
+    if thousands > 0 {
+        words.push(ru_group(thousands, true));
+        words.push(RU_THOUSAND[ru_plural(thousands)].to_string());
+    }
+    if tail > 0 {
+        words.push(ru_group(tail, false));
+    }
+    Some(words.join(" "))
 }
 
 fn it_100(n: u64) -> String {
@@ -2362,6 +2570,58 @@ mod tests {
         assert_eq!(f("b2b"), "b two b");
         // ordinals still drop rather than guess ("forty-eight th")
         assert!(EnglishNormalizer.normalize_numeric("48th").is_none());
+    }
+
+    #[test]
+    fn russian_digit_normalizer() {
+        let f = |t: &str| RussianNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("0"), "ноль");
+        assert_eq!(f("3"), "три");
+        assert_eq!(f("16"), "шестнадцать");
+        assert_eq!(f("20"), "двадцать");
+        assert_eq!(f("21"), "двадцать один");
+        assert_eq!(f("42"), "сорок два"); // irregular сорок
+        assert_eq!(f("90"), "девяносто");
+        assert_eq!(f("100"), "сто");
+        assert_eq!(f("200"), "двести"); // irregular hundreds
+        assert_eq!(f("400"), "четыреста");
+        assert_eq!(f("115"), "сто пятнадцать");
+        assert_eq!(f("1000"), "одна тысяча"); // fem
+        assert_eq!(f("2000"), "две тысячи"); // fem + plural
+        assert_eq!(f("5000"), "пять тысяч");
+        assert_eq!(f("21000"), "двадцать одна тысяча");
+        assert_eq!(f("22000"), "двадцать две тысячи");
+        assert_eq!(f("25000"), "двадцать пять тысяч");
+        assert_eq!(f("100000"), "сто тысяч");
+        assert_eq!(f("111000"), "сто одиннадцать тысяч"); // 11-14 exception
+        assert_eq!(f("1000000"), "один миллион");
+        assert_eq!(f("2000000"), "два миллиона");
+        assert_eq!(f("5000000"), "пять миллионов");
+        // the full agreement stack in one string: millions + feminine
+        // thousands + paucal + tail
+        assert_eq!(
+            f("1234567"),
+            "один миллион двести тридцать четыре тысячи пятьсот шестьдесят семь"
+        );
+        assert_eq!(f("101000"), "сто одна тысяча"); // fem + paucal
+        assert_eq!(f("21000000"), "двадцать один миллион"); // masc before миллион
+        assert_eq!(f("3,5"), "три запятая пять"); // comma decimal
+                                                  // dot is not a Russian separator — drop, never guess. Note
+                                                  // the deliberate asymmetry vs German: "1.000,5" (dot
+                                                  // thousands + comma decimal) drops here but its German analog
+                                                  // "3.500,50" expands — Russian text does not conventionally
+                                                  // dot-group, and a lone dot is more likely a typo'd decimal
+        assert!(RussianNormalizer.normalize_numeric("3.5").is_none());
+        assert!(RussianNormalizer.normalize_numeric("3.500").is_none());
+        assert!(RussianNormalizer.normalize_numeric("1.000,5").is_none());
+        assert!(RussianNormalizer.normalize_numeric("1000000000").is_none());
+    }
+
+    #[test]
+    fn russian_normalizer_routes() {
+        assert_eq!(normalizer_for("ru").lang(), "ru");
+        assert_eq!(normalizer_for("ru-RU").lang(), "ru");
+        assert_eq!(normalizer_for("rus").lang(), "ru");
     }
 
     #[test]
