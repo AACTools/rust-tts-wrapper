@@ -224,6 +224,11 @@ public final class TtsClient: @unchecked Sendable {
         }
     }
 
+    /// Adopt an already-created context (#102 `createForModel`).
+    internal init(adopting ctx: OpaquePointer?) {
+        self.ctx = ctx
+    }
+
     deinit { close() }
 
     public func close() {
@@ -622,6 +627,150 @@ public final class TtsClient: @unchecked Sendable {
     /// The setup schema for one engine id, or `nil` when unknown.
     public static func engineSetup(_ engineId: String) throws -> TtsEngineSetup? {
         try engineSetups().first { $0.id == engineId }
+    }
+
+    // --- engine-agnostic local-model management (#102) ------------------
+    // JSON-string surfaces: decode with JSONDecoder/JSONSerialization
+    // in the app layer; the payloads carry engine/model/voice +
+    // availability with data companions (`missing`, `reason`).
+
+    /// The local-model catalogue (every compiled-in local engine when
+    /// `engineId` is nil). An empty catalogue is success.
+    public static func localModelsJSON(engineId: String? = nil) throws -> String {
+        // flatMap: nil must reach the ABI as NULL (all engines), not
+        // an empty-string engine filter
+        let ptr = engineId.flatMap { id in id.withCString { tts_models_json($0) } }
+            ?? tts_models_json(nil)
+        guard let ptr else {
+            throw TtsError("tts_models_json failed", detail: getGlobalLastErrorDetail())
+        }
+        defer { tts_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    /// One catalogue entry's JSON, or `nil` when the id is unknown.
+    public static func modelInfoJSON(engineId: String?, modelId: String) throws -> String? {
+        let ptr = engineId.flatMap { e in
+            e.withCString { ep in modelId.withCString { m in tts_model_info_json(ep, m) } }
+        } ?? modelId.withCString { m in tts_model_info_json(nil, m) }
+        guard let ptr else { return nil }
+        defer { tts_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    /// Case-insensitive search across every compiled-in catalogue.
+    public static func searchModelsJSON(_ query: String, limit: Int32 = 50) throws -> String {
+        let ptr = query.withCString { tts_search_models_json($0, limit) }
+        guard let ptr else {
+            throw TtsError("tts_search_models_json failed", detail: getGlobalLastErrorDetail())
+        }
+        defer { tts_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    /// The engine's models directory (`TTS_MODELS_DIR` honored), or
+    /// `nil` when the engine has no model source in this build.
+    public static func modelsDir(_ engineId: String) -> String? {
+        let ptr = engineId.withCString { tts_models_dir($0) }
+        guard let ptr else { return nil }
+        defer { tts_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    /// The ctx-free installed-voice catalogue (no credentials payload).
+    public static func installedVoiceCatalogJSON() throws -> String {
+        guard let ptr = tts_installed_voice_catalog_json() else {
+            throw TtsError("tts_installed_voice_catalog_json failed", detail: getGlobalLastErrorDetail())
+        }
+        defer { tts_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    /// Install a model. SYNCHRONOUS on the caller's thread; `onProgress`
+    /// and `cancelled` fire on that same thread (call from a background
+    /// queue and hop back). Throws `TtsError` (network / checksum /
+    /// insufficient disk / install-in-progress / cancelled) with the
+    /// structured detail.
+    @discardableResult
+    public static func installModel(
+        engineId: String,
+        modelId: String,
+        onProgress: ((Double, String) -> Void)? = nil,
+        cancelled: (() -> Bool)? = nil
+    ) throws {
+        // Trampolines: C function pointers cannot capture context, so
+        // the boxes travel through the userdata pointer (Unmanaged to
+        // keep Swift's ARC out of the C lifetimes).
+        final class InstallBox {
+            let progress: (Double, String) -> Void
+            let cancel: () -> Bool
+            init(progress: @escaping (Double, String) -> Void, cancel: @escaping () -> Bool) {
+                self.progress = progress
+                self.cancel = cancel
+            }
+        }
+        let box = InstallBox(
+            progress: onProgress ?? { _, _ in },
+            cancel: cancelled ?? { false }
+        )
+        // passUnretained: `box` is strongly held by this frame for the
+        // whole synchronous call — the opaque pointer needs no ownership
+        // (passRetained here would LEAK one reference per install; the
+        // trampolines only takeUnretainedValue)
+        let boxPointer = Unmanaged.passUnretained(box).toOpaque()
+
+        let progressTrampoline: @convention(c) (Double, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void =
+            { fraction, stage, userdata in
+                guard let userdata else { return }
+                let box = Unmanaged<InstallBox>.fromOpaque(userdata).takeUnretainedValue()
+                let stageName = stage.map { String(cString: $0) } ?? ""
+                box.progress(fraction, stageName)
+            }
+        let cancelTrampoline: @convention(c) (UnsafeMutableRawPointer?) -> Bool =
+            { userdata in
+                guard let userdata else { return false }
+                let box = Unmanaged<InstallBox>.fromOpaque(userdata).takeUnretainedValue()
+                return box.cancel()
+            }
+
+        let ok = engineId.withCString { e in
+            modelId.withCString { m in
+                tts_model_install(e, m, progressTrampoline, cancelTrampoline, boxPointer)
+            }
+        }
+        if !ok {
+            throw TtsError(
+                "installing '\(modelId)' failed",
+                detail: getGlobalLastErrorDetail()
+            )
+        }
+    }
+
+    /// Remove an installed model (files + neutral `.installed` manifest).
+    public static func uninstallModel(engineId: String, modelId: String) throws {
+        let ok = engineId.withCString { e in
+            modelId.withCString { m in tts_model_uninstall(e, m) }
+        }
+        if !ok {
+            throw TtsError(
+                "uninstalling '\(modelId)' failed",
+                detail: getGlobalLastErrorDetail()
+            )
+        }
+    }
+
+    /// Create a client for a catalogued model — the credentials format
+    /// stays private to the native layer (#102 F5).
+    public static func createForModel(engineId: String, modelId: String) throws -> TtsClient {
+        let ctx = engineId.withCString { e in
+            modelId.withCString { m in tts_create_for_model(e, m) }
+        }
+        guard let ctx else {
+            let detail = getGlobalLastErrorDetail()
+            let fallback = "tts_create_for_model(\(engineId), \(modelId)) failed: \(getGlobalLastError() ?? "unknown")"
+            throw TtsError(fallback, detail: detail)
+        }
+        return TtsClient(adopting: ctx)
     }
 
     /// The embedded Sherpa-ONNX model registry, keyed by model ID.

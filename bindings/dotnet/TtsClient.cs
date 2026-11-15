@@ -92,6 +92,25 @@ public static class Native
     [DllImport(Lib)] public static extern void tts_free_string(IntPtr s);
     [DllImport(Lib)] public static extern IntPtr tts_get_engine_setups_json();
     [DllImport(Lib)] public static extern int tts_check_credentials(IntPtr ctx);
+
+    // #102 model-management additions (ABI-additive, PR #103).
+    [DllImport(Lib)] public static extern IntPtr tts_models_json(string? engineId);
+    [DllImport(Lib)] public static extern IntPtr tts_model_info_json(string? engineId, string modelId);
+    [DllImport(Lib)] public static extern bool tts_model_install(
+        string engineId, string modelId,
+        InstallProgressNative? progress, InstallCancelledNative? cancelled, IntPtr userdata);
+    [DllImport(Lib)] public static extern bool tts_model_uninstall(string engineId, string modelId);
+    [DllImport(Lib)] public static extern IntPtr tts_models_dir(string engineId);
+    [DllImport(Lib)] public static extern IntPtr tts_search_models_json(string query, int limit);
+    [DllImport(Lib)] public static extern IntPtr tts_installed_voice_catalog_json();
+    [DllImport(Lib)] public static extern IntPtr tts_create_for_model(string engineId, string modelId);
+
+    /// <summary>(fraction, stage, userdata) — fires on the installing thread.</summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate void InstallProgressNative(double fraction, IntPtr stage, IntPtr userdata);
+    /// <summary>Cancellation probe — true aborts the install.</summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    public delegate bool InstallCancelledNative(IntPtr userdata);
 }
 
 /// <summary>
@@ -278,6 +297,12 @@ public class TtsClient : IDisposable
         _ctx = Native.tts_create(engineId, json);
         if (_ctx == IntPtr.Zero)
             throw CreateGlobalException(engineId);
+    }
+
+    /// <summary>Adopt an already-created context (#102 CreateForModel).</summary>
+    internal TtsClient(IntPtr ctx)
+    {
+        _ctx = ctx;
     }
 
     // --- synthesis -----------------------------------------------------
@@ -603,6 +628,185 @@ public class TtsClient : IDisposable
     /// <summary>The setup schema for one engine id, or null if unknown.</summary>
     public static TtsEngineSetup? GetEngineSetup(string engineId) =>
         GetEngineSetups().FirstOrDefault(s => s.Id == engineId);
+
+    // --- engine-agnostic local-model management (#102) -------------------
+
+    /// <summary>
+    /// The local-model catalogue (every compiled-in local engine when
+    /// <paramref name="engineId"/> is null). An empty list is success.
+    /// </summary>
+    public static List<TtsLocalModel> GetLocalModels(string? engineId = null)
+    {
+        IntPtr ptr = Native.tts_models_json(engineId);
+        if (ptr == IntPtr.Zero)
+            throw new TtsException("tts_models_json returned null");
+        string json = Marshal.PtrToStringUTF8(ptr) ?? "[]";
+        Native.tts_free_string(ptr);
+        return ParseModels(json, "tts_models_json");
+    }
+
+    /// <summary>One catalogue entry, or null when the id is unknown.</summary>
+    public static TtsLocalModel? GetLocalModel(string? engineId, string modelId)
+    {
+        IntPtr ptr = Native.tts_model_info_json(engineId, modelId);
+        if (ptr == IntPtr.Zero)
+            return null;
+        string json = Marshal.PtrToStringUTF8(ptr) ?? "{}";
+        Native.tts_free_string(ptr);
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                ? TtsLocalModel.FromJson(doc.RootElement)
+                : null;
+        }
+        catch (JsonException e)
+        {
+            throw new TtsException($"tts_model_info_json JSON failed to parse: {e.Message}");
+        }
+    }
+
+    /// <summary>Case-insensitive substring search across every catalogue.</summary>
+    public static List<TtsLocalModel> SearchModels(string query, int limit = 50)
+    {
+        IntPtr ptr = Native.tts_search_models_json(query, limit);
+        if (ptr == IntPtr.Zero)
+            throw new TtsException("tts_search_models_json returned null");
+        string json = Marshal.PtrToStringUTF8(ptr) ?? "[]";
+        Native.tts_free_string(ptr);
+        return ParseModels(json, "tts_search_models_json");
+    }
+
+    /// <summary>
+    /// The engine's models directory (<c>TTS_MODELS_DIR</c> honored),
+    /// or null when the engine has no model source in this build.
+    /// </summary>
+    public static string? GetModelsDir(string engineId)
+    {
+        IntPtr ptr = Native.tts_models_dir(engineId);
+        if (ptr == IntPtr.Zero)
+            return null;
+        string dir = Marshal.PtrToStringUTF8(ptr) ?? "";
+        Native.tts_free_string(ptr);
+        return dir.Length > 0 ? dir : null;
+    }
+
+    /// <summary>The ctx-free installed-voice catalogue (no credentials).</summary>
+    public static List<TtsInstalledVoice> GetInstalledVoices()
+    {
+        IntPtr ptr = Native.tts_installed_voice_catalog_json();
+        if (ptr == IntPtr.Zero)
+            throw new TtsException("tts_installed_voice_catalog_json returned null");
+        string json = Marshal.PtrToStringUTF8(ptr) ?? "[]";
+        Native.tts_free_string(ptr);
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.EnumerateArray().Select(TtsInstalledVoice.FromJson).ToList()
+                : throw new TtsException("tts_installed_voice_catalog_json returned unparseable JSON");
+        }
+        catch (JsonException e)
+        {
+            throw new TtsException($"voice catalogue JSON failed to parse: {e.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Install a model — SYNCHRONOUS on the calling thread (progress
+    /// and cancellation fire there). Throws <see cref="TtsException"/>
+    /// (network / checksum / insufficient disk / install-in-progress /
+    /// cancelled) with the structured detail attached.
+    /// </summary>
+    public static void InstallModel(
+        string engineId,
+        string modelId,
+        Action<double, string>? onProgress = null,
+        Func<bool>? cancelled = null)
+    {
+        // Trampolines: keep the delegates rooted for the call's duration
+        // (the marshaller would otherwise be free to collect them).
+        Native.InstallProgressNative? progress = onProgress is null
+            ? null
+            : (fraction, stagePtr, _) =>
+            {
+                string stage = Marshal.PtrToStringUTF8(stagePtr) ?? "";
+                onProgress(fraction, stage);
+            };
+        Native.InstallCancelledNative? cancel = cancelled is null
+            ? null
+            : _ => cancelled();
+        var keepAlive = new object?[] { progress, cancel };
+
+        bool ok = Native.tts_model_install(engineId, modelId, progress, cancel, IntPtr.Zero);
+        GC.KeepAlive(keepAlive);
+        if (!ok)
+            throw ModelOpFailure("installing", modelId);
+    }
+
+    /// <summary>
+    /// Install a model on a thread-pool thread with the idiomatic
+    /// progress/cancellation surface; the native call stays
+    /// synchronous per its contract (#102 F6).
+    /// </summary>
+    public static Task InstallModelAsync(
+        string engineId,
+        string modelId,
+        IProgress<(double Fraction, string Stage)>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            InstallModel(
+                engineId,
+                modelId,
+                (f, s) => progress?.Report((f, s)),
+                () => cancellationToken.IsCancellationRequested);
+        }, cancellationToken);
+    }
+
+    /// <summary>Remove an installed model (files + neutral manifest).</summary>
+    public static void UninstallModel(string engineId, string modelId)
+    {
+        if (!Native.tts_model_uninstall(engineId, modelId))
+            throw ModelOpFailure("uninstalling", modelId);
+    }
+
+    /// <summary>
+    /// Create a client for a catalogued model — the credentials format
+    /// stays private to the native layer (#102 F5).
+    /// </summary>
+    public static TtsClient CreateForModel(string engineId, string modelId)
+    {
+        IntPtr ctx = Native.tts_create_for_model(engineId, modelId);
+        return ctx != IntPtr.Zero
+            ? new TtsClient(ctx)
+            : throw CreateGlobalException($"tts_create_for_model({engineId}, {modelId})");
+    }
+
+    /// <summary>Structured-detail exception for a failed model op.</summary>
+    private static TtsException ModelOpFailure(string what, string modelId)
+    {
+        if (GetGlobalLastErrorDetail() is { } detail && detail.Code != TtsErrorCode.Unknown)
+            return new TtsException(detail);
+        return new TtsException($"{what} '{modelId}' failed: {GetGlobalLastError() ?? "unknown error"}");
+    }
+
+    private static List<TtsLocalModel> ParseModels(string json, string what)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.EnumerateArray().Select(TtsLocalModel.FromJson).ToList()
+                : throw new TtsException($"{what} returned unparseable JSON");
+        }
+        catch (JsonException e)
+        {
+            throw new TtsException($"{what} JSON failed to parse: {e.Message}");
+        }
+    }
 
     private static string Truncate(string s, int max) =>
         s.Length <= max ? s : s[..max] + "…";

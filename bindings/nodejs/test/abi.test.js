@@ -211,3 +211,54 @@ test("synthesis failure yields a stable code and redacted detail", () => {
   assert.ok(c.lastErrorDetail(), "detail readable after the failure");
   c.close();
 });
+
+// --- engine-agnostic local-model management (#102, PR #103) ------------
+// Holds under any build: with no local engines compiled in the
+// catalogues are EMPTY and that is success. When sherpaonnx is in the
+// build (local dev), the deeper catalogue contract is asserted too.
+
+test("#102 catalogues are arrays and voices are well-formed", () => {
+  const models = TtsClient.localModels();
+  const voices = TtsClient.installedVoices();
+  assert.ok(Array.isArray(models));
+  assert.ok(Array.isArray(voices));
+  for (const m of models) {
+    assert.ok(m.engine.length > 0, "engine id");
+    assert.ok(m.id.length > 0, "model id");
+    assert.ok(m.availability.length > 0, "availability");
+  }
+  for (const v of voices) {
+    assert.ok(v.engine.length > 0 && v.model.length > 0 && v.voice.length > 0);
+  }
+});
+
+test("#102 search + unknown engine dir + unknown model", () => {
+  assert.ok(Array.isArray(TtsClient.searchModels("zzz-no-such-model")));
+  assert.equal(TtsClient.modelsDir("no-such-engine"), null);
+  assert.equal(TtsClient.localModel(null, "zzz-no-such-model"), null);
+  assert.throws(() => TtsClient.installModel("sherpaonnx", "zzz-no-such-model"));
+});
+
+test("#102 sherpa catalogue contract when compiled in", () => {
+  const sherpa = TtsClient.localModels("sherpaonnx");
+  if (sherpa.length === 0) {
+    // no local engines in this build — the empty contract above covers it
+    return;
+  }
+  assert.ok(sherpa.length > 0, "sherpa catalogue non-empty");
+  for (const e of sherpa) assert.equal(e.engine, "sherpaonnx");
+  const amy = TtsClient.localModel("sherpaonnx", "piper-en_US-amy-low");
+  assert.ok(amy, "amy resolves");
+  assert.equal(amy.id, "piper-en_US-amy-low");
+  assert.ok(["needs_download", "ready", "needs_bundle", "unverified"].includes(amy.availability));
+  // a unique needle (catalogue order is per-process)
+  const hits = TtsClient.searchModels("piper-en_US-amy-low");
+  assert.ok(hits.some((h) => h.id === "piper-en_US-amy-low"));
+  assert.ok(TtsClient.modelsDir("sherpaonnx").endsWith("sherpaonnx"));
+  // floravox-student rows never appear in the sherpa catalogue
+  assert.ok(!sherpa.some((m) => m.id.startsWith("willwade-student-")));
+  // floravox rows (when compiled in) are badged experimental
+  for (const m of TtsClient.localModels().filter((m) => m.engine === "floravox")) {
+    assert.equal(m.experimental, true, `${m.id} badged experimental`);
+  }
+});
