@@ -226,3 +226,244 @@ fn reports_when_sherpa_is_disabled() {
     assert_eq!(detail["name"], "EngineNotAvailable");
     assert_eq!(detail["engineId"], "sherpaonnx");
 }
+
+/// Read the global error detail as (code, message) — file-level twin
+/// of the local helper in the provision tests.
+#[cfg(feature = "sherpaonnx")]
+fn global_detail() -> (u32, String) {
+    use rust_tts_wrapper::{tts_free_string, tts_get_last_error_detail_json};
+    let err = tts_get_last_error_detail_json(std::ptr::null_mut());
+    assert!(!err.is_null());
+    // SAFETY: owned NUL-terminated error string.
+    let detail = unsafe { CStr::from_ptr(err) }
+        .to_string_lossy()
+        .into_owned();
+    tts_free_string(err);
+    let code = serde_json::from_str::<serde_json::Value>(&detail)
+        .ok()
+        .and_then(|v| v["code"].as_u64())
+        .and_then(|c| u32::try_from(c).ok())
+        .unwrap_or(0);
+    (code, detail)
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Engine-agnostic model surface (#102 Phase 1)
+// ══════════════════════════════════════════════════════════════════
+
+use rust_tts_wrapper::tts_installed_voice_catalog_json;
+#[cfg(feature = "sherpaonnx")]
+use rust_tts_wrapper::{
+    tts_model_info_json, tts_models_dir, tts_models_json, tts_search_models_json,
+};
+
+/// Read + parse + free a JSON string from the FFI.
+fn json_from_ffi(ptr: *mut std::os::raw::c_char) -> serde_json::Value {
+    assert!(!ptr.is_null(), "expected a JSON payload");
+    // SAFETY: the FFI contract returns an owned NUL-terminated string
+    let bytes = unsafe { std::ffi::CStr::from_ptr(ptr) }.to_bytes().to_vec();
+    rust_tts_wrapper::tts_free_string(ptr);
+    serde_json::from_slice(&bytes).expect("valid JSON")
+}
+
+#[cfg(feature = "sherpaonnx")]
+#[test]
+fn models_catalogue_has_unified_availability() {
+    let all = json_from_ffi(tts_models_json(std::ptr::null()));
+    let arr = all.as_array().expect("array catalogue");
+    assert!(!arr.is_empty(), "the sherpa catalogue is non-empty");
+    // every entry carries the unified field set
+    for e in arr.iter().take(50) {
+        assert!(e["engine"].is_string(), "{e}");
+        assert!(e["id"].is_string());
+        assert!(e["availability"].is_string());
+        assert!(e["installed"].is_boolean());
+    }
+    // engine-scoped catalogue: a subset of the null (all-engines)
+    // catalogue — additional engines (floravox) may add rows
+    let sherpa = json_from_ffi(tts_models_json(c"sherpaonnx".as_ptr()));
+    let sherpa_arr = sherpa.as_array().unwrap();
+    assert!(sherpa_arr.len() <= arr.len());
+    assert!(sherpa_arr.iter().all(|e| e["engine"] == "sherpaonnx"));
+    assert!(!sherpa_arr.is_empty(), "sherpa rows present");
+    // a wrong engine id is an EMPTY catalogue (not an error)
+    let none = json_from_ffi(tts_models_json(c"no-such-engine".as_ptr()));
+    assert_eq!(none.as_array().unwrap().len(), 0);
+}
+
+#[cfg(feature = "sherpaonnx")]
+#[test]
+fn model_info_and_search_agree() {
+    let amy = json_from_ffi(tts_model_info_json(
+        c"sherpaonnx".as_ptr(),
+        c"piper-en_US-amy-low".as_ptr(),
+    ));
+    assert_eq!(amy["id"], "piper-en_US-amy-low");
+    assert!(amy["availability"].is_string());
+
+    // a needle unique to one id — "amy" alone also matches "Saamya"
+    // names, and models() iterates a HashMap (per-process order), so
+    // a take(limited) result must never be order-dependent
+    let hits = json_from_ffi(tts_search_models_json(c"piper-en_US-amy-low".as_ptr(), 5));
+    let arr = hits.as_array().unwrap();
+    assert!(
+        arr.iter().any(|e| e["id"] == "piper-en_US-amy-low"),
+        "{hits}"
+    );
+    // language search hits Spanish voices
+    let es = json_from_ffi(tts_search_models_json(c"spanish".as_ptr(), 50));
+    assert!(es.as_array().is_some_and(|a| !a.is_empty()));
+
+    // unknown model → NULL + ModelNotFound detail
+    assert!(tts_model_info_json(c"sherpaonnx".as_ptr(), c"zzz".as_ptr()).is_null());
+    let (code, detail) = global_detail();
+    assert_eq!(code, 5, "{detail}");
+}
+
+#[cfg(feature = "sherpaonnx")]
+#[test]
+fn models_dir_points_at_the_sherpa_layout() {
+    let dir = json_from_ffi_str(tts_models_dir(c"sherpaonnx".as_ptr()));
+    assert!(dir.ends_with("sherpaonnx"), "{dir}");
+    // unknown engine → NULL + EngineNotAvailable
+    assert!(tts_models_dir(c"zzz".as_ptr()).is_null());
+    let (code, _) = global_detail();
+    assert_eq!(code, 7);
+}
+
+#[cfg(feature = "sherpaonnx")]
+fn json_from_ffi_str(ptr: *mut std::os::raw::c_char) -> String {
+    assert!(!ptr.is_null());
+    // SAFETY: owned NUL-terminated string per the FFI contract
+    let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned();
+    rust_tts_wrapper::tts_free_string(ptr);
+    s
+}
+
+/// The voice catalogue flattens INSTALLED models only — with a clean
+/// models dir it is empty (never phantom entries).
+#[test]
+fn installed_voice_catalogue_lists_only_installed() {
+    let v = json_from_ffi(tts_installed_voice_catalog_json());
+    let arr = v.as_array().unwrap();
+    // a CI machine may have models from earlier suites; everything
+    // listed must at least be well-formed
+    for e in arr {
+        assert!(e["engine"].is_string(), "{e}");
+        assert!(e["model"].is_string());
+        assert!(e["voice"].is_string());
+    }
+}
+
+/// #102 Phase 1 end-to-end, against the real network + registry:
+/// install the smallest checksummed piper model into a temp
+/// `TTS_MODELS_DIR`, watch it appear installed in the catalogue, then
+/// uninstall. ~13 MB download.
+///
+/// ```sh
+/// TTS_MODELS_LIVE=1 cargo test --features sherpaonnx,sherpa-g2p \
+///   --test sherpa_models_ffi -- --ignored install --test-threads=1
+/// ```
+#[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
+#[test]
+#[ignore = "live: downloads ~13 MB (TTS_MODELS_LIVE=1; --test-threads=1 — mutates TTS_MODELS_DIR)"]
+fn install_uninstall_round_trip() {
+    if std::env::var_os("TTS_MODELS_LIVE").is_none() {
+        eprintln!("skipping: set TTS_MODELS_LIVE=1 to run the live install");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let prior = std::env::var_os("TTS_MODELS_DIR");
+    std::env::set_var("TTS_MODELS_DIR", tmp.path());
+
+    assert!(rust_tts_wrapper::tts_model_install(
+        c"sherpaonnx".as_ptr(),
+        c"piper-fr_FR-siwis-low-int8".as_ptr(),
+        None,
+        None,
+        std::ptr::null_mut(),
+    ));
+
+    let info = json_from_ffi(tts_model_info_json(
+        c"sherpaonnx".as_ptr(),
+        c"piper-fr_FR-siwis-low-int8".as_ptr(),
+    ));
+    assert_eq!(info["installed"], serde_json::json!(true), "{info}");
+    assert!(
+        tmp.path()
+            .join("sherpaonnx/piper-fr_FR-siwis-low-int8/.installed")
+            .is_file(),
+        "neutral manifest written"
+    );
+    // the voice catalogue now contains its speaker
+    let v = json_from_ffi(tts_installed_voice_catalog_json());
+    assert!(
+        v.as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["model"] == "piper-fr_FR-siwis-low-int8"),
+        "{v}"
+    );
+
+    assert!(rust_tts_wrapper::tts_model_uninstall(
+        c"sherpaonnx".as_ptr(),
+        c"piper-fr_FR-siwis-low-int8".as_ptr(),
+    ));
+    assert!(
+        !tmp.path()
+            .join("sherpaonnx/piper-fr_FR-siwis-low-int8")
+            .exists(),
+        "uninstalled"
+    );
+    match prior {
+        Some(p) => std::env::set_var("TTS_MODELS_DIR", p),
+        None => std::env::remove_var("TTS_MODELS_DIR"),
+    }
+}
+
+/// The MMS two-file layout (HF directory url): the smallest exercised
+/// path for the tokens floor fix — model.onnx digest-verified,
+/// tokens.txt floor+shape validated, both parts at the models-dir
+/// root. ~109 MB download.
+///
+/// ```sh
+/// TTS_MODELS_LIVE=1 cargo test --features sherpaonnx --test sherpa_models_ffi \
+///   -- --ignored mms_install --test-threads=1
+/// ```
+#[cfg(feature = "sherpaonnx")]
+#[test]
+#[ignore = "live: downloads ~109 MB (TTS_MODELS_LIVE=1; --test-threads=1 — mutates TTS_MODELS_DIR)"]
+fn mms_install_two_file_layout() {
+    if std::env::var_os("TTS_MODELS_LIVE").is_none() {
+        eprintln!("skipping: set TTS_MODELS_LIVE=1 to run the live install");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let prior = std::env::var_os("TTS_MODELS_DIR");
+    std::env::set_var("TTS_MODELS_DIR", tmp.path());
+    assert!(rust_tts_wrapper::tts_model_install(
+        c"sherpaonnx".as_ptr(),
+        c"mms_eng".as_ptr(),
+        None,
+        None,
+        std::ptr::null_mut(),
+    ));
+    let dir = tmp.path().join("sherpaonnx/mms_eng");
+    assert!(dir.join("model.onnx").is_file(), "model fetched");
+    assert!(dir.join("tokens.txt").is_file(), "tokens fetched");
+    let info = json_from_ffi(tts_model_info_json(
+        c"sherpaonnx".as_ptr(),
+        c"mms_eng".as_ptr(),
+    ));
+    assert_eq!(info["installed"], serde_json::json!(true));
+    assert!(rust_tts_wrapper::tts_model_uninstall(
+        c"sherpaonnx".as_ptr(),
+        c"mms_eng".as_ptr()
+    ));
+    match prior {
+        Some(p) => std::env::set_var("TTS_MODELS_DIR", p),
+        None => std::env::remove_var("TTS_MODELS_DIR"),
+    }
+}

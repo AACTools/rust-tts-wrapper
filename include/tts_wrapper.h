@@ -105,6 +105,19 @@ typedef struct tts_engine_info {
   char *credential_keys_json;
 } tts_engine_info;
 
+/**
+ * Install progress callback: overall fraction 0.0..=1.0, a stage name
+ * (`download`, `verify`, `extract`, `post-install`, `done`), and the
+ * caller's userdata pointer. Fires on the installing thread.
+ */
+typedef void (*CInstallProgress)(double, const char*, void*);
+
+/**
+ * Cancellation probe; called between chunks/entries on the
+ * installing thread. True aborts the install.
+ */
+typedef bool (*CInstallCancelled)(void*);
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -410,6 +423,15 @@ char *tts_get_engine_setups_json(void);
 /**
  * Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
  *
+ * **Deprecated (kept as a compatibility shim):** the engine-agnostic
+ * [`tts_models_json`] serves the same catalogue for every local
+ * engine, with the unified `availability` field subsuming this
+ * surface's `readiness` (the legacy string remains derivable
+ * byte-for-byte: `needs_assets` + `missing: ["vocoder"]` →
+ * `"needs_assets:vocoder"`). Prefer the generic surface in new code;
+ * this one is removed at the next major or when both Dashers
+ * migrate, whichever is first (#102).
+ *
  * This uses the build's bundled registry snapshot and requires no engine or network
  * connection. Caller must free the returned string with [`tts_free_string`].
  * Returns null on failure, including builds without the `sherpaonnx` feature.
@@ -430,6 +452,97 @@ char *tts_get_sherpa_models_json(void);
  * 13–19 MB and verifies the manifest sha256.
  */
 bool tts_provision_sherpa_g2p_bundle(const char *model_id);
+
+/**
+ * The local-model catalogue as a JSON array (entries carry install
+ * state + unified `availability`; `engine_id` null = every compiled-in
+ * local engine). Caller frees with [`tts_free_string`]. An empty
+ * array (no local engines compiled in, or an engine with an empty
+ * catalogue) is SUCCESS, not an error.
+ *
+ * # Safety
+ * `engine_id` must be a valid null-terminated C string, or NULL.
+ */
+char *tts_models_json(const char *engine_id);
+
+/**
+ * One catalogue entry as a JSON object, or NULL (+ error detail) when
+ * the id is unknown to the given engine / any compiled-in engine.
+ *
+ * # Safety
+ * Both pointers must be valid null-terminated C strings (`engine_id`
+ * may be NULL to search every compiled-in engine).
+ */
+char *tts_model_info_json(const char *engine_id, const char *model_id);
+
+/**
+ * Install a model: verify → fetch (resumable `.part`, sha256, magic
+ * bytes, size floor) → extract → engine post-install (e.g. the G2P
+ * bundle) → atomic swap → neutral `.installed` manifest.
+ *
+ * Synchronous on the CALLER'S thread; progress/cancel callbacks fire
+ * on that same thread; ONE install per process (a concurrent call
+ * fails fast). `TTS_MODELS_DIR` relocates the models directory.
+ *
+ * # Safety
+ * All pointers must be valid null-terminated C strings; the callbacks
+ * (optional) must be sound for the duration of the call; `userdata`
+ * is passed through untouched.
+ */
+bool tts_model_install(const char *engine_id,
+                       const char *model_id,
+                       CInstallProgress progress,
+                       CInstallCancelled cancelled,
+                       void *userdata);
+
+/**
+ * Remove an installed model (files + neutral `.installed` manifest).
+ * On Windows a live engine holding the files fails with an `InUse`
+ * detail rather than corrupting anything.
+ *
+ * # Safety
+ * Both pointers must be valid null-terminated C strings.
+ */
+bool tts_model_uninstall(const char *engine_id, const char *model_id);
+
+/**
+ * The engine's models directory as a filesystem path string (UTF-8;
+ * `TTS_MODELS_DIR` override honored). NULL + error detail when the
+ * engine is not compiled in.
+ *
+ * # Safety
+ * `engine_id` must be a valid null-terminated C string.
+ */
+char *tts_models_dir(const char *engine_id);
+
+/**
+ * Case-insensitive substring search over every compiled-in catalogue
+ * (id, name, language codes and names). `limit` <= 0 means 50.
+ *
+ * # Safety
+ * `query` must be a valid null-terminated C string.
+ */
+char *tts_search_models_json(const char *query, int32_t limit);
+
+/**
+ * The ctx-free installed-voice catalogue: every INSTALLED local
+ * model flattened into speakable voices — `engine`, `model`,
+ * `voice`, `name`, `languages`. No credentials in the payload; pair
+ * with [`tts_create_for_model`]. A UI's whole flow: list → pick →
+ * create → set voice → speak.
+ */
+char *tts_installed_voice_catalog_json(void);
+
+/**
+ * Create an engine context for a catalogued model — the credentials
+ * format stays private to the wrapper (#102 F5). The model must be
+ * installed (or the engine's default lookup applies, same as
+ * `tts_create` with `{"modelId": ...}`).
+ *
+ * # Safety
+ * Both pointers must be valid null-terminated C strings.
+ */
+struct tts_ctx *tts_create_for_model(const char *engine_id, const char *model_id);
 
 /**
  * Verify the context's credentials with an explicit "unverified"

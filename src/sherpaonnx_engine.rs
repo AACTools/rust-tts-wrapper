@@ -441,14 +441,21 @@ impl SherpaOnnxEngine {
 }
 
 /// Default directory for downloaded Sherpa-ONNX models.
-fn default_model_dir() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".into());
-    let mut dir = PathBuf::from(home);
-    dir.push(".rust-tts-wrapper");
-    dir.push("sherpaonnx");
-    dir
+/// The engine's model directory: `TTS_MODELS_DIR` overrides the base
+/// (sandbox/Flatpak — #102), then `~/.rust-tts-wrapper`, then
+/// `/sherpaonnx`. Shared by the engine AND the model installer (one
+/// resolution, no replica).
+pub(crate) fn default_model_dir() -> PathBuf {
+    let base = std::env::var_os("TTS_MODELS_DIR").map_or_else(
+        || {
+            let home = std::env::var("HOME")
+                .or_else(|_| std::env::var("USERPROFILE"))
+                .unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".rust-tts-wrapper")
+        },
+        PathBuf::from,
+    );
+    base.join("sherpaonnx")
 }
 
 /// Parse the embedded `models.json` into a hashmap.
@@ -1143,31 +1150,7 @@ impl TtsEngine for SherpaOnnxEngine {
             return Ok(supertonic_voices(model_info));
         }
 
-        let num_speakers = model_info.num_speakers;
-        let lang = model_info
-            .language
-            .first()
-            .map_or(String::new(), |l| l.language_name.clone());
-        let lang_code = model_info
-            .language
-            .first()
-            .map_or(String::new(), |l| l.lang_code.clone());
-        let iso639 = iso639_3(&lang_code);
-        let mut voices = Vec::new();
-        for i in 0..num_speakers {
-            voices.push(Voice {
-                id: format!("{i}"),
-                name: format!("Speaker {i}"),
-                gender: Gender::Unknown,
-                provider: "sherpaonnx".to_string(),
-                language_codes: vec![LanguageCode {
-                    bcp47: lang.clone(),
-                    iso639_3: iso639.clone(),
-                    display: crate::types::locale_display_name(&lang),
-                }],
-            });
-        }
-        Ok(voices)
+        Ok(voices_for_info(model_info))
     }
 
     fn engine_id(&self) -> &'static str {
@@ -1849,6 +1832,39 @@ fn supertonic_voices(info: &SherpaModelInfo) -> Vec<Voice> {
                 }],
             });
         }
+    }
+    voices
+}
+
+/// Voices for ANY registry entry (not just a loaded engine's) — shared
+/// by `get_voices` and the ctx-free installed-voice catalogue (#102):
+/// one voice per speaker, supertonic speaker × language.
+pub(crate) fn voices_for_info(info: &SherpaModelInfo) -> Vec<Voice> {
+    if info.model_type == "supertonic" {
+        return supertonic_voices(info);
+    }
+    let lang = info
+        .language
+        .first()
+        .map_or(String::new(), |l| l.language_name.clone());
+    let lang_code = info
+        .language
+        .first()
+        .map_or(String::new(), |l| l.lang_code.clone());
+    let iso639 = iso639_3(&lang_code);
+    let mut voices = Vec::new();
+    for i in 0..info.num_speakers {
+        voices.push(Voice {
+            id: format!("{i}"),
+            name: format!("Speaker {i}"),
+            gender: Gender::Unknown,
+            provider: "sherpaonnx".to_string(),
+            language_codes: vec![LanguageCode {
+                bcp47: lang.clone(),
+                iso639_3: iso639.clone(),
+                display: crate::types::locale_display_name(&lang),
+            }],
+        });
     }
     voices
 }

@@ -57,7 +57,7 @@ cloud-core = ["dep:base64", "speechmarkdown", "dep:sha2"]
 cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 # pocket-tts with REAL word timings: our own streaming loop over the tapped
 # Kyutai ONNX graphs (attention = the model's own alignment)
-pocket-timing = ["dep:ort", "dep:ndarray", "dep:hound", "dep:floravox-ssml", "speechmarkdown", "ssml-expand"]
+pocket-timing = ["dep:ort", "dep:hound", "dep:floravox-ssml", "speechmarkdown", "ssml-expand"]
 
 # wrapper-level <say-as> expansion (characters/cardinal/ordinal/date/
 # time/currency/telephone -> spoken words) for engines without native
@@ -69,7 +69,10 @@ ssml-expand = ["dep:floravox-ssml"]
 # Requires the omnivoice.cpp shared library; see VOICE_CLONING_PLAN.md
 # for build + model setup and the critical --duration finding.
 omnivoice-local = ["dep:hound", "ssml-expand"]
-sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization"]
+sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization",
+    # the model installer (#102): HTTP with resume, archives, checksums,
+    # disk preflight — same client family as voicegarden-lexicons (ureq)
+    "dep:ureq", "dep:tar", "dep:bzip2-rs", "dep:flate2", "dep:fs2", "dep:sha2"]
 # German Piper G2P uses the same FST crate version as VoiceGarden's
 # bundle loader. Its ONNX feature is disabled for Sherpa builds.
 sherpa-g2p = ["dep:voicegarden-lexicons", "dep:floravox-g2p-fst"]
@@ -86,6 +89,11 @@ floravox = [
   "dep:floravox-g2p",
   "floravox-g2p/onnx",
   "speechmarkdown",
+  # the model installer (#102): the floravox source installs through
+  # the same shared machinery as sherpa; the embedded registry crate
+  # is shared with sherpaonnx (the floravox-student + patched rows)
+  "dep:ureq", "dep:tar", "dep:bzip2-rs", "dep:flate2", "dep:fs2", "dep:sha2",
+  "dep:sherpa-onnx-models",
 ]
 # Lexicon + Phonetisaurus G2P chains for non-English phoneme voices, plus
 # the `lang` credential that auto-fetches published bundles
@@ -148,7 +156,6 @@ sherpa-onnx = { version = "=2.0.1", optional = true }
 # any future feature unification (e.g. floravox-core's api-27) would
 # flip it on silently -- so we opt in and pin.
 ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, features = ["std", "download-binaries", "ndarray", "tls-native", "api-22"] }
-ndarray = { version = "0.17", optional = true, features = ["std"] }
 hound = { version = "3", optional = true }
 floravox-ssml = { version = "0.8.8", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
@@ -163,8 +170,10 @@ floravox-core = { version = "=0.8.8", optional = true }
 floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
 floravox-g2p-fst = { package = "floravox-g2p", version = "=0.6.1", optional = true, default-features = false }
 voicegarden-lexicons = { version = "0.3", optional = true }
-# Pin sys to match the main crate (cargo update can drift them apart).
-sherpa-onnx-sys = { version = "=2.0.1", optional = true }
+# NOTE: sherpa-onnx is pinned =2.0.1 and that crate itself pins
+# sherpa-onnx-sys =2.0.1 — an explicit sys dep here would be inert
+# (nothing enabled it) and redundant; drift is impossible through the
+# main pin.
 base64 = { version = "0.23", optional = true }
 speechmarkdown-rust = { version = "0.5.2", optional = true }
 anyhow = "1"
@@ -184,6 +193,14 @@ unicode-normalization = { version = "0.1", optional = true }
 symphonia = { version = "0.5", optional = true, default-features = false, features = ["mp3", "wav", "pcm"] }
 # SHA-256 for the Edge (Read Aloud) Sec-MS-GEC auth token.
 sha2 = { version = "0.11", optional = true }
+# model installer (#102): ureq matches the voicegarden-lexicons client;
+# bzip2-rs is pure-Rust (no C toolchain burden on mobile cross-builds);
+# fs2 supplies cross-platform available-space
+ureq = { version = "2", optional = true, default-features = false, features = ["tls"] }
+tar = { version = "0.4", optional = true }
+bzip2-rs = { version = "0.1", optional = true }
+flate2 = { version = "1", optional = true }
+fs2 = { version = "0.4", optional = true }
 # Locale display names via ICU4X (compiled_data bundles the name table).
 icu_displaynames = { version = "0.11", optional = true, features = ["compiled_data"] }
 icu_locid = { version = "1.4", optional = true }

@@ -86,6 +86,13 @@ pub mod error_codes;
 pub mod factory;
 #[cfg(feature = "floravox")]
 pub mod floravox_engine;
+#[cfg(feature = "floravox")]
+pub mod floravox_model_source;
+/// Engine-agnostic local-model management (#102): the catalogue,
+/// availability vocabulary, and shared install machinery. Always
+/// compiled — with no local engine features the catalogue is simply
+/// empty (the FFI symbols exist for ABI stability regardless).
+pub mod local_models;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
@@ -98,6 +105,8 @@ pub mod sherpa_g2p;
 pub mod sherpa_lang;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpa_lexicon;
+#[cfg(feature = "sherpaonnx")]
+pub mod sherpa_model_source;
 #[cfg(feature = "sherpaonnx")]
 pub mod sherpa_p2p;
 #[cfg(feature = "sherpaonnx")]
@@ -1497,7 +1506,9 @@ pub extern "C" fn tts_get_engine_setups_json() -> *mut c_char {
 /// enrichment and provisioning ABI paths need the language fields for
 /// the allowlist gate).
 #[cfg(feature = "sherpaonnx")]
-fn sherpa_registry_info(model: &sherpa_onnx_models::ModelInfo) -> types::SherpaModelInfo {
+pub(crate) fn sherpa_registry_info(
+    model: &sherpa_onnx_models::ModelInfo,
+) -> types::SherpaModelInfo {
     types::SherpaModelInfo {
         id: model.id.clone(),
         model_type: model.model_type.clone(),
@@ -1524,6 +1535,15 @@ fn sherpa_registry_info(model: &sherpa_onnx_models::ModelInfo) -> types::SherpaM
 }
 
 /// Return the embedded Sherpa-ONNX model registry as a JSON object keyed by model ID.
+///
+/// **Deprecated (kept as a compatibility shim):** the engine-agnostic
+/// [`tts_models_json`] serves the same catalogue for every local
+/// engine, with the unified `availability` field subsuming this
+/// surface's `readiness` (the legacy string remains derivable
+/// byte-for-byte: `needs_assets` + `missing: ["vocoder"]` →
+/// `"needs_assets:vocoder"`). Prefer the generic surface in new code;
+/// this one is removed at the next major or when both Dashers
+/// migrate, whichever is first (#102).
 ///
 /// This uses the build's bundled registry snapshot and requires no engine or network
 /// connection. Caller must free the returned string with [`tts_free_string`].
@@ -1688,6 +1708,352 @@ pub extern "C" fn tts_provision_sherpa_g2p_bundle(model_id: *const c_char) -> bo
         }
     }))
     .unwrap_or(false)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// Engine-agnostic local-model management (#102 Phase 1)
+//
+// One catalogue, one availability vocabulary, one install path for
+// every local engine compiled into the build. No engine names in the
+// semantics: `engine_id` selects a source (null = every compiled-in
+// local engine for catalogues; required for install/uninstall/dir).
+// The sherpa-named registry symbols above are the compatibility shim
+// — this surface subsumes them (see the deprecation note on
+// tts_get_sherpa_models_json).
+// ════════════════════════════════════════════════════════════════════
+
+/// Map an install failure onto the error-detail surface.
+fn install_error_detail(engine: &str, e: &crate::local_models::InstallError) -> ErrorDetail {
+    use crate::local_models::InstallError as IE;
+    let code = match &e {
+        IE::ModelNotFound => TtsErrorCode::ModelNotFound,
+        IE::Network(_) | IE::ChecksumMismatch { .. } => TtsErrorCode::NetworkError,
+        IE::InsufficientDisk(..) | IE::UnsupportedUrl(_) => TtsErrorCode::InvalidConfiguration,
+        IE::InstallInProgress | IE::Cancelled | IE::Io(..) | IE::InUse(_) => {
+            TtsErrorCode::EngineFailure
+        }
+    };
+    let msg = e.to_string();
+    ErrorDetail::new(code, Some(engine), None, &msg)
+}
+
+/// The local-model catalogue as a JSON array (entries carry install
+/// state + unified `availability`; `engine_id` null = every compiled-in
+/// local engine). Caller frees with [`tts_free_string`]. An empty
+/// array (no local engines compiled in, or an engine with an empty
+/// catalogue) is SUCCESS, not an error.
+///
+/// # Safety
+/// `engine_id` must be a valid null-terminated C string, or NULL.
+#[no_mangle]
+pub extern "C" fn tts_models_json(engine_id: *const c_char) -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let engine = optional_cstr(engine_id);
+        let entries: Vec<serde_json::Value> = crate::local_models::sources()
+            .iter()
+            .filter(|s| engine.as_deref().is_none_or(|e| s.engine_id() == e))
+            .flat_map(|s| s.list())
+            .map(|e| e.to_json())
+            .collect();
+        CString::new(serde_json::Value::Array(entries).to_string())
+            .unwrap_or_default()
+            .into_raw()
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// One catalogue entry as a JSON object, or NULL (+ error detail) when
+/// the id is unknown to the given engine / any compiled-in engine.
+///
+/// # Safety
+/// Both pointers must be valid null-terminated C strings (`engine_id`
+/// may be NULL to search every compiled-in engine).
+#[no_mangle]
+pub extern "C" fn tts_model_info_json(
+    engine_id: *const c_char,
+    model_id: *const c_char,
+) -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(model) = required_cstr(model_id, "model_id") else {
+            return ptr::null_mut();
+        };
+        let source = crate::local_models::find_source(optional_cstr(engine_id).as_deref(), &model)
+            .map_err(|e| install_error_detail("local-models", &e));
+        match source {
+            Ok(source) if source.entry(&model).is_none() => {
+                set_error_detail(ErrorDetail::new(
+                    TtsErrorCode::ModelNotFound,
+                    Some(source.engine_id()),
+                    None,
+                    "model id not in this engine's catalogue",
+                ));
+                ptr::null_mut()
+            }
+            Ok(source) => {
+                let e = source.entry(&model).expect("checked above");
+                match CString::new(e.to_json().to_string()) {
+                    Ok(s) => s.into_raw(),
+                    Err(_) => ptr::null_mut(),
+                }
+            }
+            Err(detail) => {
+                set_error_detail(detail);
+                ptr::null_mut()
+            }
+        }
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Install progress callback: overall fraction 0.0..=1.0, a stage name
+/// (`download`, `verify`, `extract`, `post-install`, `done`), and the
+/// caller's userdata pointer. Fires on the installing thread.
+pub type CInstallProgress = Option<unsafe extern "C" fn(f64, *const c_char, *mut std::ffi::c_void)>;
+/// Cancellation probe; called between chunks/entries on the
+/// installing thread. True aborts the install.
+pub type CInstallCancelled = Option<unsafe extern "C" fn(*mut std::ffi::c_void) -> bool>;
+
+/// Install a model: verify → fetch (resumable `.part`, sha256, magic
+/// bytes, size floor) → extract → engine post-install (e.g. the G2P
+/// bundle) → atomic swap → neutral `.installed` manifest.
+///
+/// Synchronous on the CALLER'S thread; progress/cancel callbacks fire
+/// on that same thread; ONE install per process (a concurrent call
+/// fails fast). `TTS_MODELS_DIR` relocates the models directory.
+///
+/// # Safety
+/// All pointers must be valid null-terminated C strings; the callbacks
+/// (optional) must be sound for the duration of the call; `userdata`
+/// is passed through untouched.
+#[no_mangle]
+pub extern "C" fn tts_model_install(
+    engine_id: *const c_char,
+    model_id: *const c_char,
+    progress: CInstallProgress,
+    cancelled: CInstallCancelled,
+    userdata: *mut std::ffi::c_void,
+) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(engine) = required_cstr(engine_id, "engine_id") else {
+            return false;
+        };
+        let Some(model) = required_cstr(model_id, "model_id") else {
+            return false;
+        };
+        let source = match crate::local_models::find_source(Some(&engine), &model) {
+            Ok(s) => s,
+            Err(e) => {
+                set_error_detail(install_error_detail(&engine, &e));
+                return false;
+            }
+        };
+        if source.entry(&model).is_none() {
+            set_error_detail(ErrorDetail::new(
+                TtsErrorCode::ModelNotFound,
+                Some(&engine),
+                None,
+                "model id not in this engine's catalogue",
+            ));
+            return false;
+        }
+        let prog = |frac: f64, stage: &str| {
+            if let Some(cb) = progress {
+                // SAFETY: the caller's callback must be sound; the
+                // stage string outlives the call
+                unsafe { cb(frac, stage.as_ptr().cast(), userdata) };
+            }
+        };
+        let cancel = || {
+            cancelled.is_some_and(|cb| {
+                // SAFETY: same contract as the progress callback
+                unsafe { cb(userdata) }
+            })
+        };
+        match source.install(&model, &prog, &cancel) {
+            Ok(()) => true,
+            Err(e) => {
+                set_error_detail(install_error_detail(&engine, &e));
+                false
+            }
+        }
+    }))
+    .unwrap_or(false)
+}
+
+/// Remove an installed model (files + neutral `.installed` manifest).
+/// On Windows a live engine holding the files fails with an `InUse`
+/// detail rather than corrupting anything.
+///
+/// # Safety
+/// Both pointers must be valid null-terminated C strings.
+#[no_mangle]
+pub extern "C" fn tts_model_uninstall(engine_id: *const c_char, model_id: *const c_char) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(engine) = required_cstr(engine_id, "engine_id") else {
+            return false;
+        };
+        let Some(model) = required_cstr(model_id, "model_id") else {
+            return false;
+        };
+        match crate::local_models::find_source(Some(&engine), &model) {
+            Ok(source) => match source.uninstall(&model) {
+                Ok(()) => true,
+                Err(e) => {
+                    set_error_detail(install_error_detail(&engine, &e));
+                    false
+                }
+            },
+            Err(e) => {
+                set_error_detail(install_error_detail(&engine, &e));
+                false
+            }
+        }
+    }))
+    .unwrap_or(false)
+}
+
+/// The engine's models directory as a filesystem path string (UTF-8;
+/// `TTS_MODELS_DIR` override honored). NULL + error detail when the
+/// engine is not compiled in.
+///
+/// # Safety
+/// `engine_id` must be a valid null-terminated C string.
+#[no_mangle]
+pub extern "C" fn tts_models_dir(engine_id: *const c_char) -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(engine) = required_cstr(engine_id, "engine_id") else {
+            return ptr::null_mut();
+        };
+        if let Ok(source) = crate::local_models::find_source(Some(&engine), "") {
+            if let Ok(s) = CString::new(source.models_dir().to_string_lossy().into_owned()) {
+                return s.into_raw();
+            }
+            return ptr::null_mut();
+        }
+        set_error_detail(ErrorDetail::new(
+            TtsErrorCode::EngineNotAvailable,
+            Some(&engine),
+            None,
+            "no local-model source for this engine id in this build",
+        ));
+        ptr::null_mut()
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Case-insensitive substring search over every compiled-in catalogue
+/// (id, name, language codes and names). `limit` <= 0 means 50.
+///
+/// # Safety
+/// `query` must be a valid null-terminated C string.
+#[no_mangle]
+pub extern "C" fn tts_search_models_json(query: *const c_char, limit: i32) -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(query) = required_cstr(query, "query") else {
+            return ptr::null_mut();
+        };
+        let needle = query.to_lowercase();
+        let limit = if limit <= 0 { 50 } else { limit as usize };
+        let hits: Vec<serde_json::Value> = crate::local_models::sources()
+            .iter()
+            .flat_map(|s| s.list())
+            .filter(|e| {
+                e.id.to_lowercase().contains(&needle)
+                    || e.name.to_lowercase().contains(&needle)
+                    || e.languages.iter().any(|(c, n)| {
+                        c.to_lowercase().contains(&needle) || n.to_lowercase().contains(&needle)
+                    })
+            })
+            .take(limit)
+            .map(|e| e.to_json())
+            .collect();
+        match CString::new(serde_json::Value::Array(hits).to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => ptr::null_mut(),
+        }
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// The ctx-free installed-voice catalogue: every INSTALLED local
+/// model flattened into speakable voices — `engine`, `model`,
+/// `voice`, `name`, `languages`. No credentials in the payload; pair
+/// with [`tts_create_for_model`]. A UI's whole flow: list → pick →
+/// create → set voice → speak.
+#[no_mangle]
+pub extern "C" fn tts_installed_voice_catalog_json() -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let voices: Vec<serde_json::Value> = crate::local_models::sources()
+            .iter()
+            .flat_map(|s| s.voices())
+            .map(|v| v.to_json())
+            .collect();
+        match CString::new(serde_json::Value::Array(voices).to_string()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => ptr::null_mut(),
+        }
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Create an engine context for a catalogued model — the credentials
+/// format stays private to the wrapper (#102 F5). The model must be
+/// installed (or the engine's default lookup applies, same as
+/// `tts_create` with `{"modelId": ...}`).
+///
+/// # Safety
+/// Both pointers must be valid null-terminated C strings.
+#[no_mangle]
+pub extern "C" fn tts_create_for_model(
+    engine_id: *const c_char,
+    model_id: *const c_char,
+) -> *mut tts_ctx {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(engine) = required_cstr(engine_id, "engine_id") else {
+            return ptr::null_mut();
+        };
+        let Some(model) = required_cstr(model_id, "model_id") else {
+            return ptr::null_mut();
+        };
+        // reuse the tts_create path wholesale: same ctx, same error
+        // details — only the credentials construction differs
+        let creds = serde_json::json!({ "modelId": model }).to_string();
+        let (Ok(engine_c), Ok(creds_c)) = (CString::new(engine.as_str()), CString::new(creds))
+        else {
+            set_error("engine/model id contains a NUL byte");
+            return ptr::null_mut();
+        };
+        tts_create_inner(engine_c.as_ptr(), creds_c.as_ptr())
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// NULL-tolerant C-string reader.
+fn optional_cstr(ptr: *const c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: caller contract — a valid NUL-terminated C string
+    Some(
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// Required C-string reader that records the error detail on NULL.
+fn required_cstr(ptr: *const c_char, name: &str) -> Option<String> {
+    if ptr.is_null() {
+        let msg = format!("{name} must be a valid NUL-terminated C string");
+        set_error_detail(ErrorDetail::new(
+            TtsErrorCode::InvalidConfiguration,
+            None,
+            None,
+            &msg,
+        ));
+        return None;
+    }
+    optional_cstr(ptr)
 }
 
 /// Verify the context's credentials with an explicit "unverified"
