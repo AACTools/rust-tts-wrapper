@@ -81,16 +81,7 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
     // French flipped with the v0.4.0 locale validation: needs_bundle
     // with the front-end, blocked:g2p-unavailable without (same
     // reason class as German — validated data, absent front-end)
-    #[cfg(feature = "sherpa-g2p")]
-    assert_eq!(
-        registry["piper-fr_FR-siwis-medium"]["readiness"],
-        serde_json::Value::String("needs_bundle".to_string())
-    );
-    #[cfg(not(feature = "sherpa-g2p"))]
-    assert_eq!(
-        registry["piper-fr_FR-siwis-medium"]["readiness"],
-        serde_json::Value::String("blocked:g2p-unavailable".to_string())
-    );
+    expect_readiness(&registry, "piper-fr_FR-siwis-medium");
     // Hungarian: in neither voicegarden manifest
     assert_eq!(
         registry["piper-hu_HU-berta-medium"]["readiness"],
@@ -101,11 +92,8 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
         registry["supertonic-3-multilingual"]["readiness"],
         serde_json::Value::String("blocked:deprecated".to_string())
     );
-    // pl HAS an expanded bundle (pol.tar.gz) — not validated yet
-    assert_eq!(
-        registry["piper-pl_PL-gosia-medium"]["readiness"],
-        serde_json::Value::String("blocked:bundle-not-validated".to_string())
-    );
+    // pl flipped with the batch-1 campaign (#92): pol validated
+    expect_readiness(&registry, "piper-pl_PL-gosia-medium");
     assert_eq!(
         registry["kokoro-zh_en-int8"]["readiness"],
         serde_json::Value::String("ready".to_string())
@@ -128,6 +116,23 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
         m.as_object_mut().unwrap().remove("readiness");
     }
     assert_eq!(raw, got, "the enrichment must be purely additive");
+}
+
+/// A validated-flip locale: `needs_bundle` when the G2P front-end is
+/// compiled in, `blocked:g2p-unavailable` without it (validated data,
+/// absent front-end — the fix is a rebuild, not new data).
+#[cfg(feature = "sherpaonnx")]
+fn expect_readiness(registry: &serde_json::Value, id: &str) {
+    let expected = if cfg!(feature = "sherpa-g2p") {
+        "needs_bundle"
+    } else {
+        "blocked:g2p-unavailable"
+    };
+    assert_eq!(
+        registry[id]["readiness"],
+        serde_json::Value::String(expected.to_string()),
+        "{id}"
+    );
 }
 
 #[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
@@ -161,10 +166,10 @@ fn provision_reports_errors_for_ineligible_models() {
     assert_eq!(code, 5, "ModelNotFound: {detail}");
     assert!(detail.contains("not found"), "{detail}");
 
-    // pl model: bundle exists but is not validated → no row resolves
-    assert!(!tts_provision_sherpa_g2p_bundle(
-        c"piper-pl_PL-gosia-medium".as_ptr()
-    ));
+    // et model: bundle exists (base manifest) but the locale is not
+    // validated — pl flipped with batch-1, so et carries the
+    // published-but-unvalidated case now
+    assert!(!tts_provision_sherpa_g2p_bundle(c"coqui-et-cv".as_ptr()));
     let (code, detail) = last_detail();
     assert_eq!(code, 5, "{detail}");
     assert!(detail.contains("no validated G2P bundle"), "{detail}");
