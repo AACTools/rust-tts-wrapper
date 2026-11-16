@@ -3210,6 +3210,9 @@ mod tests {
     /// the v0.4.0 locale flips); the multilingual supertonic and
     /// every other model do not. Resolution itself is pinned in
     /// sherpa_lang's registry test; this pins the model-family half.
+    /// batch-1 pin: review deliberately on registry bumps
+    const EXPECTED_COMPAT_ELIGIBLE: usize = 395;
+
     #[test]
     fn test_compat_gate_against_full_registry() {
         let mut eligible = 0;
@@ -3245,14 +3248,27 @@ mod tests {
                 assert!(
                     row.is_some_and(|b| matches!(
                         b.bcp47,
-                        "de" | "en" | "fr" | "es" | "pt" | "it" | "ru"
+                        "de" | "en"
+                            | "fr"
+                            | "es"
+                            | "pt"
+                            | "it"
+                            | "ru"
+                            | "ca"
+                            | "cs"
+                            | "da"
+                            | "nl"
+                            | "pl"
+                            | "sk"
+                            | "sl"
+                            | "sv"
                     )),
                     "id {id}"
                 );
             }
         }
         assert_eq!(
-            eligible, 307,
+            eligible, EXPECTED_COMPAT_ELIGIBLE,
             "validated-locale compat-eligible model count moved"
         );
     }

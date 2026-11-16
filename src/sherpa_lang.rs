@@ -147,6 +147,60 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         key: "ru",
         validated: true, // piper-ru_RU-dmitri-medium: "У меня 42 дома" exact
     },
+    // ── batch-1 campaign flips (#92): probe 0-drop + whisper
+    // round-trip + number-vocabulary audit against the v0.4.0 bundles;
+    // cs/nl/pl/sk/sv emit dictionary-clean words, ca/da/sl ride the
+    // WFST fallback (probe + audio validated); da/sv split the
+    // one-and-twenty compounds (their dictionaries lack the closed
+    // forms; documented in the normalizer tables)
+    LangBundle {
+        bcp47: "ca",
+        archive: Archive::Base,
+        key: "ca",
+        validated: true, // piper-ca_ES-upc_pau: numbers via WFST, "42 cases" heard
+    },
+    LangBundle {
+        bcp47: "cs",
+        archive: Archive::Base,
+        key: "cs",
+        validated: true, // piper-cs_CZ-jirka: "Dobrý den, mám 40 domů" (medium, exact)
+    },
+    LangBundle {
+        bcp47: "da",
+        archive: Archive::Expanded,
+        key: "dan",
+        validated: true, // piper-da_DK-talesyntese: "jeg har fyre huse" audible
+    },
+    LangBundle {
+        bcp47: "nl",
+        archive: Archive::Expanded,
+        key: "nld",
+        validated: true, // piper-nl_NL-dii: "ik heb ... 40 huizen" (medium)
+    },
+    LangBundle {
+        bcp47: "pl",
+        archive: Archive::Expanded,
+        key: "pol",
+        validated: true, // piper-pl_PL-mc_speech: "Mam 40 domów" (medium, exact)
+    },
+    LangBundle {
+        bcp47: "sk",
+        archive: Archive::Expanded,
+        key: "slk",
+        validated: true, // piper-sk_SK-lili: number words audible
+    },
+    LangBundle {
+        bcp47: "sl",
+        archive: Archive::Expanded,
+        key: "slv",
+        validated: true, // piper-sl_SI-artur: "imam dva in štiri ..." audible
+    },
+    LangBundle {
+        bcp47: "sv",
+        archive: Archive::Expanded,
+        key: "swe",
+        validated: true, // piper-sv_SE-nst: hej/världen/två exact (single words)
+    },
 ];
 
 /// Primary language subtag of a lang code, lowercased: `"de"` from
@@ -242,6 +296,9 @@ fn validated_bundle_in<'a>(
 
 #[cfg(test)]
 mod tests {
+    /// Pin: review deliberately on registry bumps (batch-1 flips).
+    const EXPECTED_ENABLED_SINGLE: usize = 417;
+
     use super::*;
     use crate::types::SherpaLanguage;
 
@@ -275,7 +332,8 @@ mod tests {
         let m = model("piper-de_DE-thorsten-medium", "de", "DE");
         assert!(g2p_enabled_for(&m));
         assert!(g2p_enabled_for(&model("piper-en_US-amy-low", "en", "US")));
-        assert!(!g2p_enabled_for(&model(
+        // pl flipped with the batch-1 campaign (#92)
+        assert!(g2p_enabled_for(&model(
             "piper-pl_PL-gosia-medium",
             "pl",
             "PL"
@@ -378,10 +436,13 @@ mod tests {
         let m = model("piper-en_US-amy-low", "en", "US");
         let b = default_bundle_for_model(&m).expect("english resolves");
         assert_eq!((b.key, b.archive), ("eng-US", Archive::Expanded));
-        // Polish piper voices exist but no pl bundle is published
+        // Polish resolves since the batch-1 flips
         let m = model("piper-pl_PL-gosia-medium", "pl", "PL");
+        let b = default_bundle_for_model(&m).expect("polish resolves");
+        assert_eq!((b.key, b.archive), ("pol", Archive::Expanded));
+        // Hungarian still has no bundle
+        let m = model("piper-hu_HU-berta-medium", "hu", "HU");
         assert!(default_bundle_for_model(&m).is_none());
-        assert!(bundles_for_language("pl").is_empty());
     }
 
     #[test]
@@ -446,7 +507,20 @@ mod tests {
             let single_enabled = info.language.len() == 1
                 && matches!(
                     primary_subtag(&info.language[0].lang_code).as_str(),
-                    "de" | "en" | "fr" | "es" | "pt" | "it" | "ru"
+                    "de" | "en"
+                        | "fr"
+                        | "es"
+                        | "pt"
+                        | "it"
+                        | "ru"
+                        | "ca"
+                        | "cs"
+                        | "da"
+                        | "nl"
+                        | "pl"
+                        | "sk"
+                        | "sl"
+                        | "sv"
                 )
                 && !crate::sherpaonnx_engine::is_bilingual_en_compound(&id.to_ascii_lowercase());
             if single_enabled {
@@ -456,9 +530,20 @@ mod tests {
                     matches!(
                         (b.key, b.archive),
                         (
-                            "deu" | "eng-US" | "fra" | "spa-ES" | "por-BR" | "ita",
+                            "deu"
+                                | "eng-US"
+                                | "fra"
+                                | "spa-ES"
+                                | "por-BR"
+                                | "ita"
+                                | "dan"
+                                | "nld"
+                                | "pol"
+                                | "slk"
+                                | "slv"
+                                | "swe",
                             Archive::Expanded
-                        ) | ("ru", Archive::Base)
+                        ) | ("ru" | "ca" | "cs", Archive::Base)
                     ),
                     "id {id}"
                 );
@@ -466,12 +551,12 @@ mod tests {
                 assert!(resolved.is_none(), "id {id} must not resolve");
             }
         }
-        // 52 de + 277 en/fr/es/pt/it/ru single-language entries
-        // resolve (the #92 v0.4.0 locale flips). Resolution is NOT
-        // family-gated — the engine's compat-lexicon pin covers the
-        // vits-family subset separately. Review on registry bumps.
+        // the validated-locale fleets (batch-1 flips added
+        // ca/cs/da/nl/pl/sk/sl/sv). Resolution is NOT family-gated —
+        // the engine's compat-lexicon pin covers the vits-family
+        // subset separately. Review on registry bumps.
         assert_eq!(
-            de_single, 329,
+            de_single, EXPECTED_ENABLED_SINGLE,
             "validated-locale single-language model count moved"
         );
     }
@@ -484,11 +569,24 @@ mod tests {
         // resolve the other bundle via bcp47 matching.
         for b in LANG_BUNDLES {
             match b.archive {
-                Archive::Base => assert!(matches!(b.key, "de" | "ru"), "{}", b.key),
+                Archive::Base => {
+                    assert!(matches!(b.key, "de" | "ru" | "ca" | "cs"), "{}", b.key);
+                }
                 Archive::Expanded => assert!(
                     matches!(
                         b.key,
-                        "deu" | "eng-US" | "fra" | "spa-ES" | "por-BR" | "ita"
+                        "deu"
+                            | "eng-US"
+                            | "fra"
+                            | "spa-ES"
+                            | "por-BR"
+                            | "ita"
+                            | "dan"
+                            | "nld"
+                            | "pol"
+                            | "slk"
+                            | "slv"
+                            | "swe"
                     ),
                     "{}",
                     b.key
