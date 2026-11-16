@@ -201,6 +201,8 @@ def _load_lib():
     _lib.tts_search_models_json.argtypes = [ctypes.c_char_p, ctypes.c_int32]
     _lib.tts_installed_voice_catalog_json.restype = ctypes.c_void_p
     _lib.tts_installed_voice_catalog_json.argtypes = []
+    _lib.tts_model_adopt.restype = ctypes.c_bool
+    _lib.tts_model_adopt.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
     _lib.tts_create_for_model.restype = ctypes.c_void_p
     _lib.tts_create_for_model.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 
@@ -218,6 +220,7 @@ def _load_lib():
             "tts_models_dir",
             "tts_search_models_json",
             "tts_installed_voice_catalog_json",
+            "tts_model_adopt",
             "tts_create_for_model",
         )
     )
@@ -979,6 +982,22 @@ class TTSClient:
             detail = cls.get_global_last_error_detail()
             raise TTSError(
                 f"installing '{model_id}' failed: "
+                f"{detail.message if detail and detail.message else 'unknown error'}",
+                detail,
+            )
+
+    @classmethod
+    def adopt_model(cls, engine_id: str, model_id: str) -> None:
+        """Adopt an EXISTING model directory at the engine's
+        ``models_dir/<model_id>`` as installed (#106): validates the
+        files and writes the neutral manifest. For migrating an app's
+        own model layout — move the verified files into place first."""
+        _require_models_abi()
+        lib = _load_lib()
+        if not lib.tts_model_adopt(engine_id.encode(), model_id.encode()):
+            detail = cls.get_global_last_error_detail()
+            raise TTSError(
+                f"adopting '{model_id}' failed: "
                 f"{detail.message if detail and detail.message else 'unknown error'}",
                 detail,
             )

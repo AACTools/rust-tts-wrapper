@@ -241,6 +241,9 @@ declare class TtsClient extends NodeJS.EventEmitter {
       cancelled?: () => boolean;
     },
   ): void;
+  /** Adopt an existing model directory (validates files, writes the
+   * neutral manifest) — for migrating an app's own layout (#106). */
+  static adoptModel(engineId: string, modelId: string): void;
   /** Remove an installed model (files + neutral manifest). */
   static uninstallModel(engineId: string, modelId: string): void;
   /** Create a client for a catalogued model (credentials stay

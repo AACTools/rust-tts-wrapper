@@ -496,6 +496,21 @@ bool tts_model_install(const char *engine_id,
                        void *userdata);
 
 /**
+ * Adopt an EXISTING model directory at the engine's
+ * `models_dir/<model_id>` as an installed model (#106): the engine
+ * validates the files it needs to load the model and writes the
+ * neutral `.installed` manifest from the registry digest. For apps
+ * migrating their own model layouts (the app moves its verified
+ * files into place first; its own verification markers stay the
+ * app's). Model ids are preserved, so saved voice selections keep
+ * resolving.
+ *
+ * # Safety
+ * Both pointers must be valid null-terminated C strings.
+ */
+bool tts_model_adopt(const char *engine_id, const char *model_id);
+
+/**
  * Remove an installed model (files + neutral `.installed` manifest).
  * On Windows a live engine holding the files fails with an `InUse`
  * detail rather than corrupting anything.

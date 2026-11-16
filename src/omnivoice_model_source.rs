@@ -134,6 +134,36 @@ impl ModelSource for OmnivoiceModelSource {
         Ok(())
     }
 
+    /// Adopt an existing GGUF pair at `models_dir/<id>` (#106): both
+    /// files must be present (the same pair `resolve_installed_files`
+    /// requires), then the neutral manifest.
+    fn adopt(&self, id: &str) -> Result<(), InstallError> {
+        if registry_rows().into_iter().all(|(rid, _)| rid != id) {
+            return Err(InstallError::ModelNotFound);
+        }
+        if resolve_installed_files(id).is_none() {
+            return Err(InstallError::UnsupportedUrl(format!(
+                "the base and codec GGUFs must both be present under {}",
+                models_dir().join(id).display()
+            )));
+        }
+        let (_, m) = registry_rows()
+            .into_iter()
+            .find(|(rid, _)| *rid == id)
+            .expect("checked above");
+        InstallManifest {
+            id: id.to_string(),
+            engine: "omnivoice-local".to_string(),
+            sha256: m.sha256.clone().unwrap_or_default(),
+            files: Vec::new(),
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        }
+        .write_to(&models_dir().join(id))?;
+        Ok(())
+    }
+
     fn models_dir(&self) -> PathBuf {
         models_dir()
     }

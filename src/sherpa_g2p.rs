@@ -4831,31 +4831,56 @@ pub fn provision_bundle(archive: Archive, key: &str) -> Result<PathBuf, String> 
     })
 }
 
+/// Is the bundle for `key` present and stamp-verified in the cache,
+/// with NO network access? (The catalogue's offline-readiness check —
+/// #106. Shares the exact cache-hit logic `provision_from` uses.)
+#[cfg(feature = "sherpaonnx")]
+pub(crate) fn bundle_cached(archive: Archive, key: &str) -> bool {
+    let cache = voicegarden_lexicons::default_cache_dir();
+    let manifest_name = match archive {
+        Archive::Base => "lexicons.json",
+        Archive::Expanded => "expanded.json",
+    };
+    cached_bundle_dir(&cache, manifest_name, key).is_some()
+}
+
+/// The stamp-verified cache dir for `key`, or None (the shared
+/// cache-hit predicate of [`provision_bundle`], factored out so the
+/// catalogue can consult it offline).
+#[cfg(feature = "sherpaonnx")]
+fn cached_bundle_dir(cache: &Path, manifest_name: &str, key: &str) -> Option<PathBuf> {
+    let dir = cache.join(key);
+    let stamp = std::fs::read_to_string(dir.join(".sha256")).ok()?;
+    let has_bundle =
+        dir.join(format!("{key}.fst")).is_file() && dir.join(format!("{key}.pho")).is_file();
+    if !has_bundle {
+        return None;
+    }
+    let manifest: Manifest =
+        serde_json::from_slice(&std::fs::read(cache.join(manifest_name)).ok()?).ok()?;
+    manifest
+        .languages
+        .iter()
+        .any(|entry| entry.lang == key && entry.sha256 == stamp)
+        .then_some(dir)
+}
+
 fn provision_from(
     cache: &Path,
     manifest_name: &str,
     key: &str,
     open_archive: impl FnOnce() -> Result<LexiconArchive, String>,
 ) -> Result<PathBuf, String> {
-    let dir = cache.join(key);
-    let stamp = std::fs::read_to_string(dir.join(".sha256")).ok();
-    let has_cached_bundle =
-        dir.join(format!("{key}.fst")).is_file() && dir.join(format!("{key}.pho")).is_file();
-
-    let stamp = stamp.filter(|_| has_cached_bundle);
-    if let Some(stamp) = &stamp {
-        let cached_manifest = std::fs::read(cache.join(manifest_name))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Manifest>(&bytes).ok());
-        if cached_manifest.is_some_and(|manifest| {
-            manifest
-                .languages
-                .iter()
-                .any(|entry| entry.lang == key && entry.sha256 == *stamp)
-        }) {
-            return Ok(dir);
-        }
+    if let Some(dir) = cached_bundle_dir(cache, manifest_name, key) {
+        return Ok(dir);
     }
+    let dir = cache.join(key);
+    let stamp = std::fs::read_to_string(dir.join(".sha256"))
+        .ok()
+        .filter(|_| {
+            // a stamp without the bundle files proves nothing
+            dir.join(format!("{key}.fst")).is_file() && dir.join(format!("{key}.pho")).is_file()
+        });
 
     let archive = open_archive()?;
     // VoiceGarden also resolves BCP-47 aliases. The allowlist names an exact
@@ -4863,6 +4888,8 @@ fn provision_from(
     let Some(entry) = archive.entry(key).filter(|entry| entry.lang == key) else {
         return Err(format!("no '{key}' bundle in the archive manifest"));
     };
+    // files + stamp already match the REMOTE manifest (the local
+    // manifest is absent/stale): no fetch needed
     if stamp.as_deref() == Some(entry.sha256.as_str()) {
         return Ok(dir);
     }
