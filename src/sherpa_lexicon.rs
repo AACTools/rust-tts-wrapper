@@ -205,6 +205,19 @@ const STRIPPABLE_DIACRITICS: [char; 8] = [
 /// the deu lexicon; IPA `ɡ` (U+0261) is what piper vocabularies carry.
 const HOMOGLYPHS: &[(char, char)] = &[('g', '\u{0261}')];
 
+/// Multi-character sound-identity equivalences — notations for the
+/// SAME sound that the char-level homoglyph pass cannot express.
+/// `r̝` (r + combining caron, the raised-trill notation WikiPron's
+/// Polish lexicons use for graphemic *rz*) is the voiced retroflex
+/// fricative the piper voices tokenize as `ʐ` (voicegarden-lexicons#5
+/// audit; folding it closes the pol bundle to ~0 phone drops — the
+/// NFD mark-drop would otherwise degrade it to the trill `r`). Both
+/// spellings are listed because `map_symbol` NFC-normalizes first:
+/// r + U+030C composes to the precomposed `ř` (U+0159). In-vocab
+/// identity always outranks the fold, so a Czech voice whose
+/// vocabulary carries its own `ř` is untouched.
+const SOUND_EQUIV: &[(&str, &str)] = &[("r\u{030C}", "ʐ"), ("\u{0159}", "ʐ")];
+
 fn homoglyph_sub(s: &str) -> String {
     s.chars()
         .map(|c| {
@@ -216,6 +229,15 @@ fn homoglyph_sub(s: &str) -> String {
         .collect()
 }
 
+/// Sound-identity substitution for multi-char symbols; identity for
+/// everything else.
+fn sound_equiv_sub(s: &str) -> String {
+    SOUND_EQUIV
+        .iter()
+        .find(|(a, _)| s == *a)
+        .map_or_else(|| s.to_string(), |(_, b)| b.to_string())
+}
+
 /// A bundle phone symbol → model-token-sequence mapper driven entirely
 /// by the target vocabulary: no per-language tables. The ladder, per
 /// symbol (SHERPA_NONENGLISH_G2P_PLAN.md Phase 2, rules 1–9; every
@@ -223,7 +245,9 @@ fn homoglyph_sub(s: &str) -> String {
 /// resolve recursively, resolutions are memoized):
 ///
 /// 1. NFC → exact vocabulary match (identity);
-/// 2. homoglyph substitution (`g` → `ɡ`), identity retry;
+/// 2. homoglyph substitution (`g` → `ɡ`) and sound-identity
+///    substitution (`r̝` → `ʐ`, the WikiPron-notation raised trill the
+///    Polish lexicons use for *rz*), identity retry;
 /// 3. tie bars: the tie-stripped whole (`p͡f` → `pf`) if it is a token,
 ///    else split at the tie bars and resolve each segment recursively
 ///    (`p͡f` → `p` `f`; `t͡s̯` → `t` `s` via the segment ladder);
@@ -287,8 +311,8 @@ impl VocabPhonemeMap {
 
     /// The ladder, on the memoized path's already-NFC'd input.
     fn resolve(&mut self, sym: &str) -> Option<Vec<String>> {
-        // rules 1–2: identity, then homoglyph identity
-        for candidate in [sym.to_string(), homoglyph_sub(sym)] {
+        // rules 1–2: identity, homoglyph identity, sound identity
+        for candidate in [sym.to_string(), homoglyph_sub(sym), sound_equiv_sub(sym)] {
             if self.target_vocab.contains(&candidate) {
                 return Some(vec![candidate]);
             }
@@ -321,7 +345,7 @@ impl VocabPhonemeMap {
     /// stress handling, char split.
     fn resolve_segment(&mut self, seg: &str) -> Option<Vec<String>> {
         // rules 1–2 again at segment level
-        for candidate in [seg.to_string(), homoglyph_sub(seg)] {
+        for candidate in [seg.to_string(), homoglyph_sub(seg), sound_equiv_sub(seg)] {
             if self.target_vocab.contains(&candidate) {
                 return Some(vec![candidate]);
             }
@@ -1243,6 +1267,21 @@ mod tests {
         assert_eq!(map.map_symbol("ʃ").unwrap(), vec!["ʃ"]);
         // rule 2: ASCII g → IPA ɡ (92,996 occurrences in deu)
         assert_eq!(map.map_symbol("g").unwrap(), vec!["\u{0261}"]);
+        // rule 2 (sound identity): WikiPron-notation r̝ (r + caron,
+        // the raised trill their Polish lexicons use for graphemic
+        // rz) is the retroflex fricative piper-pl tokenizes as ʐ —
+        // without the fold the diacritic strip would degrade it to
+        // the trill r (#108, voicegarden-lexicons#5)
+        let pl_tokens = write_test_tokens(&["a", "ɔ", "ʐ", "r", "ʂ", "t", "ɕ"]);
+        let mut pl_map = VocabPhonemeMap::for_language(&pl_tokens).unwrap();
+        assert_eq!(pl_map.map_symbol("r\u{030C}").unwrap(), vec!["ʐ"]);
+        // a vocabulary WITHOUT ʐ: the fold cannot fire (the ladder
+        // only emits in-vocabulary symbols) and the pre-existing NFD
+        // mark-drop path degrades r̝ to the trill r — documented
+        // behavior, not a regression: piper-pl carries ʐ
+        let no_retroflex = write_test_tokens(&["a", "ɔ", "r", "ʂ", "t", "ɕ"]);
+        let mut strict_map = VocabPhonemeMap::for_language(&no_retroflex).unwrap();
+        assert_eq!(strict_map.map_symbol("r\u{030C}").unwrap(), vec!["r"]);
         // rule 3: tie-split p͡f → p f (7,910 occurrences)
         assert_eq!(map.map_symbol("p\u{0361}f").unwrap(), vec!["p", "f"]);
         // rule 3 + 5 chained: t͡s̯ → t s (tie-split, then offglide strip)

@@ -25,14 +25,24 @@ use crate::types::SherpaModelInfo;
 /// each entry's `bcp47`). NOT the validated allowlist (that is
 /// [`crate::sherpa_lang::LANG_BUNDLES`]); this set distinguishes
 /// `blocked:bundle-not-validated` (data exists, validation pending)
-/// from `blocked:no-bundle` (no data at all). The seven validated
-/// locales (de en fr es pt it ru) never reach this set — their
-/// allowlist row answers first — so they are not listed. Sync when
+/// from `blocked:no-bundle` (no data at all). The validated locales
+/// never reach this set — their allowlist row answers first. Sync when
 /// voicegarden-lexicons publishes new languages — both manifests.
+///
+/// Classification rule: this set lists every PUBLISHED-but-unvalidated
+/// locale (whatever the voice's own front-end situation — grapheme vs
+/// lexicon is a validation question, not a publication one), except
+/// locales the wrapper's front-end cannot use at all, which stay
+/// `blocked:no-bundle` so the installer never provisions a bundle the
+/// G2P path would reject (hr: multi-char <BOS> tokens panic the
+/// codepoints conversion; vi: grapheme voice, no lexicon applies).
 const PUBLISHED_BUNDLE_LOCALES: &[&str] = &[
-    // base manifest (unvalidated rows only)
-    "fa", "sw", // expanded-only additions (bcp47 primary subtags), unvalidated
-    "ar", "bn", "el", "fi", "he", "hi", "id", "is", "nb", "ro", "ta", "tr", "ur",
+    // base manifest (unvalidated rows only; batch-2 flipped
+    // af cy eu hu ka kk ko lb lv ml ne sq sr uk out, is/no route to
+    // their expanded bundles)
+    "et", "ga", "gu", "lt", "mt", "yue", "zh",
+    // expanded-only additions (bcp47 primary subtags), unvalidated
+    "fa", "sw", "ar", "bn", "el", "fi", "he", "hi", "id", "ro", "ta", "tr", "ur",
 ];
 
 /// Compute the readiness value for one registry model.
@@ -265,9 +275,10 @@ mod tests {
             "blocked:g2p-unavailable"
         );
 
-        // no bundle for the locale at all (Hungarian: neither manifest)
+        // no bundle for the locale at all (Tswana: no data anywhere —
+        // Hungarian flipped in batch-2)
         assert_eq!(
-            readiness_for(&model("piper-hu_HU-x", "vits", "hu"), true, false),
+            readiness_for(&model("some-tn_BW-x", "vits", "tn"), true, false),
             "blocked:no-bundle"
         );
 
@@ -325,21 +336,64 @@ mod tests {
         assert_eq!(readiness_for(&no_lang, true, false), "blocked:no-language");
     }
 
+    /// Batch-2 flip spot-check (#92 wave 2): a flipped locale moves
+    /// from no-bundle to needs_bundle (front-end compiled in) or
+    /// blocked:g2p-unavailable (validated data, absent front-end —
+    /// the same reason class as German/French).
+    #[test]
+    fn readiness_batch2_flip_moves_locales_to_needs_bundle() {
+        for (id, lang) in [
+            ("piper-hu_HU-berta-medium", "hu"),
+            ("piper-is_IS-steinn-medium", "is"),
+            ("piper-no_NO-talesyntese-medium", "no"),
+            ("piper-ka_GE-natia-medium", "ka"),
+        ] {
+            #[cfg(feature = "sherpa-g2p")]
+            assert_eq!(
+                readiness_for(&model(id, "vits", lang), true, false),
+                "needs_bundle",
+                "{id}"
+            );
+            #[cfg(not(feature = "sherpa-g2p"))]
+            assert_eq!(
+                readiness_for(&model(id, "vits", lang), true, false),
+                "blocked:g2p-unavailable",
+                "{id}"
+            );
+        }
+    }
+
     /// The published-locale set must cover BOTH voicegarden manifests
     /// (the first version shipped base-only and mislabeled 95 models
     /// as no-bundle; loop-review). Spot-pin the expanded-only locales.
     #[test]
     fn published_locales_cover_both_manifests() {
-        // the batch-1 flips moved pl/da/sk out (validated now); the
-        // spot-pins stay on still-unvalidated expanded locales
-        for l in ["ar", "is", "tr", "fi", "el", "hi", "ro"] {
+        // the batch-2 flips moved is/nb out (their allowlist rows
+        // answer first); the spot-pins stay on still-unvalidated
+        // locales from each manifest
+        for l in ["ar", "tr", "fi", "el", "hi", "ro"] {
             assert!(
                 PUBLISHED_BUNDLE_LOCALES.contains(&l),
                 "expanded-manifest locale {l} missing"
             );
         }
-        // and a locale in NEITHER manifest stays no-bundle
+        for l in ["et", "ga", "lt", "mt", "yue"] {
+            assert!(
+                PUBLISHED_BUNDLE_LOCALES.contains(&l),
+                "base-manifest locale {l} missing"
+            );
+        }
+        // and a locale in NEITHER manifest stays no-bundle (Tswana:
+        // no data anywhere — ku/tn are the two, per the voicegarden
+        // coverage audit)
+        assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"tn"));
+        assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"ku"));
+        // flipped locales answer through the allowlist now
+        assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"is"));
         assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"hu"));
-        assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"zh"));
+        // hr/vi: published upstream but unusable by this front-end —
+        // deliberately NOT listed (provisioning would fail)
+        assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"hr"));
+        assert!(!PUBLISHED_BUNDLE_LOCALES.contains(&"vi"));
     }
 }

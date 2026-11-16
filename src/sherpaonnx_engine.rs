@@ -3207,11 +3207,13 @@ mod tests {
     /// The compat gate over the full pinned registry: exactly the
     /// validated-locale single-language vits-family models qualify
     /// (de/en since the codepoints migration; fr/es/pt/it/ru since
-    /// the v0.4.0 locale flips); the multilingual supertonic and
+    /// the v0.4.0 locale flips; ca/cs/da/nl/pl/sk/sl/sv batch-1;
+    /// af cy eu hu is ka kk ko lb lv ml ne no sq sr uk batch-2,
+    /// #92 wave 2: 395 → 483); the multilingual supertonic and
     /// every other model do not. Resolution itself is pinned in
     /// sherpa_lang's registry test; this pins the model-family half.
-    /// batch-1 pin: review deliberately on registry bumps
-    const EXPECTED_COMPAT_ELIGIBLE: usize = 395;
+    /// batch-2 pin: review deliberately on registry bumps
+    const EXPECTED_COMPAT_ELIGIBLE: usize = 483;
 
     #[test]
     fn test_compat_gate_against_full_registry() {
@@ -3262,6 +3264,22 @@ mod tests {
                             | "sk"
                             | "sl"
                             | "sv"
+                            | "af"
+                            | "cy"
+                            | "eu"
+                            | "hu"
+                            | "is"
+                            | "ka"
+                            | "kk"
+                            | "ko"
+                            | "lb"
+                            | "lv"
+                            | "ml"
+                            | "ne"
+                            | "no"
+                            | "sq"
+                            | "sr"
+                            | "uk"
                     )),
                     "id {id}"
                 );

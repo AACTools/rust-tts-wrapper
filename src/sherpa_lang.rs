@@ -201,6 +201,115 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         key: "swe",
         validated: true, // piper-sv_SE-nst: hej/världen/två exact (single words)
     },
+    // ── batch-2 locale flips (#92 wave 2, voicegarden v0.5.0–v0.6.0):
+    // every locale probe-validated against its smallest voice —
+    // 0 words dropped with spelled-out numbers, and each normalizer's
+    // emitted words cross-checked against the bundle lexicons (words
+    // the dictionary lacks ride the per-character fallback, which the
+    // probes exercised). Icelandic flipped only now: the v0.5.0
+    // dictionary fix landed the compound tens (þrjátíu…), previously
+    // the blocker. Norwegian routes to the expanded nob bundle
+    // (38,981 entries, carries førtito/hundre/millioner) — the base
+    // no bundle is a 2,714-entry scrape (voicegarden-lexicons#5,
+    // rust-tts-wrapper#108). hr/vi stay out: the coqui hr voice has
+    // multi-char <BOS> tokens the codepoints path cannot address, and
+    // vi is a grapheme voice (no lexicon applies — voicegarden audit).
+    LangBundle {
+        bcp47: "af",
+        archive: Archive::Base,
+        key: "af",
+        validated: true, // mimic3-af_ZA-google-low: "twee en veertig" 0 dropped
+    },
+    LangBundle {
+        bcp47: "cy",
+        archive: Archive::Base,
+        key: "cy",
+        validated: true, // piper-cy_GB-gwryw_gogleddol: modern decimal deg/dau ddeg
+    },
+    LangBundle {
+        bcp47: "eu",
+        archive: Archive::Base,
+        key: "eu",
+        validated: true, // piper-eu_ES-maider: berrogeita bi (0 dropped)
+    },
+    LangBundle {
+        bcp47: "hu",
+        archive: Archive::Base,
+        key: "hu",
+        validated: true, // piper-hu_HU-berta: negyvenkét házam (0 dropped)
+    },
+    LangBundle {
+        bcp47: "is",
+        archive: Archive::Expanded,
+        key: "isl",
+        validated: true, // piper-is_IS-steinn: fjörutíu og tveir — v0.5.0 compound-tens fix
+    },
+    LangBundle {
+        bcp47: "ka",
+        archive: Archive::Base,
+        key: "ka",
+        validated: true, // piper-ka_GE-natia: ორმოცდაორი (0 dropped)
+    },
+    LangBundle {
+        bcp47: "kk",
+        archive: Archive::Base,
+        key: "kk",
+        validated: true, // piper-kk_KZ-raya-low: қырық екі (0 dropped; 669-entry NOTICE bundle)
+    },
+    LangBundle {
+        bcp47: "ko",
+        archive: Archive::Base,
+        key: "ko",
+        validated: true, // mimic3-ko_KO-kss_low: 마흔두 (0 dropped)
+    },
+    LangBundle {
+        bcp47: "lb",
+        archive: Archive::Base,
+        key: "lb",
+        validated: true, // piper-lb_LU-marylux: probe sentence 0 dropped
+    },
+    LangBundle {
+        bcp47: "lv",
+        archive: Archive::Base,
+        key: "lv",
+        validated: true, // piper-lv_LV-aivars: četrdesmit divas (0 dropped)
+    },
+    LangBundle {
+        bcp47: "ml",
+        archive: Archive::Base,
+        key: "ml",
+        validated: true, // piper-ml_IN-arjun: നാൽപത്തിരണ്ട് (0 dropped)
+    },
+    LangBundle {
+        bcp47: "ne",
+        archive: Archive::Base,
+        key: "ne",
+        validated: true, // piper-ne_NP-google-low: बयालीस (lexicalized compounds in dict)
+    },
+    LangBundle {
+        bcp47: "no",
+        archive: Archive::Expanded,
+        key: "nob",
+        validated: true, // piper-no_NO-talesyntese: førtito — nob (39k) over base no (2.7k)
+    },
+    LangBundle {
+        bcp47: "sq",
+        archive: Archive::Base,
+        key: "sq",
+        validated: true, // piper-sq_AL-edon: dyzet e dy (0 dropped)
+    },
+    LangBundle {
+        bcp47: "sr",
+        archive: Archive::Base,
+        key: "sr",
+        validated: true, // piper-sr_RS-serbski_institut: четрдесет и две (Cyrillic, 0 dropped)
+    },
+    LangBundle {
+        bcp47: "uk",
+        archive: Archive::Base,
+        key: "uk",
+        validated: true, // piper-uk_UA-lada-low: сорок два (0 dropped)
+    },
 ];
 
 /// Primary language subtag of a lang code, lowercased: `"de"` from
@@ -297,7 +406,17 @@ fn validated_bundle_in<'a>(
 #[cfg(test)]
 mod tests {
     /// Pin: review deliberately on registry bumps (batch-1 flips).
-    const EXPECTED_ENABLED_SINGLE: usize = 417;
+    /// batch-2 (#92 wave 2): 417 → 505 (af cy eu hu is ka kk ko lb
+    /// lv ml ne no sq sr uk fleets).
+    const EXPECTED_ENABLED_SINGLE: usize = 505;
+
+    /// The validated-fleet languages the registry resolution test
+    /// pins (mirror of the allowlist rows' bcp47s, batch-1 + batch-2).
+    const VALIDATED_FLEET: &[&str] = &[
+        "de", "en", "fr", "es", "pt", "it", "ru", "ca", "cs", "da", "nl", "pl", "sk", "sl", "sv",
+        "af", "cy", "eu", "hu", "is", "ka", "kk", "ko", "lb", "lv", "ml", "ne", "no", "sq", "sr",
+        "uk",
+    ];
 
     use super::*;
     use crate::types::SherpaLanguage;
@@ -337,6 +456,23 @@ mod tests {
             "piper-pl_PL-gosia-medium",
             "pl",
             "PL"
+        )));
+        // batch-2 flips (#92 wave 2): one per structural family —
+        // nob-routed Norwegian, expanded Icelandic, base Georgian
+        assert!(g2p_enabled_for(&model(
+            "piper-no_NO-talesyntese-medium",
+            "no",
+            "NO"
+        )));
+        assert!(g2p_enabled_for(&model(
+            "piper-is_IS-steinn-medium",
+            "is",
+            "IS"
+        )));
+        assert!(g2p_enabled_for(&model(
+            "piper-ka_GE-natia-medium",
+            "ka",
+            "GE"
         )));
         assert!(!g2p_enabled_for(&model("melo-zh_en-melo-tts", "zh", "CN")));
 
@@ -440,8 +576,19 @@ mod tests {
         let m = model("piper-pl_PL-gosia-medium", "pl", "PL");
         let b = default_bundle_for_model(&m).expect("polish resolves");
         assert_eq!((b.key, b.archive), ("pol", Archive::Expanded));
-        // Hungarian still has no bundle
+        // Hungarian flipped in batch-2 (closed-compound normalizer)
         let m = model("piper-hu_HU-berta-medium", "hu", "HU");
+        let b = default_bundle_for_model(&m).expect("hungarian resolves");
+        assert_eq!((b.key, b.archive), ("hu", Archive::Base));
+        // Norwegian routes to the expanded nob bundle (not base no)
+        let m = model("piper-no_NO-talesyntese-medium", "no", "NO");
+        let b = default_bundle_for_model(&m).expect("norwegian resolves");
+        assert_eq!((b.key, b.archive), ("nob", Archive::Expanded));
+        // Croatian stays out (multi-char <BOS> tokens, #108)
+        let m = model("coqui-hr-cv", "hr", "HR");
+        assert!(default_bundle_for_model(&m).is_none());
+        // a locale with no bundle anywhere
+        let m = model("some-tn_BW-voice", "tn", "BW");
         assert!(default_bundle_for_model(&m).is_none());
     }
 
@@ -480,84 +627,103 @@ mod tests {
         // English vits models now resolve to the en bundle row
         let mut de_single = 0;
         for (id, m) in sherpa_onnx_models::models() {
-            let info = SherpaModelInfo {
-                id: id.clone(),
-                model_type: m.model_type.clone(),
-                engines: String::new(),
-                name: String::new(),
-                language: m
-                    .language
-                    .iter()
-                    .map(|l| SherpaLanguage {
-                        lang_code: l.lang_code.clone(),
-                        language_name: l.language_name.clone(),
-                        country: l.country.clone(),
-                    })
-                    .collect(),
-                sample_rate: m.sample_rate,
-                num_speakers: m.num_speakers,
-                quality: String::new(),
-                url: String::new(),
-                compression: false,
-                filesize_mb: 0.0,
-                license: String::new(),
-                license_url: String::new(),
-            };
+            let info = registry_info(id, m);
             let resolved = default_bundle_for_model(&info);
             let single_enabled = info.language.len() == 1
-                && matches!(
-                    primary_subtag(&info.language[0].lang_code).as_str(),
-                    "de" | "en"
-                        | "fr"
-                        | "es"
-                        | "pt"
-                        | "it"
-                        | "ru"
-                        | "ca"
-                        | "cs"
-                        | "da"
-                        | "nl"
-                        | "pl"
-                        | "sk"
-                        | "sl"
-                        | "sv"
-                )
+                && VALIDATED_FLEET.contains(&primary_subtag(&info.language[0].lang_code).as_str())
                 && !crate::sherpaonnx_engine::is_bilingual_en_compound(&id.to_ascii_lowercase());
             if single_enabled {
                 de_single += 1;
-                let b = resolved.expect("single-language enabled model resolves");
-                assert!(
-                    matches!(
-                        (b.key, b.archive),
-                        (
-                            "deu"
-                                | "eng-US"
-                                | "fra"
-                                | "spa-ES"
-                                | "por-BR"
-                                | "ita"
-                                | "dan"
-                                | "nld"
-                                | "pol"
-                                | "slk"
-                                | "slv"
-                                | "swe",
-                            Archive::Expanded
-                        ) | ("ru" | "ca" | "cs", Archive::Base)
-                    ),
-                    "id {id}"
+                assert_resolved_row(
+                    resolved.expect("single-language enabled model resolves"),
+                    id,
                 );
             } else {
                 assert!(resolved.is_none(), "id {id} must not resolve");
             }
         }
         // the validated-locale fleets (batch-1 flips added
-        // ca/cs/da/nl/pl/sk/sl/sv). Resolution is NOT family-gated —
-        // the engine's compat-lexicon pin covers the vits-family
-        // subset separately. Review on registry bumps.
+        // ca/cs/da/nl/pl/sk/sl/sv; batch-2 added af cy eu hu is ka
+        // kk ko lb lv ml ne no sq sr uk). Resolution is NOT
+        // family-gated — the engine's compat-lexicon pin covers the
+        // vits-family subset separately. Review on registry bumps.
         assert_eq!(
             de_single, EXPECTED_ENABLED_SINGLE,
             "validated-locale single-language model count moved"
+        );
+    }
+
+    /// A registry model shaped as a [`SherpaModelInfo`] for
+    /// resolution tests.
+    fn registry_info(id: &str, m: &sherpa_onnx_models::ModelInfo) -> SherpaModelInfo {
+        SherpaModelInfo {
+            id: id.to_string(),
+            model_type: m.model_type.clone(),
+            engines: String::new(),
+            name: String::new(),
+            language: m
+                .language
+                .iter()
+                .map(|l| SherpaLanguage {
+                    lang_code: l.lang_code.clone(),
+                    language_name: l.language_name.clone(),
+                    country: l.country.clone(),
+                })
+                .collect(),
+            sample_rate: m.sample_rate,
+            num_speakers: m.num_speakers,
+            quality: String::new(),
+            url: String::new(),
+            compression: false,
+            filesize_mb: 0.0,
+            license: String::new(),
+            license_url: String::new(),
+        }
+    }
+
+    /// Assert a resolved default row pairs each archive with a key
+    /// that belongs to it (the archive trap, stated per-row).
+    fn assert_resolved_row(b: &LangBundle, id: &str) {
+        assert!(
+            matches!(
+                (b.key, b.archive),
+                (
+                    "deu"
+                        | "eng-US"
+                        | "fra"
+                        | "spa-ES"
+                        | "por-BR"
+                        | "ita"
+                        | "dan"
+                        | "nld"
+                        | "pol"
+                        | "slk"
+                        | "slv"
+                        | "swe"
+                        | "isl"
+                        | "nob",
+                    Archive::Expanded
+                ) | (
+                    "ru" | "ca"
+                        | "cs"
+                        | "af"
+                        | "cy"
+                        | "eu"
+                        | "hu"
+                        | "ka"
+                        | "kk"
+                        | "ko"
+                        | "lb"
+                        | "lv"
+                        | "ml"
+                        | "ne"
+                        | "sq"
+                        | "sr"
+                        | "uk",
+                    Archive::Base
+                )
+            ),
+            "id {id}"
         );
     }
 
@@ -570,7 +736,30 @@ mod tests {
         for b in LANG_BUNDLES {
             match b.archive {
                 Archive::Base => {
-                    assert!(matches!(b.key, "de" | "ru" | "ca" | "cs"), "{}", b.key);
+                    assert!(
+                        matches!(
+                            b.key,
+                            "de" | "ru"
+                                | "ca"
+                                | "cs"
+                                | "af"
+                                | "cy"
+                                | "eu"
+                                | "hu"
+                                | "ka"
+                                | "kk"
+                                | "ko"
+                                | "lb"
+                                | "lv"
+                                | "ml"
+                                | "ne"
+                                | "sq"
+                                | "sr"
+                                | "uk"
+                        ),
+                        "{}",
+                        b.key
+                    );
                 }
                 Archive::Expanded => assert!(
                     matches!(
@@ -587,6 +776,8 @@ mod tests {
                             | "slk"
                             | "slv"
                             | "swe"
+                            | "isl"
+                            | "nob"
                     ),
                     "{}",
                     b.key
