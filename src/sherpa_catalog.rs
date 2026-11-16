@@ -31,10 +31,8 @@ use crate::types::SherpaModelInfo;
 /// voicegarden-lexicons publishes new languages — both manifests.
 const PUBLISHED_BUNDLE_LOCALES: &[&str] = &[
     // base manifest (unvalidated rows only)
-    "ca", "cs", "fa", "nl", "sv", "sw",
-    // expanded-only additions (bcp47 primary subtags)
-    "ar", "bn", "da", "el", "fi", "he", "hi", "id", "is", "nb", "pl", "ro", "sk", "sl", "ta", "tr",
-    "ur",
+    "fa", "sw", // expanded-only additions (bcp47 primary subtags), unvalidated
+    "ar", "bn", "el", "fi", "he", "hi", "id", "is", "nb", "ro", "ta", "tr", "ur",
 ];
 
 /// Compute the readiness value for one registry model.
@@ -219,12 +217,29 @@ mod tests {
 
         // published-but-unvalidated bundle locale — pl HAS an expanded
         // bundle (pol.tar.gz), it is just not validated yet
+        // pl flipped with the batch-1 campaign (#92); without the
+        // front-end the validated data exists but this build lacks it
+        #[cfg(feature = "sherpa-g2p")]
         assert_eq!(
             readiness_for(
                 &model("piper-pl_PL-gosia-medium", "vits", "pl"),
                 true,
                 false
             ),
+            "needs_bundle"
+        );
+        #[cfg(not(feature = "sherpa-g2p"))]
+        assert_eq!(
+            readiness_for(
+                &model("piper-pl_PL-gosia-medium", "vits", "pl"),
+                true,
+                false
+            ),
+            "blocked:g2p-unavailable"
+        );
+        // a still-published, still-unvalidated locale stays blocked
+        assert_eq!(
+            readiness_for(&model("vits-icefall-fi", "vits", "fi"), true, false),
             "blocked:bundle-not-validated"
         );
         // French flipped with the v0.4.0 locale validation: bundle
@@ -315,7 +330,9 @@ mod tests {
     /// as no-bundle; loop-review). Spot-pin the expanded-only locales.
     #[test]
     fn published_locales_cover_both_manifests() {
-        for l in ["pl", "ar", "is", "tr", "fi", "da", "el", "hi", "ro", "sk"] {
+        // the batch-1 flips moved pl/da/sk out (validated now); the
+        // spot-pins stay on still-unvalidated expanded locales
+        for l in ["ar", "is", "tr", "fi", "el", "hi", "ro"] {
             assert!(
                 PUBLISHED_BUNDLE_LOCALES.contains(&l),
                 "expanded-manifest locale {l} missing"
