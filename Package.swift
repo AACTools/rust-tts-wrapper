@@ -3,8 +3,8 @@ import Foundation
 import PackageDescription
 
 // scripts/apple/pin-release.sh updates these values for the release tag.
-let releaseTag = "v1.13.0"
-let releaseChecksum = "a58bf01d7603757d42dd837414040634ba43e411d1bce9101cd5225c55d5f8d4"
+let releaseTag = "v1.13.1"
+let releaseChecksum = "TBD"
 
 let native: Target
 if releaseTag.isEmpty || ProcessInfo.processInfo.environment["RUST_TTS_USE_LOCAL_XCFRAMEWORK"] == "1" {
