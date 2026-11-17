@@ -166,12 +166,20 @@ bundle, handed to sherpa as phoneme codepoints. Out-of-vocabulary
 words and numbers are **spoken**, not dropped (the built-in lexicon
 front-end drops them).
 
-- German voices (`piper-de_DE-*` and `coqui-de-css10` — every
-  single-language German model in the registry) are enabled: the `deu`
-  bundle (expanded) is
-  fetched and sha-verified automatically on first use and cached under
+- The validated G2P fleet covers **31 locales** (#92 campaign, waves
+  1-2): de en fr es pt it ru ca cs da nl pl sk sl sv + af cy eu hu is
+  ka kk ko lb lv ml ne no sq sr uk. Single-language voices in those
+  locales resolve a validated
+  [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons)
+  bundle (the German default is the expanded `deu` bundle; Icelandic
+  routes to the expanded `isl` bundle, Norwegian to `nob`), fetched
+  and sha-verified automatically on first use and cached under
   `~/.voicegarden/lexicons` (pre-seed it for fully-offline first use — the cache root honors
-  `VOICEGARDEN_LEXICON_DIR`).
+  `VOICEGARDEN_LEXICON_DIR`). Numbers, decimals, and digit runs are
+  normalized per language (`sherpa_g2p::normalizer_for`), including
+  closed compounds where the language writes them closed (hu, ml, ne),
+  conjunction-linked tens (is/sr/sq), vigesimal systems (eu, ka), the
+  Korean 만 grouping, and the Nepali लाख tier.
 - `sherpa_lang::g2p_enabled_for(&model)` tells download surfaces which
   models are enabled (validated bundle row).
 - `lexiconCompat: true` additionally writes a converted `lexicon.txt`

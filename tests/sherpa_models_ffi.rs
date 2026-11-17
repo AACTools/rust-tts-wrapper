@@ -82,11 +82,8 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
     // with the front-end, blocked:g2p-unavailable without (same
     // reason class as German — validated data, absent front-end)
     expect_readiness(&registry, "piper-fr_FR-siwis-medium");
-    // Hungarian: in neither voicegarden manifest
-    assert_eq!(
-        registry["piper-hu_HU-berta-medium"]["readiness"],
-        serde_json::Value::String("blocked:no-bundle".to_string())
-    );
+    // Hungarian flipped with the batch-2 campaign (#92 wave 2)
+    expect_readiness(&registry, "piper-hu_HU-berta-medium");
     // deprecated supertonic: ready-looking archive, retired upstream
     assert_eq!(
         registry["supertonic-3-multilingual"]["readiness"],

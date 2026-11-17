@@ -119,6 +119,10 @@ jobs:
             exit 0
           fi
           mkdir -p "$DEST"
+          # `latest` requires the p2p-*.tsv convention-pair tables in
+          # the tarball (voicegarden-lexicons#7 — restored in v0.6.1,
+          # with the injection folded into build.py so releases can't
+          # drop them again)
           curl -fsSL -o eng-US.tar.gz \
             https://github.com/AACTools/voicegarden-lexicons/releases/latest/download/eng-US.tar.gz
           tar -xzf eng-US.tar.gz -C "$DEST"
