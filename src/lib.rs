@@ -1729,7 +1729,10 @@ fn install_error_detail(engine: &str, e: &crate::local_models::InstallError) -> 
     use crate::local_models::InstallError as IE;
     let code = match &e {
         IE::ModelNotFound => TtsErrorCode::ModelNotFound,
-        IE::Network(_) | IE::ChecksumMismatch { .. } | IE::PronunciationBundle(_) => {
+        IE::Network(_)
+        | IE::CorruptArchive(_)
+        | IE::ChecksumMismatch { .. }
+        | IE::PronunciationBundle(_) => {
             // retryable: the verified staging is retained; a retry
             // re-attempts only the failed part (#106)
             TtsErrorCode::NetworkError

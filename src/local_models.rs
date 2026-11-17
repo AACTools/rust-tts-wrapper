@@ -294,6 +294,10 @@ pub enum InstallError {
     },
     /// transport/HTTP failure (message included)
     Network(String),
+    /// a sha-VERIFIED archive extracted short (#113): the transport
+    /// was fine, the bytes were not. Retryable like Network — the
+    /// verified staging is retained and a retry re-extracts.
+    CorruptArchive(String),
     /// url layout this build cannot install from
     UnsupportedUrl(String),
     /// the cancelled callback fired
@@ -324,6 +328,7 @@ impl std::fmt::Display for InstallError {
                 write!(f, "checksum mismatch: expected {expected}, got {got}")
             }
             Self::Network(m) => write!(f, "network: {m}"),
+            Self::CorruptArchive(m) => write!(f, "corrupt archive: {m}"),
             Self::UnsupportedUrl(u) => write!(f, "unsupported url layout: {u}"),
             Self::Cancelled => write!(f, "cancelled"),
             Self::Io(ctx, e) => write!(f, "{ctx}: {e}"),
@@ -686,19 +691,23 @@ pub(crate) mod install {
                 Box::new(flate2::read::GzDecoder::new(f))
             };
             let mut tar = tar::Archive::new(reader);
-            let entries: Vec<tar::Entry<'_, _>> = tar
+            // UNPACK WHILE ITERATING (#113): the decompression readers
+            // are NOT seekable, so a collect-then-unpack pass reads
+            // data the iterator already consumed — entries beyond the
+            // BufReader lookahead extracted truncated while io::copy
+            // returned Ok(short), landing corrupt files that carried
+            // a verified-archive manifest. The single-root strip is
+            // applied post-hoc instead (same semantics).
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            let mut extracted = 0usize;
+            for entry in tar
                 .entries()
                 .map_err(|e| InstallError::Io("archive entries".into(), e))?
-                .collect::<Result<_, _>>()
-                .map_err(|e| InstallError::Io("archive read".into(), e))?;
-            // strip a single top-level directory (the piper layout:
-            // every entry nests under vits-piper-<voice>/)
-            let strip = single_root_prefix(&entries);
-            let total = entries.len().max(1);
-            for (i, mut entry) in entries.into_iter().enumerate() {
+            {
                 if cancel() {
                     return Err(InstallError::Cancelled);
                 }
+                let mut entry = entry.map_err(|e| InstallError::Io("archive read".into(), e))?;
                 let path = entry
                     .path()
                     .map_err(|e| InstallError::Io("entry path".into(), e))?
@@ -715,12 +724,7 @@ pub(crate) mod install {
                         path.display()
                     )));
                 }
-                let rel = strip_components(&path, strip);
-                let Some(rel) = rel else { continue };
-                if rel.as_os_str().is_empty() {
-                    continue;
-                }
-                let target = dest_dir.join(&rel);
+                let target = dest_dir.join(&path);
                 // traversal guard: the parent must stay inside dest
                 if let Some(parent) = target.parent() {
                     let dest_s = dest_dir.to_string_lossy();
@@ -731,23 +735,51 @@ pub(crate) mod install {
                         )));
                     }
                 }
-                if entry.header().entry_type().is_dir() {
+                if etype.is_dir() {
                     std::fs::create_dir_all(&target)
                         .map_err(|e| InstallError::Io("entry mkdir".into(), e))?;
                     continue;
                 }
-                if !entry.header().entry_type().is_file() {
-                    continue;
-                }
                 std::fs::create_dir_all(target.parent().unwrap_or(dest_dir))
                     .map_err(|e| InstallError::Io("entry parent".into(), e))?;
+                let expected = entry
+                    .header()
+                    .size()
+                    .map_err(|e| InstallError::Io("entry size".into(), e))?;
                 let mut out = std::fs::File::create(&target)
                     .map_err(|e| InstallError::Io("entry create".into(), e))?;
-                std::io::copy(&mut entry, &mut out)
+                // the length check is load-bearing (#113): io::copy
+                // "succeeds" on a short stream — without this, a
+                // truncated read lands a partial file silently
+                let copied = std::io::copy(&mut entry, &mut out)
                     .map_err(|e| InstallError::Io("entry extract".into(), e))?;
-                files.push(rel.to_string_lossy().to_string());
-                progress(0.75 + 0.20 * (i as f64 / total as f64), "extract");
+                if copied != expected {
+                    return Err(InstallError::CorruptArchive(format!(
+                        "truncated at '{}': extracted {copied} of {expected} bytes",
+                        path.display()
+                    )));
+                }
+                paths.push(path);
+                // entry count is unknown up front (one pass): an
+                // asymptotic fraction, monotonically 0.75 → 0.95
+                progress(
+                    0.75 + 0.20 * ((extracted + 1) as f64 / (extracted + 8) as f64),
+                    "extract",
+                );
+                extracted += 1;
             }
+            // strip a single top-level directory (the piper layout:
+            // every entry nests under vits-piper-<voice>/)
+            let strip = single_root_prefix(&paths);
+            if strip == 1 {
+                hoist_single_root(dest_dir, &paths)
+                    .map_err(|e| InstallError::Io("root hoist".into(), e))?;
+            }
+            files = paths
+                .iter()
+                .filter_map(|p| strip_components(p, strip))
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
         } else {
             // raw single file: copied under the URL's last segment —
             // the caller passes it explicitly because the archive
@@ -768,16 +800,15 @@ pub(crate) mod install {
         Some(comps.iter().collect())
     }
 
-    /// `Some(k)` when every entry in the archive nests under ONE shared
-    /// top-level directory that at least one entry sits inside (k = that
-    /// prefix's component count); `Some(0)` when files already sit at the
-    /// archive root.
-    fn single_root_prefix<R: Read>(entries: &[tar::Entry<'_, R>]) -> usize {
+    /// [`single_root_prefix`] over extracted FILE paths: 1 when every
+    /// entry shares one top-level directory and something nests under
+    /// it, else 0. (Directory entries need not be consulted — a
+    /// single-root archive's files always reveal the root.)
+    fn single_root_prefix(paths: &[std::path::PathBuf]) -> usize {
         let mut shared: Option<std::ffi::OsString> = None;
         let mut nested = false;
-        for e in entries {
-            let Ok(path) = e.path() else { continue };
-            let mut comps = path.components();
+        for p in paths {
+            let mut comps = p.components();
             let Some(first) = comps.next() else { continue };
             let first = first.as_os_str().to_owned();
             match &shared {
@@ -790,6 +821,24 @@ pub(crate) mod install {
             }
         }
         usize::from(nested)
+    }
+
+    /// Move the single root directory's children up into `dest_dir`
+    /// and remove the (then-empty) root (#113 post-hoc strip).
+    fn hoist_single_root(dest_dir: &Path, paths: &[std::path::PathBuf]) -> std::io::Result<()> {
+        let Some(root) = paths.first().and_then(|p| p.components().next()) else {
+            return Ok(());
+        };
+        let root_dir = dest_dir.join(root.as_os_str());
+        for child in std::fs::read_dir(&root_dir)? {
+            let child = child?.path();
+            let name = child
+                .file_name()
+                .map(std::ffi::OsStr::to_owned)
+                .ok_or_else(|| std::io::Error::other("root child without a name"))?;
+            std::fs::rename(&child, dest_dir.join(&name))?;
+        }
+        std::fs::remove_dir(&root_dir)
     }
 
     /// Disk preflight (#102 F7): `wanted` bytes (download + expansion
@@ -1225,6 +1274,52 @@ mod install_tests {
         assert!(out.join("model.onnx").is_file(), "root stripped: {files:?}");
         assert!(out.join("tokens.txt").is_file());
         assert_eq!(files.len(), 2);
+    }
+
+    /// #113 regression: an archive whose files exceed the reader's
+    /// buffer lookahead. Collect-then-unpack consumed the data stream
+    /// of the NON-SEEKABLE gz/bz2 readers, so every entry past the
+    /// buffer extracted truncated while io::copy reported Ok — real
+    /// voices landed corrupt with a verified-archive manifest. The
+    /// fixtures elsewhere in this module are tiny enough to fit the
+    /// lookahead, which is exactly why this survived until a real
+    /// 63 MB voice install.
+    #[test]
+    fn extract_is_byte_exact_beyond_the_buffer_lookahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("big.tar.gz");
+        // deterministic pseudo-random payloads ≫ any reader buffer
+        let payload: Vec<u8> = (0..300_000u32).map(|i| (i * 7 + (i >> 8)) as u8).collect();
+        let small = b"MODEL CARD TEXT\n".to_vec();
+        let payload2: Vec<u8> = (0..150_000u32).map(|i| (i * 13 + 5) as u8).collect();
+        {
+            let f = std::fs::File::create(&archive).unwrap();
+            let enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            let mut tar = tar::Builder::new(enc);
+            let p = dir.path().join("src.bin");
+            std::fs::write(&p, &payload).unwrap();
+            tar.append_path_with_name(&p, "vits-voice/model.onnx")
+                .unwrap();
+            std::fs::write(&p, &small).unwrap();
+            tar.append_path_with_name(&p, "vits-voice/MODEL_CARD")
+                .unwrap();
+            // a second large file AFTER the first: the old bug lost
+            // everything past the first entry's buffer
+            std::fs::write(&p, &payload2).unwrap();
+            tar.append_path_with_name(&p, "vits-voice/tokens.bin")
+                .unwrap();
+            tar.into_inner().unwrap().finish().unwrap();
+        }
+        let out = dir.path().join("out");
+        let files =
+            extract_into(&archive, Some("gz"), "m.bin", &out, &|_, _| {}, &|| false).unwrap();
+        assert!(out.join("model.onnx").is_file(), "{files:?}");
+        // byte-exact — not just non-empty
+        assert_eq!(std::fs::read(out.join("model.onnx")).unwrap(), payload);
+        assert_eq!(std::fs::read(out.join("MODEL_CARD")).unwrap(), small);
+        assert_eq!(std::fs::read(out.join("tokens.bin")).unwrap(), payload2);
+        assert_eq!(files.len(), 3);
+        assert!(files.contains(&"model.onnx".to_string()), "{files:?}");
     }
 
     /// Flat archives (no root) extract as-is; a nested two-root

@@ -174,8 +174,18 @@ floravox-core = { version = "=0.8.8", optional = true }
 # Exact pin: MisakiG2p implements a floravox-core trait — a drifted
 # patch pair breaks the build (same reasoning as sherpa-onnx-sys above).
 floravox-g2p = { version = "=0.8.8", optional = true, default-features = false }
-floravox-g2p-fst = { package = "floravox-g2p", version = "=0.6.1", optional = true, default-features = false }
-voicegarden-lexicons = { version = "0.3", optional = true }
+# default features deliberately ON (misaki): floravox-g2p's lib.rs
+# declares `pub mod misaki;` UNGATED while misaki-rs is optional, so
+# a default-features=false build cannot compile. This alias only ever
+# built because voicegarden-lexicons ≤0.3.0's default-on dependency
+# on floravox-g2p 0.6.x unified the feature on for our 0.6.1 instance;
+# voicegarden-lexicons 0.3.1 moved to floravox-g2p 0.8.x and left this
+# instance bare (#112 follow-up). Drop this when floravox-g2p gates
+# the module.
+floravox-g2p-fst = { package = "floravox-g2p", version = "=0.6.1", optional = true, features = [
+    "misaki",
+] }
+voicegarden-lexicons = { version = "0.3.2", optional = true, default-features = false }
 # NOTE: sherpa-onnx is pinned =2.0.1 and that crate itself pins
 # sherpa-onnx-sys =2.0.1 — an explicit sys dep here would be inert
 # (nothing enabled it) and redundant; drift is impossible through the
