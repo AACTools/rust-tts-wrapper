@@ -5244,6 +5244,62 @@ mod tests {
         );
     }
 
+    /// #112: crate 0.3.0's `entry()` ran the bcp47 prefix heuristic
+    /// in the same pass as exact matching, so an `en-GB` request
+    /// resolved to the earlier `en` row — and the exact-id guard in
+    /// `provision_from` rejected it as a wrong bundle (`no 'en-GB'
+    /// bundle in the archive manifest`). The trap order — `en` listed
+    /// BEFORE `en-GB` — is the point of this fixture. Fixed in
+    /// voicegarden-lexicons 0.3.1 (exact id → exact bcp47 → prefix).
+    #[test]
+    fn provisioning_resolves_the_exact_bundle_id_not_a_prefix_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        let base = tmp.path().join("base");
+        std::fs::create_dir_all(cache.join("en-GB")).unwrap();
+        std::fs::create_dir_all(&base).unwrap();
+        // LOCAL manifest parseable but stale for en-GB (its en-GB
+        // digest differs from the stamp, so the cache-hit check must
+        // not short-circuit — a parse failure would reach the same
+        // miss, but for the wrong reason)
+        std::fs::write(
+            cache.join("lexicons.json"),
+            r#"{"version":"t","languages":[{"lang":"en-GB","name":"British English",
+                "bcp47":"en-GB","entries":1,"license":"MIT","source":"t",
+                "phonetisaurus":null,"file":"en-GB.tar.gz","sha256":"stale"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(cache.join("en-GB/en-GB.fst"), b"x").unwrap();
+        std::fs::write(cache.join("en-GB/en-GB.pho"), b"x").unwrap();
+        std::fs::write(cache.join("en-GB/.sha256"), b"bb").unwrap();
+        // REMOTE manifest with the trap order: en BEFORE en-GB
+        std::fs::write(
+            base.join("lexicons.json"),
+            r#"{"version":"t","languages":[
+                {"lang":"en","name":"English","bcp47":"en","entries":1,"license":"MIT",
+                 "source":"t","phonetisaurus":null,"file":"en.tar.gz","sha256":"aa"},
+                {"lang":"en-GB","name":"British English","bcp47":"en-GB","entries":1,
+                 "license":"MIT","source":"t","phonetisaurus":null,
+                 "file":"en-GB.tar.gz","sha256":"bb"}]}"#,
+        )
+        .unwrap();
+        // NOTE: no archive may be constructed before provision_from —
+        // LexiconArchive::new writes the manifest through to the cache
+        // (fetch_manifest), which would refresh the stale local
+        // manifest above and let the cache-hit path short-circuit past
+        // the entry() lookup this test exists to exercise.
+        //
+        // With crate 0.3.0 the prefix pass resolved 'en' here and the
+        // exact-id guard returned Err; 0.3.1 resolves the exact id —
+        // and the matching stamp means no fetch, so the whole path is
+        // offline.
+        let got = provision_from(&cache, "lexicons.json", "en-GB", || {
+            Ok(LexiconArchive::new(base.to_string_lossy().to_string(), &cache).unwrap())
+        })
+        .expect("the exact en-GB bundle resolves through the archive");
+        assert_eq!(got, cache.join("en-GB"));
+    }
+
     // ── real-bundle coverage (env-gated, like Phase 2's) ──
     //
     //   SHERPA_TEST_THORSTEN_TOKENS=.../tokens.txt \
