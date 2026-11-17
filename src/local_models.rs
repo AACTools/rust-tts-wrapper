@@ -256,6 +256,20 @@ pub trait ModelSource: Sync {
     /// `ModelNotFound` when nothing is installed under that id;
     /// `InUse` when the platform cannot remove open files (Windows).
     fn uninstall(&self, id: &str) -> Result<(), InstallError>;
+
+    /// Adopt an EXISTING directory at `models_dir/<id>` as an
+    /// installed model (#106): validate the family's expected files
+    /// and write the neutral `.installed` manifest from the registry
+    /// digest. For apps migrating their own model layouts — the app
+    /// moves/copies its verified files into place first; its own
+    /// verification markers stay the app's (Dasher keeps
+    /// `.dasher-verified-model` in Dasher).
+    ///
+    /// # Errors
+    /// `ModelNotFound` when the id is not in this engine's catalogue;
+    /// `UnsupportedUrl`-class message when the directory lacks the
+    /// files the engine needs to load the model.
+    fn adopt(&self, id: &str) -> Result<(), InstallError>;
     /// The engine's model directory (`TTS_MODELS_DIR` override honored).
     fn models_dir(&self) -> PathBuf;
     /// Installed models flattened into speakable voices.
@@ -288,6 +302,11 @@ pub enum InstallError {
     Io(String, std::io::Error),
     /// a model file a live engine holds open on Windows, etc.
     InUse(String),
+    /// the model's REQUIRED pronunciation bundle could not be
+    /// provisioned (its fetch failed). The verified model staging is
+    /// RETAINED — a retry skips the download and re-attempts only the
+    /// bundle (#106). Retryable.
+    PronunciationBundle(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -309,6 +328,11 @@ impl std::fmt::Display for InstallError {
             Self::Cancelled => write!(f, "cancelled"),
             Self::Io(ctx, e) => write!(f, "{ctx}: {e}"),
             Self::InUse(m) => write!(f, "model in use: {m}"),
+            Self::PronunciationBundle(e) => write!(
+                f,
+                "required pronunciation bundle failed to provision ({e}); \
+                 the model download is retained — retry re-attempts only the bundle"
+            ),
         }
     }
 }

@@ -104,6 +104,7 @@ public static class Native
     [DllImport(Lib)] public static extern IntPtr tts_search_models_json(string query, int limit);
     [DllImport(Lib)] public static extern IntPtr tts_installed_voice_catalog_json();
     [DllImport(Lib)] public static extern IntPtr tts_create_for_model(string engineId, string modelId);
+    [DllImport(Lib)] public static extern bool tts_model_adopt(string engineId, string modelId);
 
     /// <summary>(fraction, stage, userdata) — fires on the installing thread.</summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -764,6 +765,19 @@ public class TtsClient : IDisposable
                 (f, s) => progress?.Report((f, s)),
                 () => cancellationToken.IsCancellationRequested);
         }, cancellationToken);
+    }
+
+    /// <summary>
+    /// Adopt an EXISTING model directory at the engine's
+    /// <c>models_dir/&lt;modelId&gt;</c> as installed (#106): validates
+    /// the files and writes the neutral manifest. For migrating an
+    /// app's own model layout — move the verified files into place
+    /// first; the app's own markers stay the app's.
+    /// </summary>
+    public static void AdoptModel(string engineId, string modelId)
+    {
+        if (!Native.tts_model_adopt(engineId, modelId))
+            throw ModelOpFailure("adopting", modelId);
     }
 
     /// <summary>Remove an installed model (files + neutral manifest).</summary>

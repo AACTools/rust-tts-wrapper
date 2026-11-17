@@ -132,6 +132,30 @@ Bindings wrap it idiomatically:
 - **.NET:** `TtsClient.GetLocalModels()` / `.InstallModelAsync(progress, cancellationToken)` / `.CreateForModel()`
 - **Swift:** `TtsClient.localModelsJSON()` / `.installModel(onProgress:cancelled:)` / `.createForModel()`
 
+### Adopting an app's existing installs (#106)
+
+Apps that shipped their own model layout (Dasher's
+`Dasher/Speech/Models`) migrate in three steps: move/copy the verified
+files to `<engine models dir>/<model id>` (set `TTS_MODELS_DIR` first if
+the app container dictates the root), call **adopt** (the wrapper
+validates the files its engine needs and writes the neutral
+`.installed` manifest from the registry digest — model ids are
+preserved, so saved voice selections keep resolving), then delete the
+old layout. The app's own verification markers (e.g.
+`.dasher-verified-model`) stay the app's — the neutral manifest is the
+wrapper's.
+
+- **Node:** `TtsClient.adoptModel(engineId, modelId)`
+- **Python:** `TTSClient.adopt_model(engine_id, model_id)`
+- **.NET:** `TtsClient.AdoptModel(engineId, modelId)`
+- **Swift:** `TtsClient.adoptModel(engineId:modelId:)`
+
+Install semantics for bundle-requiring voices (#106): the G2P bundle
+provisions BEFORE the install commits; on failure the install reports a
+retryable error, keeps any previous working install, and retains the
+verified download so a retry skips straight to the bundle. English
+voices degrade to the auto-lexicon path instead of failing.
+
 Availability vocabulary (a superset rename of the sherpa `readiness`):
 `ready | needs_download | needs_bundle | needs_assets` (+ `missing`) `|
 unverified | blocked` (+ `reason`) `| wrong_engine`. Floravox entries

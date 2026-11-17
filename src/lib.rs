@@ -1729,7 +1729,11 @@ fn install_error_detail(engine: &str, e: &crate::local_models::InstallError) -> 
     use crate::local_models::InstallError as IE;
     let code = match &e {
         IE::ModelNotFound => TtsErrorCode::ModelNotFound,
-        IE::Network(_) | IE::ChecksumMismatch { .. } => TtsErrorCode::NetworkError,
+        IE::Network(_) | IE::ChecksumMismatch { .. } | IE::PronunciationBundle(_) => {
+            // retryable: the verified staging is retained; a retry
+            // re-attempts only the failed part (#106)
+            TtsErrorCode::NetworkError
+        }
         IE::InsufficientDisk(..) | IE::UnsupportedUrl(_) => TtsErrorCode::InvalidConfiguration,
         IE::InstallInProgress | IE::Cancelled | IE::Io(..) | IE::InUse(_) => {
             TtsErrorCode::EngineFailure
@@ -1873,6 +1877,43 @@ pub extern "C" fn tts_model_install(
         };
         match source.install(&model, &prog, &cancel) {
             Ok(()) => true,
+            Err(e) => {
+                set_error_detail(install_error_detail(&engine, &e));
+                false
+            }
+        }
+    }))
+    .unwrap_or(false)
+}
+
+/// Adopt an EXISTING model directory at the engine's
+/// `models_dir/<model_id>` as an installed model (#106): the engine
+/// validates the files it needs to load the model and writes the
+/// neutral `.installed` manifest from the registry digest. For apps
+/// migrating their own model layouts (the app moves its verified
+/// files into place first; its own verification markers stay the
+/// app's). Model ids are preserved, so saved voice selections keep
+/// resolving.
+///
+/// # Safety
+/// Both pointers must be valid null-terminated C strings.
+#[no_mangle]
+pub extern "C" fn tts_model_adopt(engine_id: *const c_char, model_id: *const c_char) -> bool {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let Some(engine) = required_cstr(engine_id, "engine_id") else {
+            return false;
+        };
+        let Some(model) = required_cstr(model_id, "model_id") else {
+            return false;
+        };
+        match crate::local_models::find_source(Some(&engine), &model) {
+            Ok(source) => match source.adopt(&model) {
+                Ok(()) => true,
+                Err(e) => {
+                    set_error_detail(install_error_detail(&engine, &e));
+                    false
+                }
+            },
             Err(e) => {
                 set_error_detail(install_error_detail(&engine, &e));
                 false

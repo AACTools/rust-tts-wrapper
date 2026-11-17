@@ -746,6 +746,24 @@ public final class TtsClient: @unchecked Sendable {
         }
     }
 
+    /// Adopt an EXISTING model directory at the engine's
+    /// `models_dir/<modelId>` as an installed model (#106): the native
+    /// side validates the files it needs and writes the neutral
+    /// `.installed` manifest. For migrating an app's own model layout —
+    /// move the verified files into place first; the app's own
+    /// verification markers stay the app's.
+    public static func adoptModel(engineId: String, modelId: String) throws {
+        let ok = engineId.withCString { e in
+            modelId.withCString { m in tts_model_adopt(e, m) }
+        }
+        if !ok {
+            throw TtsError(
+                "adopting '\(modelId)' failed",
+                detail: getGlobalLastErrorDetail()
+            )
+        }
+    }
+
     /// Remove an installed model (files + neutral `.installed` manifest).
     public static func uninstallModel(engineId: String, modelId: String) throws {
         let ok = engineId.withCString { e in

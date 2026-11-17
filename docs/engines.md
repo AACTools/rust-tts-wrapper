@@ -180,6 +180,15 @@ front-end drops them).
   closed compounds where the language writes them closed (hu, ml, ne),
   conjunction-linked tens (is/sr/sq), vigesimal systems (eu, ka), the
   Korean 만 grouping, and the Nepali लाख tier.
+- **Region-aware variant routing** (#100): a voice's registry country
+  picks the phoneme variant it actually speaks — es_MX/es_AR →
+  `spa-LatAm` (not Castilian), pt_PT → `por-PT` (not Brazilian),
+  en_GB → `en-GB` (not eng-US). Voices without a matching variant row
+  fall back to the locale-wide default. Note: a `lexiconCompat`
+  artifact generated before this routing landed keeps the old
+  variant's phonemes until deleted (the wrapper's own front-end
+  reroutes immediately); delete `lexicon.txt` beside the model to
+  regenerate it.
 - `sherpa_lang::g2p_enabled_for(&model)` tells download surfaces which
   models are enabled (validated bundle row).
 - `lexiconCompat: true` additionally writes a converted `lexicon.txt`

@@ -201,6 +201,9 @@ function loadLibrary(explicitPath) {
     tts_installed_voice_catalog_json: optional(
       "void *tts_installed_voice_catalog_json()",
     ),
+    tts_model_adopt: optional(
+      "bool tts_model_adopt(const char *engine_id, const char *model_id)",
+    ),
     tts_create_for_model: optional(
       "void *tts_create_for_model(const char *engine_id, const char *model_id)",
     ),
@@ -595,6 +598,27 @@ class TtsClient extends EventEmitter {
       const detail = TtsClient.globalLastErrorDetail(a);
       throw new TtsError(
         `installing '${modelId}' failed: ${detail?.message ?? "unknown error"}`,
+        detail,
+      );
+    }
+  }
+
+  /**
+   * Adopt an EXISTING model directory at the engine's
+   * `models_dir/<modelId>` as an installed model (#106): validates the
+   * files and writes the neutral manifest. For migrating an app's own
+   * model layout.
+   * @param {string} engineId
+   * @param {string} modelId
+   * @param {object} [library]
+   */
+  static adoptModel(engineId, modelId, library) {
+    const a = library ?? loadLibrary();
+    const ok = a.models.needModels("tts_model_adopt")(engineId, modelId);
+    if (!ok) {
+      const detail = TtsClient.globalLastErrorDetail(a);
+      throw new TtsError(
+        `adopting '${modelId}' failed: ${detail?.message ?? "unknown error"}`,
         detail,
       );
     }

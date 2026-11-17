@@ -42,6 +42,16 @@ for combo in "${COMBOS[@]}"; do
 done
 [ "$fail" -eq 0 ] || { echo "pre-push: fix clippy before pushing (CI would fail the same way)" >&2; exit 1; }
 
+# vendored Swift header must match include/tts_wrapper.h (the
+# bindings.yml Swift job enforces this in CI — catch it here first;
+# a #111 push burned a run on exactly this drift)
+if ! diff -q include/tts_wrapper.h \
+        bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h >/dev/null; then
+    echo "pre-push: vendored Swift header is stale — run:" 2>&1
+    echo "  cp include/tts_wrapper.h bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h" 2>&1
+    exit 1
+fi
+
 # fast suites (the lib suites; live/ignored tests stay opt-in)
 cargo test --lib --quiet >/dev/null || { echo "pre-push: default test suite failed" >&2; exit 1; }
 cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --quiet >/dev/null \

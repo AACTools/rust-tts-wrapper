@@ -139,6 +139,46 @@ impl ModelSource for FloravoxModelSource {
         Ok(())
     }
 
+    /// Adopt an existing voice directory (#106): the loadable-file
+    /// check mirrors `resolve_model`, then the neutral manifest.
+    fn adopt(&self, id: &str) -> Result<(), InstallError> {
+        let Some(m) = registry_rows()
+            .into_iter()
+            .find(|(rid, _)| *rid == id)
+            .map(|(_, m)| m)
+        else {
+            return Err(InstallError::ModelNotFound);
+        };
+        let dir = models_dir().join(id);
+        let loadable = dir_has_voice(&dir) || models_dir().join(format!("{id}.onnx")).is_file();
+        if !loadable {
+            return Err(InstallError::UnsupportedUrl(format!(
+                "no loadable voice files in {}",
+                dir.display()
+            )));
+        }
+        // the manifest lives in a DIRECTORY named after the id; flat
+        // single-file layouts cannot carry it — move the file into one
+        if !dir.is_dir() {
+            return Err(InstallError::UnsupportedUrl(
+                "flat single-file layouts cannot carry the manifest — move the file into \
+                 a directory named after the model id first"
+                    .into(),
+            ));
+        }
+        InstallManifest {
+            id: id.to_string(),
+            engine: "floravox".to_string(),
+            sha256: m.sha256.clone().unwrap_or_default(),
+            files: Vec::new(),
+            installed_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        }
+        .write_to(&dir)?;
+        Ok(())
+    }
+
     fn models_dir(&self) -> PathBuf {
         models_dir()
     }

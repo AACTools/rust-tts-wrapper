@@ -61,6 +61,12 @@ pub struct LangBundle {
     /// Bundle key inside that archive ("de" | "deu" — keys differ
     /// between archives).
     pub key: &'static str,
+    /// Optional region gate (#100): when set, the row only matches
+    /// models whose registry country equals it (uppercased), letting
+    /// variant bundles outrank the regionless default — es_MX/es_AR →
+    /// `spa-LatAm`, pt_PT → `por-PT`, en_GB → `en-GB`. `None` rows are
+    /// the locale-wide default.
+    pub region: Option<&'static str>,
     /// Download-enablement flag; `false` until the language's bake-off
     /// and validation pass (German deu: passed). Does NOT gate
     /// front-end activation.
@@ -83,12 +89,14 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         bcp47: "de",
         archive: Archive::Expanded,
         key: "deu",
+        region: None,
         validated: true, // Phase 5: bake-off + ear-check + CI passed
     },
     LangBundle {
         bcp47: "de",
         archive: Archive::Base,
         key: "de",
+        region: None,
         validated: false,
     },
     // English migration to the codepoints path (#92): the eng-US
@@ -102,6 +110,7 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         bcp47: "en",
         archive: Archive::Expanded,
         key: "eng-US",
+        region: None,
         validated: true, // A/B + whisper round-trip (piper-en_US-amy-low)
     },
     // ── v0.4.0 locale flips (#92 finale): A/B + whisper round-trips
@@ -114,37 +123,39 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         bcp47: "fr",
         archive: Archive::Expanded,
         key: "fra",
+        region: None,
         validated: true, // piper-fr_FR-siwis-medium: quarante-deux + un virgule cinq
     },
     LangBundle {
         bcp47: "es",
         archive: Archive::Expanded,
-        // spa-ES is the default for ALL es voices incl. es_MX/es_AR —
-        // Castilian phonemes (θ, no seseo) for LatAm voices; primary-
-        // subtag resolution cannot split variants; a per-variant row
-        // needs region-aware resolution (follow-up)
+        // regionless default: Castilian phonemes for es_ES (and any es
+        // voice outside the MX/AR variant rows below — #100)
         key: "spa-ES",
+        region: None,
         validated: true, // piper-es_ES-sharvard-medium: "Tengo 42 casas" exact
     },
     LangBundle {
         bcp47: "pt",
         archive: Archive::Expanded,
-        // por-BR is the default for ALL pt voices incl. pt_PT —
-        // Brazilian phonemes for European voices (audible vowel /
-        // final-s differences); same variant-resolution follow-up
+        // regionless default: Brazilian phonemes (pt_BR and any pt
+        // voice outside the PT variant row below — #100)
         key: "por-BR",
-        validated: true, // piper-pt_BR-faber-medium: "Eu tenho 42 casas" (medium, exact)
+        region: None,
+        validated: true, // piper-pt_BR-faber-medium: number words audible
     },
     LangBundle {
         bcp47: "it",
         archive: Archive::Expanded,
         key: "ita",
+        region: None,
         validated: true, // piper-it_IT-paola-medium: "ho 42 case" (medium, exact)
     },
     LangBundle {
         bcp47: "ru",
         archive: Archive::Base,
         key: "ru",
+        region: None,
         validated: true, // piper-ru_RU-dmitri-medium: "У меня 42 дома" exact
     },
     // ── batch-1 campaign flips (#92): probe 0-drop + whisper
@@ -157,48 +168,56 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         bcp47: "ca",
         archive: Archive::Base,
         key: "ca",
+        region: None,
         validated: true, // piper-ca_ES-upc_pau: numbers via WFST, "42 cases" heard
     },
     LangBundle {
         bcp47: "cs",
         archive: Archive::Base,
         key: "cs",
+        region: None,
         validated: true, // piper-cs_CZ-jirka: "Dobrý den, mám 40 domů" (medium, exact)
     },
     LangBundle {
         bcp47: "da",
         archive: Archive::Expanded,
         key: "dan",
+        region: None,
         validated: true, // piper-da_DK-talesyntese: "jeg har fyre huse" audible
     },
     LangBundle {
         bcp47: "nl",
         archive: Archive::Expanded,
         key: "nld",
+        region: None,
         validated: true, // piper-nl_NL-dii: "ik heb ... 40 huizen" (medium)
     },
     LangBundle {
         bcp47: "pl",
         archive: Archive::Expanded,
         key: "pol",
+        region: None,
         validated: true, // piper-pl_PL-mc_speech: "Mam 40 domów" (medium, exact)
     },
     LangBundle {
         bcp47: "sk",
         archive: Archive::Expanded,
         key: "slk",
+        region: None,
         validated: true, // piper-sk_SK-lili: number words audible
     },
     LangBundle {
         bcp47: "sl",
         archive: Archive::Expanded,
         key: "slv",
+        region: None,
         validated: true, // piper-sl_SI-artur: "imam dva in štiri ..." audible
     },
     LangBundle {
         bcp47: "sv",
         archive: Archive::Expanded,
         key: "swe",
+        region: None,
         validated: true, // piper-sv_SE-nst: hej/världen/två exact (single words)
     },
     // ── batch-2 locale flips (#92 wave 2, voicegarden v0.5.0–v0.6.0):
@@ -218,97 +237,146 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         bcp47: "af",
         archive: Archive::Base,
         key: "af",
+        region: None,
         validated: true, // mimic3-af_ZA-google-low: "twee en veertig" 0 dropped
     },
     LangBundle {
         bcp47: "cy",
         archive: Archive::Base,
         key: "cy",
+        region: None,
         validated: true, // piper-cy_GB-gwryw_gogleddol: modern decimal deg/dau ddeg
     },
     LangBundle {
         bcp47: "eu",
         archive: Archive::Base,
         key: "eu",
+        region: None,
         validated: true, // piper-eu_ES-maider: berrogeita bi (0 dropped)
     },
     LangBundle {
         bcp47: "hu",
         archive: Archive::Base,
         key: "hu",
+        region: None,
         validated: true, // piper-hu_HU-berta: negyvenkét házam (0 dropped)
     },
     LangBundle {
         bcp47: "is",
         archive: Archive::Expanded,
         key: "isl",
+        region: None,
         validated: true, // piper-is_IS-steinn: fjörutíu og tveir — v0.5.0 compound-tens fix
     },
     LangBundle {
         bcp47: "ka",
         archive: Archive::Base,
         key: "ka",
+        region: None,
         validated: true, // piper-ka_GE-natia: ორმოცდაორი (0 dropped)
     },
     LangBundle {
         bcp47: "kk",
         archive: Archive::Base,
         key: "kk",
+        region: None,
         validated: true, // piper-kk_KZ-raya-low: қырық екі (0 dropped; 669-entry NOTICE bundle)
     },
     LangBundle {
         bcp47: "ko",
         archive: Archive::Base,
         key: "ko",
+        region: None,
         validated: true, // mimic3-ko_KO-kss_low: 마흔두 (0 dropped)
     },
     LangBundle {
         bcp47: "lb",
         archive: Archive::Base,
         key: "lb",
+        region: None,
         validated: true, // piper-lb_LU-marylux: probe sentence 0 dropped
     },
     LangBundle {
         bcp47: "lv",
         archive: Archive::Base,
         key: "lv",
+        region: None,
         validated: true, // piper-lv_LV-aivars: četrdesmit divas (0 dropped)
     },
     LangBundle {
         bcp47: "ml",
         archive: Archive::Base,
         key: "ml",
+        region: None,
         validated: true, // piper-ml_IN-arjun: നാൽപത്തിരണ്ട് (0 dropped)
     },
     LangBundle {
         bcp47: "ne",
         archive: Archive::Base,
         key: "ne",
+        region: None,
         validated: true, // piper-ne_NP-google-low: बयालीस (lexicalized compounds in dict)
     },
     LangBundle {
         bcp47: "no",
         archive: Archive::Expanded,
         key: "nob",
+        region: None,
         validated: true, // piper-no_NO-talesyntese: førtito — nob (39k) over base no (2.7k)
     },
     LangBundle {
         bcp47: "sq",
         archive: Archive::Base,
         key: "sq",
+        region: None,
         validated: true, // piper-sq_AL-edon: dyzet e dy (0 dropped)
     },
     LangBundle {
         bcp47: "sr",
         archive: Archive::Base,
         key: "sr",
+        region: None,
         validated: true, // piper-sr_RS-serbski_institut: четрдесет и две (Cyrillic, 0 dropped)
     },
     LangBundle {
         bcp47: "uk",
         archive: Archive::Base,
         key: "uk",
+        region: None,
         validated: true, // piper-uk_UA-lada-low: сорок два (0 dropped)
+    },
+    // ── variant bundles (#100, voicegarden v0.6.1): region-gated rows
+    // that outrank the regionless default for their locale — a voice's
+    // registry country picks the phoneme variant it actually speaks.
+    // All probe-validated (0 words dropped) against the smallest
+    // registry voice per variant.
+    LangBundle {
+        bcp47: "es",
+        archive: Archive::Expanded,
+        key: "spa-LatAm",
+        region: Some("MX"),
+        validated: true, // piper-es_MX-claude-high: cuarenta y dos (0 dropped)
+    },
+    LangBundle {
+        bcp47: "es",
+        archive: Archive::Expanded,
+        key: "spa-LatAm",
+        region: Some("AR"),
+        validated: true, // piper-es_AR-daniela-high: cuarenta y dos (0 dropped)
+    },
+    LangBundle {
+        bcp47: "pt",
+        archive: Archive::Expanded,
+        key: "por-PT",
+        region: Some("PT"),
+        validated: true, // piper-pt_PT-dii-high: quarenta e duas (0 dropped)
+    },
+    LangBundle {
+        bcp47: "en",
+        archive: Archive::Base,
+        key: "en-GB",
+        region: Some("GB"),
+        validated: true, // piper-en_GB-cori-medium: forty two (0 dropped)
     },
 ];
 
@@ -366,7 +434,31 @@ fn default_row_in(rows: &[LangBundle], model: &SherpaModelInfo) -> Option<usize>
     {
         return None; // genuinely multi-language
     }
-    rows.iter().position(|b| b.bcp47 == primary)
+    // variant bundles first (#100): an exact (language, region) row
+    // outranks the regionless default — es_MX voices read LatAm
+    // phonemes, pt_PT European, en_GB British. A multi-entry model
+    // with the same primary but conflicting regions stays on the
+    // default rather than guessing.
+    let mut countries: Vec<String> = model
+        .language
+        .iter()
+        .map(|l| l.country.trim().to_ascii_uppercase())
+        .filter(|c| !c.is_empty())
+        .collect();
+    countries.sort_unstable();
+    countries.dedup();
+    // duplicate same-country entries ([es/MX, es/MX]) are one country;
+    // conflicting ones ([es/MX, es/AR]) fall through to the default
+    if let [country] = &countries[..] {
+        if let Some(i) = rows
+            .iter()
+            .position(|b| b.bcp47 == primary && b.region.is_some_and(|r| r == country))
+        {
+            return Some(i);
+        }
+    }
+    rows.iter()
+        .position(|b| b.bcp47 == primary && b.region.is_none())
 }
 
 /// May a downloader offer this model for G2P-backed synthesis? True
@@ -484,6 +576,7 @@ mod tests {
             bcp47: "de",
             archive: Archive::Expanded,
             key: "deu",
+            region: None,
             validated: false,
         }];
         assert!(!g2p_enabled_with(&unvalidated, &m));
@@ -492,6 +585,7 @@ mod tests {
             bcp47: "de",
             archive: Archive::Expanded,
             key: "deu",
+            region: None,
             validated: true,
         }];
         assert!(g2p_enabled_with(&validated, &m));
@@ -584,6 +678,47 @@ mod tests {
         let m = model("piper-no_NO-talesyntese-medium", "no", "NO");
         let b = default_bundle_for_model(&m).expect("norwegian resolves");
         assert_eq!((b.key, b.archive), ("nob", Archive::Expanded));
+        // #100 variant routing: the registry country picks the
+        // phoneme variant the voice actually speaks
+        let m = model("piper-es_MX-claude-high", "es", "MX");
+        let b = default_bundle_for_model(&m).expect("es_MX resolves");
+        assert_eq!((b.key, b.region), ("spa-LatAm", Some("MX")));
+        let m = model("piper-es_AR-daniela-high", "es", "AR");
+        let b = default_bundle_for_model(&m).expect("es_AR resolves");
+        assert_eq!((b.key, b.region), ("spa-LatAm", Some("AR")));
+        let m = model("piper-es_ES-sharvard-medium", "es", "ES");
+        let b = default_bundle_for_model(&m).expect("es_ES resolves");
+        assert_eq!((b.key, b.region), ("spa-ES", None));
+        let m = model("piper-pt_PT-dii-high", "pt", "PT");
+        let b = default_bundle_for_model(&m).expect("pt_PT resolves");
+        assert_eq!((b.key, b.region), ("por-PT", Some("PT")));
+        let m = model("piper-pt_BR-faber-medium", "pt", "BR");
+        let b = default_bundle_for_model(&m).expect("pt_BR resolves");
+        assert_eq!((b.key, b.region), ("por-BR", None));
+        let m = model("piper-en_GB-cori-medium", "en", "GB");
+        let b = default_bundle_for_model(&m).expect("en_GB resolves");
+        assert_eq!((b.key, b.region), ("en-GB", Some("GB")));
+        let m = model("piper-en_US-amy-low", "en", "US");
+        let b = default_bundle_for_model(&m).expect("en_US resolves");
+        assert_eq!((b.key, b.region), ("eng-US", None));
+        // an empty/missing country falls back to the regionless default
+        let m = model("piper-es-claude-high", "es", "");
+        let b = default_bundle_for_model(&m).expect("regionless es resolves");
+        assert_eq!(b.key, "spa-ES");
+        // country normalization: whitespace + case
+        let m = model("piper-es-claude-high", "es", " mx ");
+        let b = default_bundle_for_model(&m).expect("messy es_MX resolves");
+        assert_eq!(b.key, "spa-LatAm");
+        // duplicate same-country entries are one country, not a conflict
+        let mut m = model("some-es-multi", "es", "");
+        m.language.push(SherpaLanguage {
+            lang_code: "es".into(),
+            language_name: "es".into(),
+            country: "MX".into(),
+        });
+        m.language[0].country = "MX".into();
+        let b = default_bundle_for_model(&m).expect("same-country multi-entry resolves");
+        assert_eq!(b.key, "spa-LatAm");
         // Croatian stays out (multi-char <BOS> tokens, #108)
         let m = model("coqui-hr-cv", "hr", "HR");
         assert!(default_bundle_for_model(&m).is_none());
@@ -701,7 +836,9 @@ mod tests {
                         | "slv"
                         | "swe"
                         | "isl"
-                        | "nob",
+                        | "nob"
+                        | "spa-LatAm"
+                        | "por-PT",
                     Archive::Expanded
                 ) | (
                     "ru" | "ca"
@@ -719,7 +856,8 @@ mod tests {
                         | "ne"
                         | "sq"
                         | "sr"
-                        | "uk",
+                        | "uk"
+                        | "en-GB",
                     Archive::Base
                 )
             ),
@@ -756,6 +894,7 @@ mod tests {
                                 | "sq"
                                 | "sr"
                                 | "uk"
+                                | "en-GB"
                         ),
                         "{}",
                         b.key
@@ -778,6 +917,8 @@ mod tests {
                             | "swe"
                             | "isl"
                             | "nob"
+                            | "spa-LatAm"
+                            | "por-PT"
                     ),
                     "{}",
                     b.key
