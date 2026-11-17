@@ -79,11 +79,20 @@ impl ModelSource for SherpaModelSource {
                         .is_some_and(|reg| !reg.eq_ignore_ascii_case(&man.sha256))
                 });
                 let availability = if installed {
-                    // #106: files-on-disk ≠ ready-offline. A
-                    // needs_bundle voice with the bundle cached IS
-                    // ready; without it the files exist but the voice
-                    // cannot speak offline yet.
-                    if readiness == "needs_bundle" {
+                    if crate::sherpaonnx_engine::is_english_model_id(&id.to_ascii_lowercase())
+                        && readiness == "needs_bundle"
+                    {
+                        // English: the #66/#67 auto-lexicon still
+                        // speaks and the bundle is an upgrade (the
+                        // install gate's own degradation story,
+                        // mirrored here so an app gating on Ready
+                        // keeps showing a working voice)
+                        Availability::Ready
+                    } else if readiness == "needs_bundle" {
+                        // #106: files-on-disk ≠ ready-offline. A
+                        // needs_bundle voice with the bundle cached IS
+                        // ready; without it the files exist but the
+                        // voice cannot speak offline yet.
                         #[cfg(feature = "sherpa-g2p")]
                         {
                             crate::sherpa_lang::validated_bundle_for_model(&info).map_or(

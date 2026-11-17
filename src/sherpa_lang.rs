@@ -439,16 +439,20 @@ fn default_row_in(rows: &[LangBundle], model: &SherpaModelInfo) -> Option<usize>
     // phonemes, pt_PT European, en_GB British. A multi-entry model
     // with the same primary but conflicting regions stays on the
     // default rather than guessing.
-    let countries: Vec<String> = model
+    let mut countries: Vec<String> = model
         .language
         .iter()
         .map(|l| l.country.trim().to_ascii_uppercase())
         .filter(|c| !c.is_empty())
         .collect();
-    if countries.len() == 1 {
+    countries.sort_unstable();
+    countries.dedup();
+    // duplicate same-country entries ([es/MX, es/MX]) are one country;
+    // conflicting ones ([es/MX, es/AR]) fall through to the default
+    if let [country] = &countries[..] {
         if let Some(i) = rows
             .iter()
-            .position(|b| b.bcp47 == primary && b.region.is_some_and(|r| r == countries[0]))
+            .position(|b| b.bcp47 == primary && b.region.is_some_and(|r| r == country))
         {
             return Some(i);
         }
@@ -701,6 +705,20 @@ mod tests {
         let m = model("piper-es-claude-high", "es", "");
         let b = default_bundle_for_model(&m).expect("regionless es resolves");
         assert_eq!(b.key, "spa-ES");
+        // country normalization: whitespace + case
+        let m = model("piper-es-claude-high", "es", " mx ");
+        let b = default_bundle_for_model(&m).expect("messy es_MX resolves");
+        assert_eq!(b.key, "spa-LatAm");
+        // duplicate same-country entries are one country, not a conflict
+        let mut m = model("some-es-multi", "es", "");
+        m.language.push(SherpaLanguage {
+            lang_code: "es".into(),
+            language_name: "es".into(),
+            country: "MX".into(),
+        });
+        m.language[0].country = "MX".into();
+        let b = default_bundle_for_model(&m).expect("same-country multi-entry resolves");
+        assert_eq!(b.key, "spa-LatAm");
         // Croatian stays out (multi-char <BOS> tokens, #108)
         let m = model("coqui-hr-cv", "hr", "HR");
         assert!(default_bundle_for_model(&m).is_none());
