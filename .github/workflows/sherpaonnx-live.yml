@@ -119,15 +119,12 @@ jobs:
             exit 0
           fi
           mkdir -p "$DEST"
-          # PINNED to v0.4.0: the p2p-*.tsv convention-pair tables the
-          # English auto-lexicon requires were dropped from eng-US
-          # (and en) tarballs in voicegarden v0.5.0+ (packaging
-          # omission — scripts/release_p2p_pairs.py wasn't run).
-          # `latest` would silently break every fresh runner: the
-          # pairs check below passes on cached copies only. Re-pin to
-          # latest once voicegarden re-ships the pairs.
+          # `latest` requires the p2p-*.tsv convention-pair tables in
+          # the tarball (voicegarden-lexicons#7 — restored in v0.6.1,
+          # with the injection folded into build.py so releases can't
+          # drop them again)
           curl -fsSL -o eng-US.tar.gz \
-            https://github.com/AACTools/voicegarden-lexicons/releases/download/v0.4.0/eng-US.tar.gz
+            https://github.com/AACTools/voicegarden-lexicons/releases/latest/download/eng-US.tar.gz
           tar -xzf eng-US.tar.gz -C "$DEST"
           rm eng-US.tar.gz
           ls -la "$DEST"
