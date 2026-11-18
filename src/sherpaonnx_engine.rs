@@ -690,7 +690,14 @@ impl SherpaOnnxEngine {
             },
             "kitten" => sherpa_onnx::OfflineTtsModelConfig {
                 kitten: sherpa_onnx::OfflineTtsKittenModelConfig {
-                    model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+                    // fp16/int8 variants ship model.fp16.onnx /
+                    // model.int8.onnx (kokoro's resolver, same story)
+                    model: Some(
+                        find_primary_model_onnx(&model_dir)
+                            .unwrap_or_else(|| model_dir.join("model.onnx"))
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
                     voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
                     // 2.x: espeak is gone; a lexicon*.txt is required for

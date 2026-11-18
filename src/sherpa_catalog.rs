@@ -74,7 +74,23 @@ pub fn readiness_for(model: &SherpaModelInfo, has_sha256: bool, deprecated: bool
     if deprecated {
         return "blocked:deprecated".to_string();
     }
+    let validated_g2p = crate::sherpa_lang::g2p_enabled_for(model);
+    let id_lower = model.id.to_ascii_lowercase();
     match model.model_type.as_str() {
+        // English espeak-orphaned families (kitten/kokoro/matcha-en)
+        // need the generated lexicon from the eng-US bundle exactly
+        // like English piper — with the front-end compiled in, their
+        // installs must provision it (#116 follow-up: kitten failed
+        // engine creation on fresh machines because readiness said
+        // "ready" and the bundle never fetched)
+        "kitten" | "kokoro" | "matcha"
+            if crate::sherpaonnx_engine::is_english_model_id(&id_lower)
+                && !crate::sherpaonnx_engine::is_bilingual_en_compound(&id_lower)
+                && validated_g2p
+                && cfg!(feature = "sherpa-g2p") =>
+        {
+            "needs_bundle".to_string()
+        }
         // bundled front-ends, complete checksummed archives
         "kokoro" | "kitten" | "supertonic" | "pocket" | "floravox-student" => "ready".to_string(),
         // shared vocoder downloads the wrapper resolves at engine
@@ -182,16 +198,6 @@ mod tests {
             "blocked:deprecated"
         );
 
-        // checksummed, bundled front-ends
-        assert_eq!(
-            readiness_for(&model("kokoro-en-v0_19", "kokoro", "en"), true, false),
-            "ready"
-        );
-        // family asset needs
-        assert_eq!(
-            readiness_for(&model("matcha-en-x", "matcha", "en"), true, false),
-            "needs_assets:vocoder"
-        );
         assert_eq!(
             readiness_for(&model("zipvoice-x", "zipvoice", "zh"), true, false),
             "needs_assets:vocoder-reference"
@@ -289,6 +295,52 @@ mod tests {
         );
     }
 
+    /// English espeak-orphaned families (#116 follow-up): kitten /
+    /// kokoro / matcha-en read needs_bundle when the G2P front-end is
+    /// compiled in (their lexicon comes from the eng-US bundle, so
+    /// installs must provision it); the family defaults otherwise.
+    #[test]
+    fn english_orphaned_families_route_to_needs_bundle() {
+        for (id, mtype) in [
+            ("kokoro-en-v0_19", "kokoro"),
+            ("nano-en-v0_1-fp16", "kitten"),
+            ("icefall-en-ljspeech", "matcha"),
+        ] {
+            let _ = (id, mtype); // used only in the g2p cfg below
+            #[cfg(feature = "sherpa-g2p")]
+            assert_eq!(
+                readiness_for(&model(id, mtype, "en"), true, false),
+                "needs_bundle",
+                "{id}"
+            );
+        }
+        #[cfg(not(feature = "sherpa-g2p"))]
+        {
+            assert_eq!(
+                readiness_for(&model("kokoro-en-v0_19", "kokoro", "en"), true, false),
+                "ready"
+            );
+            assert_eq!(
+                readiness_for(&model("matcha-en-x", "matcha", "en"), true, false),
+                "needs_assets:vocoder"
+            );
+        }
+        // bilingual compounds and non-English keep the family defaults
+        // — cfg-free so the g2p build still pins needs_assets:vocoder
+        assert_eq!(
+            readiness_for(
+                &model("kokoro-zh_en-multi-lang-v1_1", "kokoro", "zh"),
+                true,
+                false
+            ),
+            "ready"
+        );
+        assert_eq!(
+            readiness_for(&model("icefall-zh-baker", "matcha", "zh"), true, false),
+            "needs_assets:vocoder"
+        );
+    }
+
     /// Every value readiness_for can emit, pinned exactly — downloaders
     /// match these strings, so a change is a breaking API change. The
     /// FFI test additionally validates the emitted set over the real
@@ -314,7 +366,11 @@ mod tests {
         // actually reachable from the fixtures in this module
         let mut seen: Vec<String> = Vec::new();
         for (m, sha, dep) in [
-            (model("kokoro-en-v0_19", "kokoro", "en"), true, false),
+            (
+                model("kokoro-zh_en-multi-lang-v1_1", "kokoro", "zh"),
+                true,
+                false,
+            ),
             (model("piper-de_DE-t", "vits", "de"), true, false),
             (model("matcha-en-x", "matcha", "en"), true, false),
             (model("zipvoice-x", "zipvoice", "zh"), true, false),
@@ -322,7 +378,16 @@ mod tests {
             (model("supertonic-3", "supertonic", "en"), true, true),
             (model("piper-pl_PL-g", "vits", "pl"), true, false),
             (model("piper-hu_HU-x", "vits", "hu"), true, false),
+            (model("no-url-x", "vits", "de"), true, false),
+            (model("piper-xx-x", "vits", "xx"), false, false),
+            (model("icefall-zh-baker", "matcha", "zh"), true, false),
+            (model("vits-ar-x", "vits", "ar"), true, false),
+            (model("some-tn_BW-x", "vits", "tn"), true, false),
         ] {
+            let mut m = m;
+            if m.id == "no-url-x" {
+                m.url = String::new();
+            }
             let r = readiness_for(&m, sha, dep);
             assert!(
                 expected.contains(&r.as_str()),
@@ -333,7 +398,28 @@ mod tests {
         // the no-language edge: a language-less vits entry
         let mut no_lang = model("vits-none", "vits", "de");
         no_lang.language.clear();
-        assert_eq!(readiness_for(&no_lang, true, false), "blocked:no-language");
+        let r = readiness_for(&no_lang, true, false);
+        assert_eq!(r, "blocked:no-language");
+        seen.push(r);
+        // every documented value is reachable from these fixtures
+        // (the doc comment's promise — needs_bundle needs the G2P
+        // feature compiled in, so it is cfg-gated like its fixtures)
+        for value in expected {
+            #[cfg(not(feature = "sherpa-g2p"))]
+            if *value == "needs_bundle" {
+                continue;
+            }
+            // g2p-unavailable means "validated data, front-end not
+            // compiled" — unreachable when it IS compiled
+            #[cfg(feature = "sherpa-g2p")]
+            if *value == "blocked:g2p-unavailable" {
+                continue;
+            }
+            assert!(
+                seen.contains(&(*value).to_string()),
+                "{value} not reachable"
+            );
+        }
     }
 
     /// Batch-2 flip spot-check (#92 wave 2): a flipped locale moves
