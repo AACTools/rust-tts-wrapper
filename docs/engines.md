@@ -62,6 +62,13 @@ Canonical keys per engine (also available at runtime via
 | watson | `apiKey`, `region`, `instanceId` |
 | witai | `token` |
 | sherpaonnx | `modelPath`, `modelId`, `numThreads`, `numSteps`, `provider`, `referenceAudio`, `referenceText`, `lexiconCompat`, `lexiconCachePath` |
+
+`modelPath` is the models **root** directory, not the model's own
+folder: the engine appends the model id itself (`<modelPath>/<modelId>`
+for sherpa — e.g. `modelPath: C:\models` with `modelId:
+piper-en_US-john-medium` resolves `C:\models\piper-en_US-john-medium`).
+Omit `modelPath` to use the default install dir
+(`~/.rust-tts-wrapper/sherpaonnx`, relocatable via `TTS_MODELS_DIR`).
 | qwen3-local | `modelsDir` (required), `threads`, `temperature`, `topK`, `maxTokens` |
 | omnivoice-local | `modelPath`, `codecPath` (required GGUFs), `numSteps`, `seed`, `instruct`, `language` |
 | floravox | `modelsDir`, `modelId`, `misaki`, `chars`, `speaker` |
