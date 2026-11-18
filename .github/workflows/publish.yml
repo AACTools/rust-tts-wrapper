@@ -72,10 +72,10 @@ jobs:
         with:
           name: version-sync
       - uses: dtolnay/rust-toolchain@stable
-      - name: Test (sapi,cloud,sherpaonnx)
+      - name: Test (sapi,cloud,sherpaonnx,sherpa-g2p)
         env:
           RTW_SKIP_EDGE_LIVE: "1"
-        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx
+        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,sherpa-g2p
       - uses: actions/download-artifact@v4
         with:
           name: engine-libs-windows-x64
@@ -134,7 +134,7 @@ jobs:
           RTW_SKIP_EDGE_LIVE: "1"
         run: |
           $env:PATH = "$env:PATH;$env:QWEN3_TTS_LIB\build;$env:QWEN3_TTS_LIB\ggml\build\src;$env:OMNIVOICE_LIB\build"
-          cargo test --no-default-features --features sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local,pocket-timing,cloning
+          cargo test --no-default-features --features sapi,cloud,sherpaonnx,sherpa-g2p,qwen3-local,omnivoice-local,pocket-timing,cloning
 
   build:
     name: Build ${{ matrix.label }}
@@ -177,13 +177,13 @@ jobs:
           # --- Sherpa-onnx builds (non-blocking: 504 download may fail) ---
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            features: "system,cloud,sherpaonnx"
+            features: "system,cloud,sherpaonnx,sherpa-g2p"
             label: "system-cloud-sherpaonnx-x86_64-linux"
             lib_ext: so
             allow_failure: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            features: "avsynth,cloud,sherpaonnx"
+            features: "avsynth,cloud,sherpaonnx,sherpa-g2p"
             label: "avsynth-cloud-sherpaonnx-aarch64-macos"
             lib_ext: dylib
             allow_failure: true
@@ -197,7 +197,11 @@ jobs:
             # GH #62: the flagship offline engines ride in the NuGet x64
             # DLL. The C++ engine libs come from the offline-engine-libs
             # artifact (layout reconstructed below to match build.rs).
-            features: "sapi,cloud,sherpaonnx,qwen3-local,omnivoice-local,pocket-timing,cloning"
+            # sherpa-g2p (#116): without it English vits/kitten voices
+            # have NO phoneme source on Windows — no codepoints
+            # front-end, no bundle provisioning, no generated lexicon
+            # (the macOS XCFramework always had it; the DLL didn't).
+            features: "sapi,cloud,sherpaonnx,sherpa-g2p,qwen3-local,omnivoice-local,pocket-timing,cloning"
             label: "sapi-cloud-sherpaonnx-x86_64-windows"
             lib_ext: dll
             offline_engines: true
