@@ -29,6 +29,15 @@ build contains.
 | IBM Watson | Cloud | Key + region + instance | Chunked | — | Estimated | Platform-aware |
 | Wit.ai / xAI / ModelsLab | Cloud | token / API key | Chunked | — | Estimated | Platform-aware |
 
+SAPI voice ids are the stable token leaf (`TTS_MS_EN-GB_HAZEL_11.0`,
+not the registry path); names come from the token's `Attributes`
+subkey, and `gender`/language codes from its `Gender`/`Language`
+attributes (hex LCIDs converted to BCP-47). Voice lists may include
+`Local-*` tokens — local engines (omnivoice, qwen) that register SAPI
+COM tokens — distinguishable by that prefix if consumers want to
+filter them. Ids persisted before v1.13.3 (full registry paths) keep
+resolving as legacy aliases.
+
 **Streaming** means audio arrives through the `on_audio` callback as it
 becomes available (REST bodies stream as bytes arrive; Azure/Edge/Qwen
 deliver over WebSockets). Google and ElevenLabs `with-timestamps`
