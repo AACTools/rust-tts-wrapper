@@ -324,7 +324,7 @@ fn install_locked_with(
         std::fs::remove_dir_all(&staging).ok();
         std::fs::create_dir_all(&staging)
             .map_err(|e| InstallError::Io("staging mkdir".into(), e))?;
-        let files = stage_files(
+        let mut files = stage_files(
             fetcher,
             id,
             &url,
@@ -334,6 +334,17 @@ fn install_locked_with(
             progress,
             cancel,
         )?;
+        // extra_files (#119): companion assets the archive doesn't
+        // carry (matcha's shared vocoders) — matcha-en's
+        // needs_bundle flip depends on this fetch
+        files.extend(stage_extra_files(
+            fetcher,
+            &url,
+            &model.extra_files,
+            &staging,
+            progress,
+            cancel,
+        )?);
         // the manifest goes in BEFORE the bundle gate: it is the
         // retained-staging marker, and its digest pins the bytes
         InstallManifest {
@@ -362,11 +373,21 @@ fn install_locked_with(
         progress(0.97, "post-install");
         if let Some(bundle) = crate::sherpa_lang::validated_bundle_for_model(&info) {
             if let Err(e) = crate::sherpa_g2p::provision_bundle(bundle.archive, bundle.key) {
-                if !crate::sherpaonnx_engine::is_english_model_id(&id.to_ascii_lowercase()) {
+                // English VITS degrades to the #66/#67 auto-lexicon
+                // (the codepoints path re-provisions at speak with a
+                // retry) — a bundle failure there is a warning, not
+                // an install failure. The other English-orphaned
+                // families (kitten/kokoro/matcha-en) have NO
+                // speak-time provisioning, so a transient fetch
+                // failure must fail the install (review: a
+                // "successful" install with Ready availability that
+                // can never speak is the worse outcome).
+                let id_lower = id.to_ascii_lowercase();
+                let english_vits = crate::sherpaonnx_engine::is_english_model_id(&id_lower)
+                    && model.model_type.eq_ignore_ascii_case("vits");
+                if !english_vits {
                     return Err(InstallError::PronunciationBundle(e));
                 }
-                // English: the auto-lexicon path still speaks — the
-                // bundle was the upgrade, not the requirement
                 eprintln!(
                     "sherpa: G2P bundle for '{id}' unavailable ({e}) — the \
                      auto-lexicon path will be used"
@@ -395,6 +416,48 @@ fn is_hf_dir_url(url: &str) -> bool {
 /// Fetch + extract the model's files into `staging` (archive, MMS
 /// directory pair, or raw single file). Returns the staged file list
 /// for the manifest.
+/// Fetch a registry entry's `extra_files` co-located into the model
+/// staging dir (#119: matcha's shared vocoders, which the archive
+/// doesn't carry). Every byte sha-gated; the per-file `url` override
+/// reaches the separate vocoder-models release (absent = the entry
+/// url's directory + name, the omnivoice convention).
+fn stage_extra_files(
+    fetcher: &dyn crate::local_models::install::HttpFetch,
+    url: &str,
+    extras: &[sherpa_onnx_models::ExtraFile],
+    staging: &std::path::Path,
+    progress: ProgressFn<'_>,
+    cancel: CancelFn<'_>,
+) -> Result<Vec<String>, InstallError> {
+    let mut names = Vec::new();
+    for f in extras {
+        if f.sha256.is_empty() {
+            return Err(InstallError::UnsupportedUrl(format!(
+                "an extra file '{}' has no sha256 — unverifiable download",
+                f.name
+            )));
+        }
+        let dir = url
+            .rsplit_once('/')
+            .map_or(String::new(), |(d, _)| format!("{d}/"));
+        let furl = f.url.clone().unwrap_or_else(|| format!("{dir}{}", f.name));
+        let part = staging.join(&f.name);
+        fetch_verified(
+            fetcher,
+            &furl,
+            &f.sha256,
+            &part,
+            (f.size_mb * 1_000_000.0) as u64,
+            progress,
+            cancel,
+        )?;
+        names.push(f.name.clone());
+    }
+    Ok(names)
+}
+
+/// Fetch + extract the model's files into `staging` (archive, MMS
+/// directory pair, or raw single file).
 // fetcher threading + the seven call params of the layout branches
 #[allow(clippy::too_many_arguments)]
 fn stage_files(

@@ -165,7 +165,7 @@ ort = { version = "=2.0.0-rc.14", optional = true, default-features = false, fea
 hound = { version = "3", optional = true }
 floravox-ssml = { version = "0.8.8", optional = true }
 # The model registry as typed data (canonical: AACTools/sherpa-onnx-tts-models).
-sherpa-onnx-models = { version = "1.4", optional = true }
+sherpa-onnx-models = { version = "1.5", optional = true }
 # floravox: event-driven SSML synthesis (piper/MMS VITS, Matcha, Kokoro)
 # with measured word timings. Default features (onnx, misaki, uroman)
 # are intentional: misaki is the only TokenPhonemizer available at this

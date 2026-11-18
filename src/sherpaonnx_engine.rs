@@ -1907,13 +1907,19 @@ fn build_matcha_config(
             "hifigan_v2_en_zh.onnx",
             "hifigan_vitimator_v2.onnx",
             "vocos-22khz-univ.onnx",
+            "vocos-16khz-univ.onnx",
             "vocoder.onnx",
         ],
     )
     .or_else(|| {
         first_existing(
             base_dir,
-            &["vocos-22khz-univ.onnx", "hifigan_v2.onnx", "vocoder.onnx"],
+            &[
+                "vocos-22khz-univ.onnx",
+                "vocos-16khz-univ.onnx",
+                "hifigan_v2.onnx",
+                "vocoder.onnx",
+            ],
         )
     });
 

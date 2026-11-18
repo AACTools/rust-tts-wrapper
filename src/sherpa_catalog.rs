@@ -321,6 +321,10 @@ mod tests {
                 "ready"
             );
             assert_eq!(
+                readiness_for(&model("nano-en-v0_1-fp16", "kitten", "en"), true, false),
+                "ready"
+            );
+            assert_eq!(
                 readiness_for(&model("matcha-en-x", "matcha", "en"), true, false),
                 "needs_assets:vocoder"
             );
