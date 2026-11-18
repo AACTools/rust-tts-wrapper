@@ -690,7 +690,14 @@ impl SherpaOnnxEngine {
             },
             "kitten" => sherpa_onnx::OfflineTtsModelConfig {
                 kitten: sherpa_onnx::OfflineTtsKittenModelConfig {
-                    model: Some(model_dir.join("model.onnx").to_string_lossy().to_string()),
+                    // fp16/int8 variants ship model.fp16.onnx /
+                    // model.int8.onnx (kokoro's resolver, same story)
+                    model: Some(
+                        find_primary_model_onnx(&model_dir)
+                            .unwrap_or_else(|| model_dir.join("model.onnx"))
+                            .to_string_lossy()
+                            .to_string(),
+                    ),
                     voices: Some(model_dir.join("voices.bin").to_string_lossy().to_string()),
                     tokens: Some(model_dir.join("tokens.txt").to_string_lossy().to_string()),
                     // 2.x: espeak is gone; a lexicon*.txt is required for
@@ -1900,13 +1907,19 @@ fn build_matcha_config(
             "hifigan_v2_en_zh.onnx",
             "hifigan_vitimator_v2.onnx",
             "vocos-22khz-univ.onnx",
+            "vocos-16khz-univ.onnx",
             "vocoder.onnx",
         ],
     )
     .or_else(|| {
         first_existing(
             base_dir,
-            &["vocos-22khz-univ.onnx", "hifigan_v2.onnx", "vocoder.onnx"],
+            &[
+                "vocos-22khz-univ.onnx",
+                "vocos-16khz-univ.onnx",
+                "hifigan_v2.onnx",
+                "vocoder.onnx",
+            ],
         )
     });
 

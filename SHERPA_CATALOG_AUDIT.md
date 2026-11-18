@@ -15,7 +15,7 @@ Each model gets a readiness value, surfaced through
 
 | value | meaning | example |
 |---|---|---|
-| `ready` | install + first use works offline with the listed assets | kokoro-en (bundled lexicon); German piper after bundle provision |
+| `ready` | install + first use works offline with the listed assets | non-English sherpa after bundle provision; English orphaned families (kitten/kokoro/matcha-en) read `needs_bundle` with the G2P front-end compiled in — their archives ship NO lexicon (espeak-orphaned in sherpa-onnx 2.x), so installs must provision the eng-US bundle |
 | `needs_bundle` | wrapper G2P applies once a VoiceGarden bundle is provisioned (`tts_provision_sherpa_g2p_bundle`) | `piper-fr_FR-*` once fr is validated |
 | `needs_assets` | family-specific assets beyond the archive are required (vocoder, voices.bin, reference audio) — the installer must fetch them | matcha (vocoder), zipvoice (vocos) |
 | `unverified` | downloads exist but no offline-synthesis validation has been recorded for this family/locale yet | most MMS locales |
@@ -52,8 +52,12 @@ is the *installer* question and subsumes it.
 
 ### kitten — 7 models
 
-- assets: model.onnx + voices.bin + tokens.txt + lexicon*.txt
-- text front-end: bundled lexicon required
+- assets: model.onnx (fp16/int8 variants: model.fp16.onnx /
+  model.int8.onnx) + voices.bin + tokens.txt — NO lexicon in the
+  archive (espeak-orphaned in sherpa-onnx 2.x; the generated
+  lexicon.txt comes from the eng-US bundle, #116)
+- text front-end: generated lexicon required (needs_bundle with the
+  G2P front-end; auto-lexicon if assets are seeded manually)
 - download url: 7/7 · sha256: 7/7 · deprecated: 0
 - languages: en×7
 

@@ -95,6 +95,27 @@ fn returns_the_registry_enriched_with_g2p_eligibility() {
         registry["kokoro-zh_en-int8"]["readiness"],
         serde_json::Value::String("ready".to_string())
     );
+    // #116 follow-up: English orphaned families flip with the
+    // front-end (registry-real id — if a registry bump renames it,
+    // this pin catches the arm silently stopping matching)
+    #[cfg(feature = "sherpa-g2p")]
+    assert_eq!(
+        registry["nano-en-v0_1-fp16"]["readiness"],
+        serde_json::Value::String("needs_bundle".to_string())
+    );
+    #[cfg(not(feature = "sherpa-g2p"))]
+    assert_eq!(
+        registry["nano-en-v0_1-fp16"]["readiness"],
+        serde_json::Value::String("ready".to_string())
+    );
+    // matcha-en: needs_bundle now that the installer fetches its
+    // vocoder as registry extra_files (#119 — was needs_assets:vocoder)
+    #[cfg(feature = "sherpa-g2p")]
+    assert_eq!(
+        registry["icefall-en-ljspeech"]["readiness"],
+        serde_json::Value::String("needs_bundle".to_string())
+    );
+
     // MMS: no sha256 in the registry, native front-end
     assert_eq!(
         registry["mms_abp"]["readiness"],
@@ -175,6 +196,54 @@ fn provision_reports_errors_for_ineligible_models() {
     assert!(!tts_provision_sherpa_g2p_bundle(std::ptr::null()));
     let (code, detail) = last_detail();
     assert_eq!(code, 2, "InvalidConfiguration: {detail}");
+}
+
+/// The #116 class, pinned live: install an English orphaned-family
+/// model into a FRESH models dir and FRESH voicegarden cache, then
+/// speak through the G2P front-end (bundle provision, lexicon
+/// generation, engine creation). Point the `TTS_MODELS_DIR` and
+/// `VOICEGARDEN_LEXICON_DIR` env vars at throwaway dirs to run.
+#[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
+#[test]
+#[ignore = "live: downloads the model + bundle into TTS_MODELS_DIR/VOICEGARDEN_LEXICON_DIR"]
+fn install_and_speak_english_kitten_from_fresh_dirs() {
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    unsafe extern "C" fn prog(_p: f64, _m: *const std::ffi::c_char, _u: *mut std::ffi::c_void) {}
+    unsafe extern "C" fn cancel(_u: *mut std::ffi::c_void) -> bool {
+        false
+    }
+
+    let engine = CString::new("sherpaonnx").unwrap();
+    let id = CString::new("nano-en-v0_1-fp16").unwrap();
+    let ok = rust_tts_wrapper::tts_model_install(
+        engine.as_ptr(),
+        id.as_ptr(),
+        Some(prog),
+        Some(cancel),
+        std::ptr::null_mut(),
+    );
+    assert!(ok, "kitten install failed (see stderr)");
+    let bytes = AtomicUsize::new(0);
+    let creds = r#"{"modelId":"nano-en-v0_1-fp16"}"#;
+    let engine = rust_tts_wrapper::factory::create_engine("sherpaonnx", creds).expect("engine");
+    let mut cb = |c: &[u8]| {
+        bytes.fetch_add(c.len(), Ordering::SeqCst);
+    };
+    engine
+        .speak(
+            "Hello, I have forty two houses.",
+            None,
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut cb),
+            None,
+            None,
+        )
+        .expect("speak");
+    assert!(bytes.load(Ordering::SeqCst) > 10_000, "audio too small");
 }
 
 #[cfg(all(feature = "sherpaonnx", feature = "sherpa-g2p"))]
