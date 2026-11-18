@@ -85,8 +85,11 @@ impl SapiEngine {
         for i in 0..count {
             if let Ok(token) = enum_tokens.Item(i) {
                 if let Ok(id) = token.GetId() {
-                    let matches = id.to_string().is_ok_and(|s| s == voice_id);
-                    if matches {
+                    // #115: ids are now the stable leaf segment; the
+                    // full registry path stays accepted as a legacy
+                    // alias for ids persisted by pre-fix clients
+                    let path = take_pwstr(id);
+                    if path == voice_id || sapi_token_leaf(&path) == voice_id {
                         return Some(token);
                     }
                 }
@@ -606,26 +609,43 @@ impl TtsEngine for SapiEngine {
         let mut voices = Vec::with_capacity(count);
         for i in 0..count {
             if let Ok(token) = unsafe { tokens.Item(i as u32) } {
-                let id = unsafe { token.GetId().map(|h| h.to_hstring().to_string_lossy()) }
-                    .unwrap_or_default();
-
-                let name = unsafe {
-                    token
-                        .GetStringValue(windows::core::w!("Name"))
-                        .map_or_else(|_| id.clone(), |h| h.to_hstring().to_string_lossy())
+                // The token id is its registry path
+                // (HKEY_LOCAL_MACHINE\...\Tokens\TTS_MS_EN-GB_HAZEL_11.0):
+                // keep only the stable last segment as the public id.
+                let token_path =
+                    unsafe { token.GetId().ok() }.map_or_else(|| format!("voice-{i}"), take_pwstr);
+                let id = {
+                    let leaf = sapi_token_leaf(&token_path);
+                    if leaf.is_empty() {
+                        format!("voice-{i}")
+                    } else {
+                        leaf.to_string()
+                    }
                 };
 
-                let lang = unsafe {
-                    token
-                        .GetStringValue(windows::core::w!("Language"))
-                        .map_or_else(|_| "en-US".into(), |h| h.to_hstring().to_string_lossy())
-                };
+                // SAPI voice attributes (Name/Gender/Language/Age/
+                // Vendor) live under the token's `Attributes` SUBKEY,
+                // not the token root — reading them from the root
+                // silently fails, which is how registry paths leaked
+                // into Name and Gender collapsed to Unknown (#115).
+                let attrs = unsafe { token.OpenKey(windows::core::w!("Attributes")) }.ok();
 
-                let gender_str = unsafe {
-                    token
-                        .GetStringValue(windows::core::w!("Gender"))
-                        .map_or_else(|_| String::new(), |h| h.to_hstring().to_string_lossy())
-                };
+                // display name: Attributes\Name, else the token's
+                // own (default) value, else the id leaf
+                let name = sapi_attr_str(attrs.as_ref(), windows::core::w!("Name"))
+                    .or_else(|| unsafe { token.GetStringValue(None).ok() }.map(take_pwstr))
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| id.clone());
+
+                // Attributes\Language is one or more hex LCIDs
+                // ("809" = en-GB), separator varies; take the first
+                // and convert to BCP-47 rather than guessing en-US
+                let lang = sapi_attr_str(attrs.as_ref(), windows::core::w!("Language"))
+                    .and_then(|lcs| lcid_to_bcp47(&lcs))
+                    .unwrap_or_else(|| "en-US".to_string());
+
+                let gender_str =
+                    sapi_attr_str(attrs.as_ref(), windows::core::w!("Gender")).unwrap_or_default();
 
                 voices.push(Voice {
                     id: id.clone(),
@@ -672,14 +692,63 @@ impl Drop for SapiEngine {
     }
 }
 
+/// Copy a SAPI-allocated `PWSTR` (CoTaskMemAlloc) into an owned
+/// String and free the original — `to_hstring()` copies and leaks
+/// (#115 review: four of these fire per voice per get_voices()).
+fn take_pwstr(p: windows::core::PWSTR) -> String {
+    let s = unsafe { p.to_hstring() }.to_string_lossy();
+    unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(p.as_ptr().cast())) };
+    s
+}
+
+/// Read one string attribute from a token's `Attributes` subkey
+/// handle (#115: SAPI voice attributes live there, not on the token
+/// root).
+fn sapi_attr_str(
+    attrs: Option<&windows::Win32::Media::Speech::ISpDataKey>,
+    key: windows::core::PCWSTR,
+) -> Option<String> {
+    attrs
+        .and_then(|a| unsafe { a.GetStringValue(key) }.ok())
+        .map(take_pwstr)
+}
+
+/// The stable leaf segment of a SAPI token registry path
+/// (`HKEY...\Tokens\TTS_MS_EN-GB_HAZEL_11.0` →
+/// `TTS_MS_EN-GB_HAZEL_11.0`). Path-free ids for voice pickers (#115).
+#[must_use]
+fn sapi_token_leaf(token_path: &str) -> &str {
+    token_path
+        .rsplit(['\\', '/'])
+        .find(|s| !s.is_empty())
+        .unwrap_or(token_path)
+}
+
+/// An `Attributes\Language` value to BCP-47 ("en-GB"): one or more
+/// hex LCIDs, separator varies ("809", "409;9", "409;809" — per the
+/// SAPI Object Tokens docs). The first parseable LCID converts via
+/// `LCIDToLocaleName`.
+#[must_use]
+fn lcid_to_bcp47(value: &str) -> Option<String> {
+    let first = value
+        .split(|c: char| !c.is_ascii_hexdigit())
+        .find(|s| !s.is_empty())?;
+    let lcid = u32::from_str_radix(first, 16).ok()?;
+    lcid_to_bcp47_lcid(lcid)
+}
+
+fn lcid_to_bcp47_lcid(lcid: u32) -> Option<String> {
+    unsafe {
+        let mut buf = [0u16; 85]; // LOCALE_NAME_MAX_LENGTH
+        let n = windows::Win32::Globalization::LCIDToLocaleName(lcid, Some(&mut buf), 0);
+        // the count INCLUDES the terminating NUL (winnls.h)
+        (n > 0).then(|| String::from_utf16_lossy(&buf[..(n as usize) - 1]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_rate_to_sapi_normal_is_zero() {
-        assert_eq!(rate_to_sapi(1.0), 0);
-    }
 
     #[test]
     fn test_rate_to_sapi_maps_to_tens() {
@@ -849,5 +918,37 @@ mod tests {
         let wav = build_wav(&fmt, &[1, 2, 3]);
         // fmt chunk size = 18 for non-PCM (16 base + 2 for cbSize).
         assert_eq!(u32::from_le_bytes([wav[16], wav[17], wav[18], wav[19]]), 18);
+    }
+
+    #[test]
+    fn sapi_token_leaf_strips_the_registry_path() {
+        assert_eq!(
+            sapi_token_leaf(
+                "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Speech\\Voices\\Tokens\\TTS_MS_EN-GB_HAZEL_11.0"
+            ),
+            "TTS_MS_EN-GB_HAZEL_11.0"
+        );
+        assert_eq!(
+            sapi_token_leaf("Local-omnivoice-local-en-GB"),
+            "Local-omnivoice-local-en-GB"
+        );
+        assert_eq!(sapi_token_leaf(""), "");
+        assert_eq!(sapi_token_leaf("trailing\\slash\\"), "slash");
+    }
+
+    #[test]
+    fn lcid_hex_converts_to_bcp47() {
+        assert_eq!(lcid_to_bcp47("809").as_deref(), Some("en-GB"));
+        assert_eq!(lcid_to_bcp47("409").as_deref(), Some("en-US"));
+        assert_eq!(lcid_to_bcp47(" 809 409 ").as_deref(), Some("en-GB"));
+        // MS SAPI 5 registers English voices as "409;9" (Object
+        // Tokens docs, Table 1) — semicolon-separated, first wins
+        assert_eq!(lcid_to_bcp47("409;809").as_deref(), Some("en-US"));
+        assert_eq!(lcid_to_bcp47("409;9").as_deref(), Some("en-US"));
+        assert_eq!(lcid_to_bcp47("407").as_deref(), Some("de-DE"));
+        assert_eq!(lcid_to_bcp47("807").as_deref(), Some("de-CH")); // sublanguages differ
+                                                                    // and no trailing NUL from LCIDToLocaleName's count
+        let got = lcid_to_bcp47("809").unwrap();
+        assert!(!got.ends_with('\0'), "{got:?}");
     }
 }

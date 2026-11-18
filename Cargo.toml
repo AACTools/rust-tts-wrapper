@@ -222,7 +222,7 @@ icu_displaynames = { version = "0.11", optional = true, features = ["compiled_da
 icu_locid = { version = "1.4", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole"], optional = true }
+windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole", "Win32_Globalization"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # speech-dispatcher is the Linux system TTS daemon; the crate's bindgen step
