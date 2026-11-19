@@ -1144,6 +1144,10 @@ pub(crate) fn test_google_config_matrix() {
         .as_deref()
         .unwrap()
         .starts_with("https://texttospeech.googleapis.com/v1/voices?key="));
+    // speak() without an explicit voice must resolve to a real voice:
+    // Google rejects {"name": ""} with 400 "Voice name and locale
+    // cannot both be empty" (the Windows-team report)
+    assert_eq!(cfg.default_voice.as_deref(), Some("en-US-Standard-A"));
 }
 
 #[test]

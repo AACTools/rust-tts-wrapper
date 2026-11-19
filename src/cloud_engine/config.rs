@@ -130,6 +130,12 @@ pub fn build_config(id: &str, creds: &HashMap<String, String>) -> Option<CloudCo
                     "https://texttospeech.googleapis.com/v1/voices?key={api_key}"
                 )),
                 provider_id: "google".into(),
+                // speak() without an explicit voice otherwise sends
+                // {"name": ""} — Google rejects it with 400
+                // "Voice name and locale cannot both be empty". Every
+                // other cloud arm carries a default; this one gap made
+                // plain speak(text, None) fail on Google alone.
+                default_voice: Some("en-US-Standard-A".into()),
                 ..Default::default()
             })
         }
