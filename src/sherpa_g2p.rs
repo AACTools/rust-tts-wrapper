@@ -4816,7 +4816,7 @@ batch1_normalizer!(
 /// A one-line message (network, checksum, manifest); the engine logs
 /// it once and retries on a later utterance (throttled).
 pub fn provision_bundle(archive: Archive, key: &str) -> Result<PathBuf, String> {
-    let cache = voicegarden_lexicons::default_cache_dir();
+    let cache = crate::sherpa_lexicon::lexicon_cache_dir();
     let manifest_name = match archive {
         Archive::Base => "lexicons.json",
         Archive::Expanded => "expanded.json",
@@ -4836,7 +4836,7 @@ pub fn provision_bundle(archive: Archive, key: &str) -> Result<PathBuf, String> 
 /// #106. Shares the exact cache-hit logic `provision_from` uses.)
 #[cfg(feature = "sherpaonnx")]
 pub(crate) fn bundle_cached(archive: Archive, key: &str) -> bool {
-    let cache = voicegarden_lexicons::default_cache_dir();
+    let cache = crate::sherpa_lexicon::lexicon_cache_dir();
     let manifest_name = match archive {
         Archive::Base => "lexicons.json",
         Archive::Expanded => "expanded.json",
@@ -5242,6 +5242,58 @@ mod tests {
             Err("archive unavailable".into()),
             "an incomplete bundle must open the archive"
         );
+    }
+
+    /// #123: the cache split the Windows team hit. With `HOME`
+    /// unset (the Windows convention — `USERPROFILE` carries the
+    /// home dir), the crate's `default_cache_dir()` fell back to a
+    /// CWD-relative `.voicegarden-lexicons` while the wrapper's
+    /// discovery looked in `%USERPROFILE%\.voicegarden\lexicons` —
+    /// installs provisioned one, the auto-lexicon read the other.
+    /// The canonical resolver must prefer USERPROFILE when HOME is
+    /// absent, and both provisioning and discovery must use it.
+    #[test]
+    fn lexicon_cache_dir_resolves_userprofile_when_home_absent() {
+        let _env = crate::local_models::test_util::env_lock();
+        let home = std::env::var_os("HOME");
+        let profile = std::env::var_os("USERPROFILE");
+        let vg = std::env::var_os("VOICEGARDEN_LEXICON_DIR");
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
+        // the Windows shape: HOME absent, USERPROFILE set
+        std::env::set_var("USERPROFILE", tmp.path());
+        std::env::remove_var("HOME");
+        assert_eq!(
+            crate::sherpa_lexicon::lexicon_cache_dir(),
+            tmp.path().join(".voicegarden").join("lexicons")
+        );
+        // HOME wins when both are set
+        let home_tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home_tmp.path());
+        assert_eq!(
+            crate::sherpa_lexicon::lexicon_cache_dir(),
+            home_tmp.path().join(".voicegarden").join("lexicons")
+        );
+        // the env override wins over everything
+        let vg_tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("VOICEGARDEN_LEXICON_DIR", vg_tmp.path());
+        assert_eq!(crate::sherpa_lexicon::lexicon_cache_dir(), vg_tmp.path());
+        // restore
+        std::env::remove_var("VOICEGARDEN_LEXICON_DIR");
+        match (&home, &profile) {
+            (Some(h), _) => std::env::set_var("HOME", h),
+            (None, Some(p)) => {
+                std::env::remove_var("HOME");
+                std::env::set_var("USERPROFILE", p);
+            }
+            (None, None) => {
+                std::env::remove_var("HOME");
+            }
+        }
+        if let Some(v) = vg {
+            std::env::set_var("VOICEGARDEN_LEXICON_DIR", v);
+        }
+        let _ = profile;
     }
 
     /// #112: crate 0.3.0's `entry()` ran the bcp47 prefix heuristic

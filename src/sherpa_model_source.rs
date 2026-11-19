@@ -845,7 +845,7 @@ mod tests {
 
         // populate a stamp-verified bundle cache → the same files are
         // now READY (the bundle monolith satisfies the local manifest)
-        let cache = voicegarden_lexicons::default_cache_dir();
+        let cache = crate::sherpa_lexicon::lexicon_cache_dir();
         std::fs::create_dir_all(cache.join("fra")).unwrap();
         std::fs::write(cache.join("fra/fra.fst"), b"x").unwrap();
         std::fs::write(cache.join("fra/fra.pho"), b"x").unwrap();

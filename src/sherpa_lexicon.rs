@@ -686,16 +686,37 @@ pub fn ensure_generated_lexicon(
     }
 }
 
+/// The voicegarden lexicon cache root, resolved ONCE and used by
+/// every wrapper path (#123): `VOICEGARDEN_LEXICON_DIR`, then `HOME`,
+/// then `USERPROFILE` (Windows — where `HOME` is typically unset).
+///
+/// The crate's `default_cache_dir()` checks `HOME` only; on Windows
+/// that falls through to a **CWD-relative** `.voicegarden-lexicons`,
+/// so installs provisioned the bundle beside whatever directory the
+/// app happened to run from while the auto-lexicon (kitten/kokoro/
+/// matcha) looked in `%USERPROFILE%\.voicegarden\lexicons` —
+/// "no lexicon available" at engine creation on a fresh machine,
+/// exactly the split the Windows team hit. The crate accepts an
+/// explicit cache dir on every API we use, so the wrapper never
+/// needs its default.
+pub(crate) fn lexicon_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("VOICEGARDEN_LEXICON_DIR") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
+    match home {
+        Some(h) => PathBuf::from(h).join(".voicegarden").join("lexicons"),
+        None => PathBuf::from(".voicegarden-lexicons"),
+    }
+}
+
 /// voicegarden lexicon cache root (`~/.voicegarden/lexicons` by
 /// default; `VOICEGARDEN_LEXICON_DIR` overrides, mirroring the crate),
 /// when it exists.
 fn voicegarden_cache_dir() -> Option<PathBuf> {
-    let dir = if let Some(v) = std::env::var_os("VOICEGARDEN_LEXICON_DIR") {
-        PathBuf::from(v)
-    } else {
-        let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-        PathBuf::from(home).join(".voicegarden").join("lexicons")
-    };
+    // one canonical resolution (#123) so provisioning and discovery
+    // can never disagree (the split-cache bug the Windows team hit)
+    let dir = lexicon_cache_dir();
     dir.exists().then_some(dir)
 }
 
