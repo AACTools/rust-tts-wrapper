@@ -7,6 +7,17 @@
 #include <stdbool.h>
 
 /**
+ * The catalog schema/semantics version surfaced as `catalogVersion`
+ * in `tts_get_sherpa_models_json` (#132). Bump when the readiness
+ * VOCABULARY changes (a value renamed or introduced) or a release
+ * flips values wholesale — consumers pin switches and tests against
+ * it. History: 1 = pre-wave-3 (through 1.13.x); 2 = wave-3 flips
+ * (1.14.0, 78 models `blocked:bundle-not-validated` →
+ * `needs_bundle`).
+ */
+#define CATALOG_VERSION 2
+
+/**
  * Opaque engine context returned by [`tts_create`] and consumed by
  * every other `tts_*` function. Destroy with [`tts_destroy`].
  */
@@ -334,6 +345,47 @@ void tts_set_on_error(struct tts_ctx *ctx, CErrorCb cb, void *userdata);
  * `path` must be a valid null-terminated C string when non-null.
  */
 int32_t tts_set_pronunciations_file(const char *path);
+
+/**
+ * Are user pronunciation overrides (#125) active? 1 when a file
+ * resolved and carries at least one entry, 0 otherwise (no file,
+ * unreadable, or empty). Frontends badge their editor with this —
+ * a bindings pin older than the feature silently ignores the file
+ * (#131).
+ */
+int32_t tts_pronunciations_active(void);
+
+/**
+ * The Sherpa catalog schema/semantics version (#132): bump when the
+ * readiness vocabulary changes or a release flips values wholesale.
+ * Consumers gate readiness switches on this; the models JSON keeps
+ * its array shape. 0 when built without the sherpaonnx feature.
+ */
+int32_t tts_get_sherpa_catalog_version(void);
+
+/**
+ * Dry-run the text-form pronunciation overrides (#131): returns the
+ * text after respell substitutions — what a plain-text engine will
+ * speak, for editor previews and frontend self-tests. Phoneme-form
+ * entries are NOT substituted (only a phoneme front-end uses them).
+ * With no active file the input is returned unchanged.
+ *
+ * Caller must free with [`tts_free_string`]. Never returns null on
+ * non-null input.
+ *
+ * # Safety
+ *
+ * `text` must be a valid null-terminated C string.
+ */
+char *tts_apply_pronunciations(const char *text);
+
+/**
+ * Stats for the active pronunciation file (#131): writes the entry
+ * count and the malformed-line count from the last successful load
+ * to `out_entries` / `out_skipped` (either may be null to skip).
+ * Returns 1 when a file is loaded, 0 when none (outputs zeroed).
+ */
+int32_t tts_pronunciations_stats(int32_t *out_entries, int32_t *out_skipped);
 
 /**
  * Return the number of registered engines.

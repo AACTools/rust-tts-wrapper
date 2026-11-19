@@ -1279,6 +1279,81 @@ pub extern "C" fn tts_set_pronunciations_file(path: *const c_char) -> i32 {
     .unwrap_or(0)
 }
 
+/// The Sherpa catalog schema/semantics version (#132): bumped when
+/// the readiness vocabulary changes or a release flips values
+/// wholesale. Consumers gate their readiness switches on it; the
+/// models JSON itself keeps its array shape byte-for-byte (embedding
+/// the version there would break every existing decoder — the exact
+/// silent-breakage class #132 files).
+#[no_mangle]
+pub extern "C" fn tts_get_sherpa_catalog_version() -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        #[cfg(feature = "sherpaonnx")]
+        return i32::try_from(crate::sherpa_catalog::CATALOG_VERSION).unwrap_or(0);
+        #[allow(unreachable_code)]
+        0
+    }))
+    .unwrap_or(0)
+}
+
+/// Are user pronunciation overrides (#125) active? 1 when a file
+/// resolved and carries at least one entry, 0 otherwise (no file,
+/// unreadable, or empty). Frontends badge their editor with this —
+/// a bindings pin older than the feature silently ignores the file
+/// (#131).
+#[no_mangle]
+pub extern "C" fn tts_pronunciations_active() -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        i32::from(pronunciation::active().is_some_and(|p| !p.is_empty()))
+    }))
+    .unwrap_or(0)
+}
+
+/// Dry-run the text-form pronunciation overrides (#131): returns the
+/// text after respell substitutions — what a plain-text engine will
+/// speak, for editor previews and frontend self-tests. Phoneme-form
+/// entries are NOT substituted (only a phoneme front-end uses them).
+/// With no active file the input is returned unchanged.
+///
+/// Caller must free with [`tts_free_string`]. Never returns null on
+/// non-null input.
+///
+/// # Safety
+///
+/// `text` must be a valid null-terminated C string.
+#[no_mangle]
+pub extern "C" fn tts_apply_pronunciations(text: *const c_char) -> *mut c_char {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if text.is_null() {
+            return ptr::null_mut();
+        }
+        let text = unsafe { CStr::from_ptr(text) }.to_string_lossy();
+        CString::new(pronunciation::preview(&text)).map_or(ptr::null_mut(), CString::into_raw)
+    }))
+    .unwrap_or(ptr::null_mut())
+}
+
+/// Stats for the active pronunciation file (#131): writes the entry
+/// count and the malformed-line count from the last successful load
+/// to `out_entries` / `out_skipped` (either may be null to skip).
+/// Returns 1 when a file is loaded, 0 when none (outputs zeroed).
+#[no_mangle]
+pub extern "C" fn tts_pronunciations_stats(out_entries: *mut i32, out_skipped: *mut i32) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (entries, skipped) = pronunciation::stats();
+        unsafe {
+            if !out_entries.is_null() {
+                *out_entries = i32::try_from(entries).unwrap_or(i32::MAX);
+            }
+            if !out_skipped.is_null() {
+                *out_skipped = i32::try_from(skipped).unwrap_or(i32::MAX);
+            }
+        }
+        usize::from(entries > 0) as i32
+    }))
+    .unwrap_or(0)
+}
+
 /// Return the number of registered engines.
 #[no_mangle]
 pub extern "C" fn tts_get_engine_count() -> i32 {
@@ -1623,6 +1698,7 @@ pub extern "C" fn tts_get_sherpa_models_json() -> *mut c_char {
                     entry["readiness"] = serde_json::Value::String(readiness.clone());
                 }
             }
+
             let Ok(json) = CString::new(registry.to_string()) else {
                 set_error_detail(ErrorDetail::new(
                     TtsErrorCode::EngineFailure,

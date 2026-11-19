@@ -6,6 +6,7 @@
 )]
 use rust_tts_wrapper::factory;
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_engine_list_contains_cloud() {
     let engines = factory::engine_list();
@@ -48,6 +49,7 @@ fn test_engine_count() {
     );
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_cloud_engine_needs_credentials() {
     let engines = factory::engine_list();
@@ -89,6 +91,7 @@ fn test_create_system_engine() {
     assert_eq!(engine.unwrap().engine_id(), "system");
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_cloud_engine() {
     let engine = factory::create_engine("openai", r#"{"apiKey":"test-key"}"#);
@@ -98,6 +101,7 @@ fn test_create_cloud_engine() {
     );
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_unknown_engine() {
     // GH #69: unknown engines surface a structured EngineNotAvailable
@@ -125,6 +129,7 @@ fn test_system_engine_stop_graceful() {
     }
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_all_cloud_engines() {
     let cloud_ids = [
@@ -151,6 +156,7 @@ fn test_create_all_cloud_engines() {
     }
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_azure_with_region() {
     let engine = factory::create_engine(
@@ -160,6 +166,7 @@ fn test_create_azure_with_region() {
     assert!(engine.is_ok());
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_watson_with_all_creds() {
     let engine = factory::create_engine(
@@ -169,6 +176,7 @@ fn test_create_watson_with_all_creds() {
     assert!(engine.is_ok());
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_polly_with_all_creds() {
     // AWS Polly is SigV4-signed now (sigv4.rs) — a full credential set

@@ -47,6 +47,15 @@ const PUBLISHED_BUNDLE_LOCALES: &[&str] = &[
     "he", "ta",
 ];
 
+/// The catalog schema/semantics version surfaced as `catalogVersion`
+/// in `tts_get_sherpa_models_json` (#132). Bump when the readiness
+/// VOCABULARY changes (a value renamed or introduced) or a release
+/// flips values wholesale — consumers pin switches and tests against
+/// it. History: 1 = pre-wave-3 (through 1.13.x); 2 = wave-3 flips
+/// (1.14.0, 78 models `blocked:bundle-not-validated` →
+/// `needs_bundle`).
+pub const CATALOG_VERSION: u32 = 2;
+
 /// Compute the readiness value for one registry model.
 ///
 /// `has_sha256` and `deprecated` are registry facts the public model

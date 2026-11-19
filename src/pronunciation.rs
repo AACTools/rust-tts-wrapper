@@ -95,6 +95,10 @@ pub enum Policy {
 pub fn parse(source: &str) -> (Pronunciations, usize) {
     let mut by_key: HashMap<String, OverrideEntry> = HashMap::new();
     let mut skipped = 0usize;
+    // a leading BOM (Notepad's default "UTF-8 with BOM") must not
+    // glue itself onto the first key (#131: the first entry went
+    // silently dead)
+    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
     for raw in source.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -434,6 +438,7 @@ pub fn set_file(path: Option<PathBuf>) {
                 path: None,
                 mtime: None,
                 loaded: None,
+                skipped: 0,
             }),
         })
         .write()
@@ -444,6 +449,10 @@ struct State {
     path: Option<PathBuf>,
     mtime: Option<std::time::SystemTime>,
     loaded: Option<Arc<Pronunciations>>,
+    /// Malformed lines in the last successful load (ABI surfaces it
+    /// so GUI hosts can flag typos in-place — stderr is invisible
+    /// there).
+    skipped: usize,
 }
 
 struct Rw {
@@ -477,6 +486,7 @@ pub fn active() -> Option<Arc<Pronunciations>> {
             path: None,
             mtime: None,
             loaded: None,
+            skipped: 0,
         }),
     });
     let path = resolved_path();
@@ -486,7 +496,8 @@ pub fn active() -> Option<Arc<Pronunciations>> {
         st.force_reload();
         st.path = Some(path);
     }
-    let path = st.path.as_ref()?;
+    let path = st.path.clone()?;
+    let path = path.as_path();
     let mtime = modified_time(path);
     if st.loaded.is_some() && st.mtime == mtime {
         return st.loaded.clone();
@@ -499,6 +510,7 @@ pub fn active() -> Option<Arc<Pronunciations>> {
         return None;
     };
     let (p, skipped) = parse(&source);
+    st.skipped = skipped;
     if skipped > 0 {
         static SKIPPED_LOGGED: AtomicU64 = AtomicU64::new(0);
         if SKIPPED_LOGGED.swap(1, Ordering::Relaxed) == 0 {
@@ -512,6 +524,42 @@ pub fn active() -> Option<Arc<Pronunciations>> {
     let arc = Arc::new(p);
     st.loaded = Some(arc.clone());
     Some(arc)
+}
+
+/// What a frontend editor needs to know about the active overrides
+/// (#131): entry count, malformed-line count from the last load,
+/// and whether the feature is live at all (a bindings pin older
+/// than the feature silently ignores the file).
+#[must_use]
+pub fn stats() -> (usize, usize) {
+    // ensure the state reflects the CURRENT file (set_file only
+    // invalidates; a stats call before any speak must still load)
+    let _ = active();
+    let rw = STATE.get_or_init(|| Rw {
+        state: Mutex::new(State {
+            path: None,
+            mtime: None,
+            loaded: None,
+            skipped: 0,
+        }),
+    });
+    let st = rw.write();
+    match &st.loaded {
+        Some(p) => (p.len(), st.skipped),
+        None => (0, 0),
+    }
+}
+
+/// Dry-run (#131): the text after the text-form (respell)
+/// substitutions — what a plain-text engine will speak. Phoneme-form
+/// entries are NOT substituted here (only a phoneme front-end uses
+/// them); document that in the editor preview.
+#[must_use]
+pub fn preview(text: &str) -> String {
+    match active() {
+        Some(p) if !p.is_empty() => p.apply(text, Policy::AllRespell).text,
+        _ => text.to_string(),
+    }
 }
 
 /// mtime of a file, None when missing. The refresh signal — a new
