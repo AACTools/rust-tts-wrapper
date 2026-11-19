@@ -182,9 +182,11 @@ bundle, handed to sherpa as phoneme codepoints. Out-of-vocabulary
 words and numbers are **spoken**, not dropped (the built-in lexicon
 front-end drops them).
 
-- The validated G2P fleet covers **31 locales** (#92 campaign, waves
-  1-2): de en fr es pt it ru ca cs da nl pl sk sl sv + af cy eu hu is
-  ka kk ko lb lv ml ne no sq sr uk. Single-language voices in those
+- The validated G2P fleet covers **42 locales** (#92 campaign, waves
+  1-3): de en fr es pt it ru ca cs da nl pl sk sl sv + af cy eu hu is
+  ka kk ko lb lv ml ne no sq sr uk + fa ar hi tr fi el ro id ur bn sw
+  (wave 3: the fa/sw bundles ride the base manifest, the rest the
+  expanded one). Single-language voices in those
   locales resolve a validated
   [voicegarden-lexicons](https://github.com/AACTools/voicegarden-lexicons)
   bundle (the German default is the expanded `deu` bundle; Icelandic
@@ -193,9 +195,17 @@ front-end drops them).
   `~/.voicegarden/lexicons` (pre-seed it for fully-offline first use — the cache root honors
   `VOICEGARDEN_LEXICON_DIR`). Numbers, decimals, and digit runs are
   normalized per language (`sherpa_g2p::normalizer_for`), including
-  closed compounds where the language writes them closed (hu, ml, ne),
-  conjunction-linked tens (is/sr/sq), vigesimal systems (eu, ka), the
-  Korean 만 grouping, and the Nepali लाख tier.
+  closed compounds where the language writes them closed (hu, ml, ne,
+  fi), conjunction-linked tens (is/sr/sq/ar/sw), vigesimal systems
+  (eu, ka), the Korean 만 grouping, the Nepali/Hindi/Urdu/Bengali
+  लाख tier with lexicalized 20-99 compounds, and the Swahili
+  multiplier-after-noun order (mia mbili, elfu moja). The probe
+  verdicts for the remaining published bundles (et ga gu lt mt vi)
+  are grapheme voices — their character-token vocabularies read text
+  natively and no lexicon applies (voicegarden-lexicons#12); hr is
+  excluded on token shape (its voice's multi-char vocabulary symbols
+  cannot be addressed by a lexicon), and bg has no published bundle
+  in either manifest.
 - **Region-aware variant routing** (#100): a voice's registry country
   picks the phoneme variant it actually speaks — es_MX/es_AR →
   `spa-LatAm` (not Castilian), pt_PT → `por-PT` (not Brazilian),

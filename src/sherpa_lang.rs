@@ -345,6 +345,94 @@ pub const LANG_BUNDLES: &[LangBundle] = &[
         region: None,
         validated: true, // piper-uk_UA-lada-low: сорок два (0 dropped)
     },
+    // ── wave-3 locale flips (#92 wave 3, voicegarden v0.6.1):
+    // all probe-validated (0 words dropped) with the locale-script
+    // sentences; the folds live in the vocab ladder (ʱ strip, ɽ→ɾ,
+    // ᵑ→ŋ). vi/gu/ga/et/lt/mt/hr/bg are NOT here — probe-confirmed
+    // grapheme voices (character-token vocabularies, no lexicon
+    // applies; voicegarden-lexicons#12 verdicts + our vi probe).
+    LangBundle {
+        bcp47: "fa",
+        // BASE-manifest key (v0.6.1: base carries `fa`, expanded
+        // carries `fas` — the archive membership is not guessable,
+        // checked against both release manifests)
+        archive: Archive::Base,
+        key: "fa",
+        region: None,
+        validated: true, // piper-fa_IR-ganji-medium-int8: 8 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "ar",
+        archive: Archive::Expanded,
+        key: "ara",
+        region: None,
+        validated: true, // piper-ar_JO-kareem-medium-int8: 6 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "hi",
+        archive: Archive::Expanded,
+        key: "hin",
+        region: None,
+        validated: true, // piper-hi_IN-pratham-medium-int8: 0 dropped after the ʱ fold
+    },
+    LangBundle {
+        bcp47: "tr",
+        archive: Archive::Expanded,
+        key: "tur",
+        region: None,
+        validated: true, // piper-tr_TR-fahrettin-medium-int8: 6 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "fi",
+        archive: Archive::Expanded,
+        key: "fin",
+        region: None,
+        validated: true, // piper-fi_FI-harri-medium-int8: 6 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "el",
+        archive: Archive::Expanded,
+        key: "ell",
+        region: None,
+        validated: true, // piper-el_GR-rapunzelina-low-int8: 7 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "ro",
+        archive: Archive::Expanded,
+        key: "ron",
+        region: None,
+        validated: true, // piper-ro_RO-mihai-medium-int8: 8 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "id",
+        archive: Archive::Expanded,
+        key: "ind",
+        region: None,
+        validated: true, // piper-id_ID-news_tts-medium-int8: 8 words 0 dropped
+    },
+    LangBundle {
+        bcp47: "ur",
+        archive: Archive::Expanded,
+        key: "urd",
+        region: None,
+        validated: true, // piper-ur_PK-fasih-medium-int8: 0 dropped after the ʱ fold
+    },
+    LangBundle {
+        bcp47: "bn",
+        archive: Archive::Expanded,
+        key: "ben-Rarh",
+        region: None,
+        validated: true, // mimic3-bn-multi_low: 0 dropped after the ɽ→ɾ fold
+    },
+    LangBundle {
+        bcp47: "sw",
+        // BASE-manifest key (v0.6.1 base carries `sw`; the expanded
+        // manifest has no Swahili entry)
+        archive: Archive::Base,
+        key: "sw",
+        region: None,
+        validated: true, // piper-sw_CD-lanfrica-medium-int8: 0 dropped after the ᵑ→ŋ fold
+    },
     // ── variant bundles (#100, voicegarden v0.6.1): region-gated rows
     // that outrank the regionless default for their locale — a voice's
     // registry country picks the phoneme variant it actually speaks.
@@ -498,16 +586,16 @@ fn validated_bundle_in<'a>(
 #[cfg(test)]
 mod tests {
     /// Pin: review deliberately on registry bumps (batch-1 flips).
-    /// batch-2 (#92 wave 2): 417 → 505 (af cy eu hu is ka kk ko lb
-    /// lv ml ne no sq sr uk fleets).
-    const EXPECTED_ENABLED_SINGLE: usize = 505;
+    /// batch-2 (#92 wave 2): 417 → 505. wave-3: 505 → 582 (fa ar hi
+    /// tr fi el ro id ur bn sw fleets).
+    const EXPECTED_ENABLED_SINGLE: usize = 582;
 
     /// The validated-fleet languages the registry resolution test
     /// pins (mirror of the allowlist rows' bcp47s, batch-1 + batch-2).
     const VALIDATED_FLEET: &[&str] = &[
         "de", "en", "fr", "es", "pt", "it", "ru", "ca", "cs", "da", "nl", "pl", "sk", "sl", "sv",
         "af", "cy", "eu", "hu", "is", "ka", "kk", "ko", "lb", "lv", "ml", "ne", "no", "sq", "sr",
-        "uk",
+        "uk", "fa", "ar", "hi", "tr", "fi", "el", "ro", "id", "ur", "bn", "sw",
     ];
 
     use super::*;
@@ -838,7 +926,16 @@ mod tests {
                         | "isl"
                         | "nob"
                         | "spa-LatAm"
-                        | "por-PT",
+                        | "por-PT"
+                        | "ara"
+                        | "hin"
+                        | "tur"
+                        | "fin"
+                        | "ell"
+                        | "ron"
+                        | "ind"
+                        | "urd"
+                        | "ben-Rarh",
                     Archive::Expanded
                 ) | (
                     "ru" | "ca"
@@ -857,7 +954,9 @@ mod tests {
                         | "sq"
                         | "sr"
                         | "uk"
-                        | "en-GB",
+                        | "en-GB"
+                        | "fa"
+                        | "sw",
                     Archive::Base
                 )
             ),
@@ -895,6 +994,8 @@ mod tests {
                                 | "sr"
                                 | "uk"
                                 | "en-GB"
+                                | "fa"
+                                | "sw"
                         ),
                         "{}",
                         b.key
@@ -919,6 +1020,15 @@ mod tests {
                             | "nob"
                             | "spa-LatAm"
                             | "por-PT"
+                            | "ara"
+                            | "hin"
+                            | "tur"
+                            | "fin"
+                            | "ell"
+                            | "ron"
+                            | "ind"
+                            | "urd"
+                            | "ben-Rarh"
                     ),
                     "{}",
                     b.key

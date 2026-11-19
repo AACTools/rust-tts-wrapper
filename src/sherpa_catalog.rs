@@ -37,12 +37,14 @@ use crate::types::SherpaModelInfo;
 /// G2P path would reject (hr: multi-char <BOS> tokens panic the
 /// codepoints conversion; vi: grapheme voice, no lexicon applies).
 const PUBLISHED_BUNDLE_LOCALES: &[&str] = &[
-    // base manifest (unvalidated rows only; batch-2 flipped
-    // af cy eu hu ka kk ko lb lv ml ne sq sr uk out, is/no route to
-    // their expanded bundles)
+    // base manifest: the grapheme-voice verdict locales stay listed
+    // (their bundles are real products; a voice-family flip is a
+    // separate decision — voicegarden-lexicons#12). wave-3 flipped
+    // fa ar hi tr fi el ro id ur bn sw out (validated allowlist rows
+    // answer first).
     "et", "ga", "gu", "lt", "mt", "yue", "zh",
-    // expanded-only additions (bcp47 primary subtags), unvalidated
-    "fa", "sw", "ar", "bn", "el", "fi", "he", "hi", "id", "ro", "ta", "tr", "ur",
+    // expanded-only, still unvalidated (no voices: he/ta)
+    "he", "ta",
 ];
 
 /// Compute the readiness value for one registry model.
@@ -254,9 +256,19 @@ mod tests {
             "blocked:g2p-unavailable"
         );
         // a still-published, still-unvalidated locale stays blocked
+        // (mt: the grapheme-voice verdict locale — bundle published,
+        // no validated allowlist row)
         assert_eq!(
-            readiness_for(&model("vits-icefall-fi", "vits", "fi"), true, false),
+            readiness_for(&model("coqui-mt-cv", "vits", "mt"), true, false),
             "blocked:bundle-not-validated"
+        );
+        // wave-3 flips read needs_bundle (fa fleet) — with the
+        // front-end compiled out, the same g2p-unavailable class as
+        // the French fixture below
+        #[cfg(feature = "sherpa-g2p")]
+        assert_eq!(
+            readiness_for(&model("piper-fa_IR-ganji", "vits", "fa"), true, false),
+            "needs_bundle"
         );
         // French flipped with the v0.4.0 locale validation: bundle
         // data existed all along; the validation made it usable.
@@ -385,7 +397,7 @@ mod tests {
             (model("no-url-x", "vits", "de"), true, false),
             (model("piper-xx-x", "vits", "xx"), false, false),
             (model("icefall-zh-baker", "matcha", "zh"), true, false),
-            (model("vits-ar-x", "vits", "ar"), true, false),
+            (model("coqui-mt-cv", "vits", "mt"), true, false),
             (model("some-tn_BW-x", "vits", "tn"), true, false),
         ] {
             let mut m = m;
@@ -461,7 +473,7 @@ mod tests {
         // the batch-2 flips moved is/nb out (their allowlist rows
         // answer first); the spot-pins stay on still-unvalidated
         // locales from each manifest
-        for l in ["ar", "tr", "fi", "el", "hi", "ro"] {
+        for l in ["he", "ta", "mt", "et", "ga"] {
             assert!(
                 PUBLISHED_BUNDLE_LOCALES.contains(&l),
                 "expanded-manifest locale {l} missing"
