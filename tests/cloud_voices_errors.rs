@@ -3,6 +3,8 @@
 //! keyFilePath fails engine creation with the specific reason.
 //! Local `TcpListener` mocks — no network, no keys.
 
+#![cfg(feature = "cloud")]
+
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
@@ -61,7 +63,7 @@ fn service_account_json_keyfile_fails_creation_with_reason() {
         "{\n  \"type\": \"service_account\",\n  \"project_id\": \"x\"\n}\n",
     )
     .unwrap();
-    let creds = format!(r#"{{"keyFilePath":"{}"}}"#, key.display());
+    let creds = serde_json::json!({ "keyFilePath": key.display().to_string() }).to_string();
     let err = create_engine("google", &creds).expect_err("service-account JSON must fail creation");
     let msg = format!("{err:?}");
     assert!(
@@ -76,7 +78,7 @@ fn plain_text_keyfile_still_reads_first_line() {
     let dir = tempfile::tempdir().unwrap();
     let key = dir.path().join("key.txt");
     std::fs::write(&key, "\u{feff}  \nAIza-example-plain-key\n").unwrap();
-    let creds = format!(r#"{{"keyFilePath":"{}"}}"#, key.display());
+    let creds = serde_json::json!({ "keyFilePath": key.display().to_string() }).to_string();
     // creation succeeds (BOM + blank line skipped, first real line
     // is the key) — the config embeds it in the URLs
     let _engine = create_engine("google", &creds).expect("plain key file works");
