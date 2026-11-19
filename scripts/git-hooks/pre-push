@@ -52,9 +52,17 @@ if ! diff -q include/tts_wrapper.h \
     exit 1
 fi
 
-# fast suites (the lib suites; live/ignored tests stay opt-in)
+# fast suites (the lib + integration suites; live/ignored tests
+# stay opt-in). The integration half earned its place on #127: the
+# pronunciation middleware inherited trait DEFAULTS instead of
+# delegating (check_credentials_status downgraded Rejected) — every
+# lib suite was green and only tests/error_detail_ffi.rs caught it,
+# burning a CI run.
 cargo test --lib --quiet >/dev/null || { echo "pre-push: default test suite failed" >&2; exit 1; }
+cargo test --tests --quiet >/dev/null || { echo "pre-push: default integration suite failed" >&2; exit 1; }
 cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --quiet >/dev/null \
     || { echo "pre-push: sherpa-g2p test suite failed" >&2; exit 1; }
+cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --tests --quiet >/dev/null \
+    || { echo "pre-push: sherpa-g2p integration suite failed" >&2; exit 1; }
 
 exit 0

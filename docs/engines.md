@@ -85,6 +85,16 @@ Omit `modelPath` to use the default install dir
 
 ## Local engine guides
 
+### User pronunciation overrides (every engine)
+
+A per-user plain-text file teaches the wrapper how words should sound
+(`botox = bow tocks` or `botox = /ˈboʊ.tɑːks/`), applied before
+synthesis on every engine; boundary events are remapped to the typed
+text. Default `~/.rust-tts-wrapper/pronunciations.txt`, override via
+`tts_set_pronunciations_file` or `RUST_TTS_PRONUNCIATIONS`; edits
+apply on the next utterance. Full format and per-engine behavior:
+[pronunciations.md](pronunciations.md) (#125).
+
 ### qwen3-local
 
 [qwen3-tts.cpp](https://github.com/predict-woo/qwen3-tts.cpp) (MIT;
