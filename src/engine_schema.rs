@@ -598,6 +598,7 @@ pub fn engine_setup_schemas() -> Vec<EngineSetup> {
 /// ```
 /// let json = rust_tts_wrapper::engine_schema::engine_setups_json();
 /// let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+/// # #[cfg(any(feature = "cloud", feature = "sherpaonnx", feature = "system", feature = "cloning", feature = "floravox", feature = "pocket-timing", feature = "qwen3-local", feature = "omnivoice-local"))]
 /// assert!(parsed.as_array().unwrap().len() > 0);
 /// ```
 #[must_use]

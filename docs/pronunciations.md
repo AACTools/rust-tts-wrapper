@@ -34,6 +34,20 @@ Frontends can point elsewhere (Dasher keeps the file under
 - C ABI: `tts_set_pronunciations_file(path)` (NULL/empty = default)
 - Environment: `RUST_TTS_PRONUNCIATIONS=/path/to/file`
 
+Editor/frontend support ABI (#131):
+
+- `tts_pronunciations_active()` — is a file live? badge the editor
+  when false (a bindings pin older than the feature ignores the file)
+- `tts_apply_pronunciations(text)` — dry-run: the text after respell
+  substitutions, for "will be spoken as …" previews
+- `tts_pronunciations_stats(&entries, &skipped)` — entry count +
+  malformed-line count, to flag `botox =` typos in place
+- Swift: `TtsClient.setPronunciationsFile(_:)/pronunciationsActive/
+  applyPronunciations(_:/pronunciationsStats()` (#130)
+
+A leading BOM (Notepad's default save) is stripped — the first entry
+survives a Windows round-trip (#131).
+
 Edits take effect on the **next utterance** (the file is re-read when
 its modification time changes — no rebuild, no restart of the file
 watching kind).

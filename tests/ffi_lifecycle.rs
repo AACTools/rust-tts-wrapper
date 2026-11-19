@@ -64,8 +64,21 @@ fn make_ctx() -> *mut tts_ctx {
 
 #[test]
 fn test_ffi_engine_count_matches_create_pipeline() {
-    // Engine count must be > 0 and stable across calls.
+    // Engine count must be > 0 and stable across calls (zero-engine
+    // builds are legitimate — see factory_reachability).
     let n = tts_get_engine_count();
+    #[cfg(any(
+        feature = "cloud",
+        feature = "sherpaonnx",
+        feature = "system",
+        feature = "cloning",
+        feature = "floravox",
+        feature = "pocket-timing",
+        feature = "qwen3-local",
+        feature = "omnivoice-local",
+        all(feature = "sapi", target_os = "windows"),
+        all(feature = "avsynth", target_os = "macos")
+    ))]
     assert!(n > 0);
     assert_eq!(tts_get_engine_count(), n);
 }

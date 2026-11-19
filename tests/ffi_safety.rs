@@ -30,6 +30,20 @@ mod ffi_null_handling_tests {
 
     #[test]
     fn test_engine_count_is_positive() {
+        // zero-engine builds are legitimate (a lone front-end feature
+        // compiles no engines) — see factory_reachability
+        #[cfg(any(
+            feature = "cloud",
+            feature = "sherpaonnx",
+            feature = "system",
+            feature = "cloning",
+            feature = "floravox",
+            feature = "pocket-timing",
+            feature = "qwen3-local",
+            feature = "omnivoice-local",
+            all(feature = "sapi", target_os = "windows"),
+            all(feature = "avsynth", target_os = "macos")
+        ))]
         assert!(tts_get_engine_count() > 0);
     }
 

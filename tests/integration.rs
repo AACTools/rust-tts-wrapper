@@ -39,6 +39,7 @@ fn test_engine_list_contains_cloud() {
     }
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_engine_count() {
     let engines = factory::engine_list();
@@ -205,6 +206,7 @@ fn test_sherpaonnx_engine_has_voices() {
     assert!(bare.get_voices().expect("voices").is_empty());
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_engine_id_matches() {
     let engine = factory::create_engine("openai", r#"{"apiKey":"test-key"}"#).unwrap();
@@ -261,6 +263,7 @@ fn test_word_boundary_empty_text() {
     assert!(boundaries.is_empty());
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_detection() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
@@ -273,6 +276,7 @@ fn test_speech_markdown_detection() {
     );
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_plain_text_passthrough() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
@@ -281,6 +285,7 @@ fn test_speech_markdown_plain_text_passthrough() {
     assert_eq!(result, "Hello world");
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_azure_platform() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
@@ -292,6 +297,7 @@ fn test_speech_markdown_azure_platform() {
     );
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_google_platform() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
