@@ -332,19 +332,30 @@ fn create_engine_inner(
     #[cfg(feature = "cloud")]
     {
         match cloud_engine::create_cloud_engine(engine_id, credentials_json) {
-            Some(engine) => Ok(engine),
-            None => Err(EngineSetupError::new(
-                TtsErrorCode::EngineNotAvailable,
+            Ok(engine) => Ok(engine),
+            // a setup-specific message (e.g. #129's service-account
+            // JSON detection) arrives as Err(String); the generic
+            // unknown-engine shape keeps the available-engines hint
+            Err(message) if message.starts_with("Unknown cloud engine") => {
+                Err(EngineSetupError::new(
+                    TtsErrorCode::EngineNotAvailable,
+                    engine_id,
+                    None,
+                    format!(
+                        "Unknown engine '{engine_id}'. Available engines: {}",
+                        engine_list()
+                            .iter()
+                            .map(|e| e.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ))
+            }
+            Err(message) => Err(EngineSetupError::new(
+                TtsErrorCode::MissingConfiguration,
                 engine_id,
                 None,
-                format!(
-                    "Unknown engine '{engine_id}'. Available engines: {}",
-                    engine_list()
-                        .iter()
-                        .map(|e| e.id.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
+                message,
             )),
         }
     }

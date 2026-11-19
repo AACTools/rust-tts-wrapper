@@ -1280,7 +1280,15 @@ impl TtsEngine for CloudEngine {
                     .send()
                     .map_err(|e| TtsError(format!("Voice list HTTP error: {e}")))?;
                 if !resp.status().is_success() {
-                    return Ok(serde_json::Value::Array(vec![]));
+                    // Surface the failure (#129): an empty Ok list made
+                    // 401/403/quota/outage look like "no voices" —
+                    // frontends retried an invisible error forever
+                    let status = resp.status();
+                    let body = resp.text().unwrap_or_default();
+                    let truncated: String = body.chars().take(500).collect();
+                    return Err(TtsError(format!(
+                        "Voice list request failed: HTTP {status} — {truncated}"
+                    )));
                 }
                 resp.json::<serde_json::Value>()
                     .map_err(|e| TtsError(format!("Voice list parse error: {e}")))
@@ -1497,11 +1505,45 @@ impl TtsEngine for CloudEngine {
 }
 
 /// Create a cloud engine from a JSON credentials string.
-pub fn create_cloud_engine(id: &str, credentials_json: &str) -> Option<Arc<dyn TtsEngine>> {
+pub fn create_cloud_engine(id: &str, credentials_json: &str) -> Result<Arc<dyn TtsEngine>, String> {
     let creds: HashMap<String, String> = if credentials_json.is_empty() {
         HashMap::new()
     } else {
         serde_json::from_str(credentials_json).unwrap_or_default()
     };
-    CloudEngine::new(id, &creds).map(|e| Arc::new(e) as Arc<dyn TtsEngine>)
+    // #129: a service-account JSON key file is the DotNetTtsWrapper
+    // migration's default shape — reading its first line as an API
+    // key authenticates with '{'. Fail engine CREATION with the
+    // specific reason (stderr is invisible in GUI hosts, and the
+    // resulting 401 used to vanish into an empty voice list).
+    if id == "google" {
+        if let Some(err) = service_account_keyfile_error(&creds) {
+            return Err(err);
+        }
+    }
+    CloudEngine::new(id, &creds)
+        .map(|e| Arc::new(e) as Arc<dyn TtsEngine>)
+        .ok_or_else(|| format!("Unknown cloud engine '{id}'"))
+}
+
+/// The keyFilePath points at a JSON file (a service-account key —
+/// first non-empty line `{`), which the apiKey reader cannot use.
+fn service_account_keyfile_error(credentials: &HashMap<String, String>) -> Option<String> {
+    if credentials.get("apiKey").is_some_and(|k| !k.is_empty()) {
+        return None; // an explicit key wins; the file is not read
+    }
+    let path = credentials.get("keyFilePath").filter(|p| !p.is_empty())?;
+    let content = std::fs::read_to_string(path).ok()?;
+    let first = content
+        .lines()
+        .map(|l| l.trim_start_matches('\u{feff}').trim())
+        .find(|l| !l.is_empty())?;
+    first.starts_with('{').then(|| {
+        format!(
+            "google: keyFilePath '{path}' is a service-account JSON key file — this engine \
+             needs an API key, not a JSON key. Create an API key in Google Cloud Console \
+             (or read the JSON's project credentials there) and pass it as the 'apiKey' \
+             credential. Service-account OAuth is not supported. (#129)"
+        )
+    })
 }
