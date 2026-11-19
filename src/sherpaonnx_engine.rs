@@ -1042,9 +1042,27 @@ impl SherpaOnnxEngine {
                 )
                 .ok_or_else(|| TtsError("SherpaOnnx synthesis returned no audio".into()))?;
             let processed = apply_volume_and_pitch(audio.samples(), volume_factor, pitch_factor);
-            let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
-            if write_wav(&filename, &processed, audio.sample_rate()) {
-                play_wav_file(&filename);
+            // #120: in-process playback first — no subprocess, no
+            // temp file, no console flash in GUI apps
+            #[cfg(windows)]
+            let played_in_process = play_pcm_wasapi(&processed, audio.sample_rate() as u32)
+                // cancellation is NOT a WASAPI failure: falling back
+                // would replay the full utterance the user just
+                // stopped (review: the stop() regression — only a
+                // genuine WASAPI unavailability takes the fallback)
+                || CANCEL_REQUESTED.load(Ordering::SeqCst);
+            #[cfg(not(windows))]
+            let played_in_process = false;
+            if !played_in_process {
+                let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
+                if write_wav(&filename, &processed, audio.sample_rate()) {
+                    play_wav_file(&filename);
+                }
+                // #120 privacy: never leave spoken audio on disk —
+                // applies to every platform's fallback (deletion
+                // after play_wav_file's blocking wait; playback is
+                // never cut)
+                let _ = std::fs::remove_file(&filename);
             }
 
             // No streaming took place; estimates fire as before.
@@ -1255,14 +1273,171 @@ fn write_wav(path: &std::path::Path, samples: &[f32], sample_rate: i32) -> bool 
     f.write_all(&header).is_ok() && f.write_all(&pcm).is_ok()
 }
 
-/// Play a WAV file using a platform-appropriate command.
+/// Play synthesised samples in-process on Windows via WASAPI (#120):
+/// no subprocess, no temp file, no console window — the powershell
+/// SoundPlayer path this replaces flashed a console per utterance in
+/// GUI apps and left everything ever spoken recoverable in %TEMP%.
+///
+/// Returns `false` ONLY when WASAPI was unavailable BEFORE playback
+/// began (no endpoint, COM failure, format rejection) — the caller
+/// falls back to the file path. A failure AFTER playback started
+/// (endpoint died mid-utterance) returns `true`: the user heard part
+/// of it, and a fallback would replay the whole thing from the top.
+#[cfg(windows)]
+fn play_pcm_wasapi(samples: &[f32], sample_rate: u32) -> bool {
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IAudioClient, IAudioRenderClient, IMMDeviceEnumerator,
+        MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
+        AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY, WAVEFORMATEX,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
+    };
+
+    if samples.is_empty() || sample_rate == 0 {
+        return true;
+    }
+
+    // COM init mirrors sapi_engine: only balance what we initialised
+    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let did_init = com.is_ok();
+
+    let played = (|| -> bool {
+        unsafe {
+            // enumerate → default render endpoint → audio client
+            let Ok(enumerator) =
+                CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+            else {
+                return false;
+            };
+            let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) else {
+                return false;
+            };
+            let Ok(client) = device.Activate::<IAudioClient>(CLSCTX_ALL, None) else {
+                return false;
+            };
+
+            // float32 mono at the model's rate; shared mode +
+            // AUTOCONVERTPCM lets the engine resample when the mix
+            // format differs
+            let format = WAVEFORMATEX {
+                wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
+                nChannels: 1,
+                nSamplesPerSec: sample_rate,
+                nAvgBytesPerSec: sample_rate * 4,
+                nBlockAlign: 4,
+                wBitsPerSample: 32,
+                cbSize: 0,
+            };
+            // 2-second buffer (100ns units) — long enough to absorb
+            // scheduler jitter, short enough for responsive stop
+            let hns_2s: i64 = 20_000_000;
+            if client
+                .Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                    hns_2s,
+                    0,
+                    &format,
+                    None,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let Ok(buffer_frames) = client.GetBufferSize() else {
+                return false;
+            };
+            let render: IAudioRenderClient = match client.GetService() {
+                Ok(r) => r,
+                Err(_) => return false,
+            };
+
+            let mut written = 0usize; // frames
+            let total = samples.len() as usize;
+            let bytes_of = |frames: u32| (frames as usize) * 4;
+
+            // pre-fill before Start so playback begins immediately
+            let fill = |written: &mut usize| -> bool {
+                let Ok(padding) = client.GetCurrentPadding() else {
+                    return false;
+                };
+                let free = buffer_frames - padding;
+                if free == 0 {
+                    return true;
+                }
+                let chunk = (free as usize).min(total - *written) as u32;
+                if chunk == 0 {
+                    return true;
+                }
+                let Ok(buf) = render.GetBuffer(chunk) else {
+                    return false;
+                };
+                let src = &samples[*written..*written + chunk as usize];
+                std::ptr::copy_nonoverlapping(src.as_ptr().cast::<u8>(), buf, bytes_of(chunk));
+                if render.ReleaseBuffer(chunk, 0).is_err() {
+                    return false;
+                }
+                *written += chunk as usize;
+                true
+            };
+
+            if !fill(&mut written) {
+                return false;
+            }
+            if client.Start().is_err() {
+                return false;
+            }
+
+            // feed the remainder, honouring cancellation, then drain
+            let ok = loop {
+                if CANCEL_REQUESTED.load(Ordering::SeqCst) {
+                    break false;
+                }
+                if written >= total {
+                    break true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                if !fill(&mut written) {
+                    // mid-stream failure AFTER the pre-fill means the
+                    // endpoint died mid-utterance (BT disconnect, RDP
+                    // device swap). The user already heard part of it —
+                    // best-effort-done, NOT fallback: the fallback
+                    // replays the whole utterance from the top
+                    // (Dasher-Windows PR review)
+                    break true;
+                }
+            };
+            if ok {
+                // drain what the endpoint still holds before stopping
+                let _ = client.GetCurrentPadding().map(|padding| {
+                    let remaining_ms = (padding as u64 * 1000) / sample_rate as u64;
+                    std::thread::sleep(std::time::Duration::from_millis(remaining_ms + 20));
+                });
+            }
+            let _ = client.Stop();
+            ok
+        }
+    })();
+
+    if did_init {
+        unsafe { CoUninitialize() };
+    }
+    played
+}
+
+/// Play a temp WAV via the platform fallback command — Windows
+/// primary playback is in-process WASAPI (`play_pcm_wasapi`, #120);
+/// this file path runs only when WASAPI is unavailable (no endpoint,
+/// COM failure, format rejection) or on Linux/macOS:
 ///
 /// - Linux: `aplay`
 /// - macOS: `afplay`
-/// - Windows: PowerShell `(New-Object Media.SoundPlayer).PlaySync()`
+/// - Windows: powershell SoundPlayer with CREATE_NO_WINDOW; the
+///   caller deletes the temp file after this returns (nothing spoken
+///   stays on disk)
 ///
-/// Failures are swallowed because playback is best-effort (audio has already
-/// been rendered to a file the caller can locate).
+/// Failures are swallowed because playback is best-effort.
 fn play_wav_file(path: &std::path::Path) {
     let result = if cfg!(target_os = "linux") {
         std::process::Command::new("aplay")
@@ -1277,14 +1452,17 @@ fn play_wav_file(path: &std::path::Path) {
             .map(|mut c| c.wait())
     } else if cfg!(target_os = "windows") {
         let p = path.to_string_lossy().replace('\'', "''");
-        std::process::Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!("(New-Object Media.SoundPlayer '{p}').PlaySync()"),
-            ])
-            .spawn()
-            .map(|mut c| c.wait())
+        #[cfg(target_os = "windows")]
+        use std::os::windows::process::CommandExt;
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args([
+            "-NoProfile",
+            "-Command",
+            &format!("(New-Object Media.SoundPlayer '{p}').PlaySync()"),
+        ]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW (#120)
+        cmd.spawn().map(|mut c| c.wait())
     } else {
         return;
     };
