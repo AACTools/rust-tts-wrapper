@@ -347,6 +347,16 @@ void tts_set_on_error(struct tts_ctx *ctx, CErrorCb cb, void *userdata);
 int32_t tts_set_pronunciations_file(const char *path);
 
 /**
+ * The Sherpa catalog schema/semantics version (#132): bumped when
+ * the readiness vocabulary changes or a release flips values
+ * wholesale. Consumers gate their readiness switches on it; the
+ * models JSON itself keeps its array shape byte-for-byte (embedding
+ * the version there would break every existing decoder — the exact
+ * silent-breakage class #132 files).
+ */
+int32_t tts_get_sherpa_catalog_version(void);
+
+/**
  * Are user pronunciation overrides (#125) active? 1 when a file
  * resolved and carries at least one entry, 0 otherwise (no file,
  * unreadable, or empty). Frontends badge their editor with this —
@@ -354,14 +364,6 @@ int32_t tts_set_pronunciations_file(const char *path);
  * (#131).
  */
 int32_t tts_pronunciations_active(void);
-
-/**
- * The Sherpa catalog schema/semantics version (#132): bump when the
- * readiness vocabulary changes or a release flips values wholesale.
- * Consumers gate readiness switches on this; the models JSON keeps
- * its array shape. 0 when built without the sherpaonnx feature.
- */
-int32_t tts_get_sherpa_catalog_version(void);
 
 /**
  * Dry-run the text-form pronunciation overrides (#131): returns the
@@ -383,7 +385,9 @@ char *tts_apply_pronunciations(const char *text);
  * Stats for the active pronunciation file (#131): writes the entry
  * count and the malformed-line count from the last successful load
  * to `out_entries` / `out_skipped` (either may be null to skip).
- * Returns 1 when a file is loaded, 0 when none (outputs zeroed).
+ * Returns 1 when a file is loaded (even if every line was
+ * malformed — the skipped count still reports them), 0 when no file
+ * (outputs zeroed).
  */
 int32_t tts_pronunciations_stats(int32_t *out_entries, int32_t *out_skipped);
 

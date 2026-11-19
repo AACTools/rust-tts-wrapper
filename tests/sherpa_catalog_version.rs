@@ -36,4 +36,10 @@ fn catalog_version_is_pinned_and_the_models_shape_is_unchanged() {
         !obj.contains_key("catalogVersion"),
         "no schema keys injected into the models map"
     );
+    // generalized: every value must be a model OBJECT — any injected
+    // schema scalar under a different name fails here too
+    assert!(
+        obj.values().all(serde_json::Value::is_object),
+        "the models map carries only model objects"
+    );
 }

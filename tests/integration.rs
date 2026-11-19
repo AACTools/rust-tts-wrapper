@@ -102,7 +102,6 @@ fn test_create_cloud_engine() {
     );
 }
 
-#[cfg(feature = "cloud")]
 #[test]
 fn test_create_unknown_engine() {
     // GH #69: unknown engines surface a structured EngineNotAvailable

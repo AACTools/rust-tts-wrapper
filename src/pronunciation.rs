@@ -95,11 +95,11 @@ pub enum Policy {
 pub fn parse(source: &str) -> (Pronunciations, usize) {
     let mut by_key: HashMap<String, OverrideEntry> = HashMap::new();
     let mut skipped = 0usize;
-    // a leading BOM (Notepad's default "UTF-8 with BOM") must not
-    // glue itself onto the first key (#131: the first entry went
-    // silently dead)
-    let source = source.strip_prefix('\u{feff}').unwrap_or(source);
-    for raw in source.lines() {
+    // BOMs must not glue themselves onto keys (#131): a leading one
+    // (Notepad's default "UTF-8 with BOM") or one starting any later
+    // line (concatenated saves) would silently kill that entry
+    for raw in source.strip_prefix('\u{feff}').unwrap_or(source).lines() {
+        let raw = raw.strip_prefix('\u{feff}').unwrap_or(raw);
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -473,6 +473,7 @@ impl State {
     fn force_reload(&mut self) {
         self.loaded = None;
         self.mtime = None;
+        self.skipped = 0;
     }
 }
 
@@ -544,10 +545,28 @@ pub fn stats() -> (usize, usize) {
         }),
     });
     let st = rw.write();
-    match &st.loaded {
-        Some(p) => (p.len(), st.skipped),
-        None => (0, 0),
-    }
+    (st.loaded.as_ref().map_or(0, |p| p.len()), st.skipped)
+}
+
+/// Was a pronunciation file loaded at all (even one whose entries
+/// are ALL malformed — the skipped count is still real)? The ABI's
+/// boolean return distinguishes that from "no file".
+#[must_use]
+pub fn file_loaded() -> bool {
+    // ensure the state reflects the CURRENT file
+    let _ = active();
+    STATE
+        .get_or_init(|| Rw {
+            state: Mutex::new(State {
+                path: None,
+                mtime: None,
+                loaded: None,
+                skipped: 0,
+            }),
+        })
+        .write()
+        .loaded
+        .is_some()
 }
 
 /// Dry-run (#131): the text after the text-form (respell)

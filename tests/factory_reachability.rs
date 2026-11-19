@@ -94,7 +94,6 @@ mod factory_reachability {
     /// (system + cloud engines are always available via their features).
     #[test]
     fn minimum_engine_surface() {
-        let listed = rust_tts_wrapper::factory::engine_list();
         // zero-engine builds are legitimate (see
         // every_listed_engine_is_recognized): only panic when some
         // engine feature IS compiled in
@@ -111,7 +110,7 @@ mod factory_reachability {
             all(feature = "avsynth", target_os = "macos")
         ))]
         assert!(
-            !listed.is_empty(),
+            !rust_tts_wrapper::factory::engine_list().is_empty(),
             "engine_list() returned zero engines — the factory is broken"
         );
     }

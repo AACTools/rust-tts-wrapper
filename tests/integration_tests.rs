@@ -11,16 +11,16 @@ mod factory_tests {
 
     #[test]
     fn test_engine_list_contains_builtins() {
-        let list = engine_list();
-        let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
         // Cloud engines are present whenever the cloud feature is on
         // (the default); narrower feature combos exist locally.
+        // sherpaonnx is only present when the feature is on.
+        let list = engine_list();
+        let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
         #[cfg(feature = "cloud")]
         {
             assert!(ids.contains(&"openai"), "missing openai; got {ids:?}");
             assert!(ids.contains(&"azure"), "missing azure; got {ids:?}");
         }
-        // sherpaonnx is only present when the feature is on.
         #[cfg(feature = "sherpaonnx")]
         assert!(
             ids.contains(&"sherpaonnx"),
@@ -150,7 +150,19 @@ mod ffi_boundary_tests {
     // Since integration tests share the crate's public API, we can call the
     // extern "C" fns directly and assert they behave at the boundary.
 
-    use rust_tts_wrapper::{tts_create, tts_destroy, tts_get_engine_count};
+    use rust_tts_wrapper::tts_create;
+    use rust_tts_wrapper::tts_destroy;
+    #[cfg(any(
+        feature = "cloud",
+        feature = "sherpaonnx",
+        feature = "system",
+        feature = "cloning",
+        feature = "floravox",
+        feature = "pocket-timing",
+        feature = "qwen3-local",
+        feature = "omnivoice-local"
+    ))]
+    use rust_tts_wrapper::tts_get_engine_count;
 
     #[test]
     fn test_ffi_null_engine_id_does_not_panic() {

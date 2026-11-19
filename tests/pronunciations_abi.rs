@@ -94,6 +94,51 @@ fn stats_report_skipped_lines_for_editor_flagging() {
 }
 
 #[test]
+fn all_malformed_file_is_loaded_not_absent() {
+    let _env = env_locked();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pron.txt");
+    std::fs::write(&file, "no equals sign\n=x\nk =\n").unwrap();
+    set_file(file.to_str());
+    let mut entries = -1;
+    let mut skipped = -1;
+    // loaded (return 1) even though every line was malformed — the
+    // editor still needs the skipped count (loop-review r1 catch:
+    // this used to conflate "no file" with "zero valid entries")
+    assert_eq!(
+        tts_pronunciations_stats(&raw mut entries, &raw mut skipped),
+        1
+    );
+    assert_eq!((entries, skipped), (0, 3));
+    set_file(None);
+}
+
+#[test]
+fn mid_file_bom_does_not_kill_entries() {
+    let _env = env_locked();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("pron.txt");
+    // concatenated saves: a BOM starts a LATER line
+    std::fs::write(&file, "a = ay\n\u{feff}b = bee\n").unwrap();
+    set_file(file.to_str());
+    let mut entries = 0;
+    let mut skipped = 0;
+    assert_eq!(
+        tts_pronunciations_stats(&raw mut entries, &raw mut skipped),
+        1
+    );
+    assert_eq!((entries, skipped), (2, 0), "the second entry survives");
+    let text = CString::new("a b").unwrap();
+    let out = tts_apply_pronunciations(text.as_ptr());
+    let s = unsafe { CStr::from_ptr(out) }
+        .to_string_lossy()
+        .into_owned();
+    tts_free_string(out);
+    assert_eq!(s, "ay bee");
+    set_file(None);
+}
+
+#[test]
 fn active_is_zero_without_a_file() {
     let _env = env_locked();
     set_file(Some("/nonexistent/pronunciations.txt"));

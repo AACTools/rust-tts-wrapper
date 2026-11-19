@@ -1349,7 +1349,7 @@ pub extern "C" fn tts_pronunciations_stats(out_entries: *mut i32, out_skipped: *
                 *out_skipped = i32::try_from(skipped).unwrap_or(i32::MAX);
             }
         }
-        usize::from(entries > 0) as i32
+        i32::from(pronunciation::file_loaded())
     }))
     .unwrap_or(0)
 }

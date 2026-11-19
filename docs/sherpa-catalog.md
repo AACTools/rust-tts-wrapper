@@ -2,11 +2,14 @@
 
 `tts_get_sherpa_models_json` returns the embedded registry enriched
 with two wrapper-computed fields per model — `g2p_enabled` (bool) and
-`readiness` (string) — plus a top-level `catalogVersion` (integer).
-Download surfaces and catalog UIs branch on these strings; this page
-is the contract.
+`readiness` (string). The models map itself keeps its object-keyed
+shape byte-for-byte; the schema version is **NOT embedded in it**
+(that would silently break every existing decoder — the exact class
+of breakage #132 files). It is exposed by a dedicated getter,
+`tts_get_sherpa_catalog_version()`. Download surfaces and catalog UIs
+branch on these strings; this page is the contract.
 
-## `catalogVersion`
+## `catalogVersion` (`tts_get_sherpa_catalog_version`)
 
 Bumped whenever the readiness **vocabulary** changes (a value renamed
 or introduced) or a release flips values wholesale (wave releases do).
@@ -55,5 +58,7 @@ Any release that changes readiness values for models must (per
    readiness dimension).
 
 The catalog tests (`sherpa_catalog::tests::readiness_*`) pin the
-vocabulary: adding or renaming a value fails locally until the doc
-table and version are updated too.
+vocabulary against an in-test list: adding or renaming a value fails
+locally. Keeping the table above and the version constant in sync
+with that list is review discipline, not test-enforced — reviewers
+should demand all three move together.
