@@ -76,6 +76,9 @@ omnivoice-local = [
   "dep:sherpa-onnx-models",
 ]
 sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization",
+    # #120: in-process WASAPI playback on Windows (the windows crate
+    # is target-gated — resolves to nothing elsewhere)
+    "windows",
     # the model installer (#102): HTTP with resume, archives, checksums,
     # disk preflight — same client family as voicegarden-lexicons (ureq)
     "dep:ureq", "dep:tar", "dep:bzip2-rs", "dep:flate2", "dep:fs2", "dep:sha2"]
@@ -222,7 +225,7 @@ icu_displaynames = { version = "0.11", optional = true, features = ["compiled_da
 icu_locid = { version = "1.4", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Ole", "Win32_Globalization"], optional = true }
+windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Ole", "Win32_Globalization"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # speech-dispatcher is the Linux system TTS daemon; the crate's bindgen step
