@@ -385,9 +385,7 @@ char *tts_apply_pronunciations(const char *text);
  * Stats for the active pronunciation file (#131): writes the entry
  * count and the malformed-line count from the last successful load
  * to `out_entries` / `out_skipped` (either may be null to skip).
- * Returns 1 when a file is loaded (even if every line was
- * malformed — the skipped count still reports them), 0 when no file
- * (outputs zeroed).
+ * Returns 1 when a file is loaded, 0 when none (outputs zeroed).
  */
 int32_t tts_pronunciations_stats(int32_t *out_entries, int32_t *out_skipped);
 

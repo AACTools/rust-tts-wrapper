@@ -14,18 +14,21 @@ mod factory_tests {
         // Cloud engines are present whenever the cloud feature is on
         // (the default); narrower feature combos exist locally.
         // sherpaonnx is only present when the feature is on.
-        let list = engine_list();
-        let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
-        #[cfg(feature = "cloud")]
+        #[cfg(any(feature = "cloud", feature = "sherpaonnx"))]
         {
-            assert!(ids.contains(&"openai"), "missing openai; got {ids:?}");
-            assert!(ids.contains(&"azure"), "missing azure; got {ids:?}");
+            let list = engine_list();
+            let ids: Vec<&str> = list.iter().map(|e| e.id.as_str()).collect();
+            #[cfg(feature = "cloud")]
+            {
+                assert!(ids.contains(&"openai"), "missing openai; got {ids:?}");
+                assert!(ids.contains(&"azure"), "missing azure; got {ids:?}");
+            }
+            #[cfg(feature = "sherpaonnx")]
+            assert!(
+                ids.contains(&"sherpaonnx"),
+                "missing sherpaonnx; got {ids:?}"
+            );
         }
-        #[cfg(feature = "sherpaonnx")]
-        assert!(
-            ids.contains(&"sherpaonnx"),
-            "missing sherpaonnx; got {ids:?}"
-        );
     }
 
     #[test]
