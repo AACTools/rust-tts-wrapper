@@ -17,6 +17,22 @@ mod factory_reachability {
     #[test]
     fn every_listed_engine_is_recognized() {
         let engines = rust_tts_wrapper::factory::engine_list();
+        // a combo can legitimately compile ZERO engines (sherpa-g2p
+        // alone pulls the front-end machinery without any engine
+        // feature); the non-empty assertion holds only under an
+        // engine feature — the default and CI combos always have one
+        #[cfg(any(
+            feature = "cloud",
+            feature = "sherpaonnx",
+            feature = "system",
+            feature = "cloning",
+            feature = "floravox",
+            feature = "pocket-timing",
+            feature = "qwen3-local",
+            feature = "omnivoice-local",
+            all(feature = "sapi", target_os = "windows"),
+            all(feature = "avsynth", target_os = "macos")
+        ))]
         assert!(
             !engines.is_empty(),
             "engine_list() returned zero engines — the factory is broken"
@@ -78,9 +94,23 @@ mod factory_reachability {
     /// (system + cloud engines are always available via their features).
     #[test]
     fn minimum_engine_surface() {
-        let listed = rust_tts_wrapper::factory::engine_list();
+        // zero-engine builds are legitimate (see
+        // every_listed_engine_is_recognized): only panic when some
+        // engine feature IS compiled in
+        #[cfg(any(
+            feature = "cloud",
+            feature = "sherpaonnx",
+            feature = "system",
+            feature = "cloning",
+            feature = "floravox",
+            feature = "pocket-timing",
+            feature = "qwen3-local",
+            feature = "omnivoice-local",
+            all(feature = "sapi", target_os = "windows"),
+            all(feature = "avsynth", target_os = "macos")
+        ))]
         assert!(
-            !listed.is_empty(),
+            !rust_tts_wrapper::factory::engine_list().is_empty(),
             "engine_list() returned zero engines — the factory is broken"
         );
     }

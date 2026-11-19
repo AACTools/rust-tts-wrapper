@@ -409,6 +409,7 @@ pub fn engine_count() -> usize {
 ///
 /// ```
 /// let engines = rust_tts_wrapper::factory::engine_list();
+/// # #[cfg(any(feature = "cloud", feature = "sherpaonnx", feature = "system", feature = "cloning", feature = "floravox", feature = "pocket-timing", feature = "qwen3-local", feature = "omnivoice-local"))]
 /// assert!(!engines.is_empty());
 /// for e in &engines {
 ///     println!("{}: {} (credentials: {})", e.id, e.name, e.credential_keys_json);

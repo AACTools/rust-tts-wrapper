@@ -544,6 +544,48 @@ public final class TtsClient: @unchecked Sendable {
         Int(tts_get_engine_count())
     }
 
+    // --- pronunciation overrides (#125/#130/#131) ----------------------
+
+    /// Point the user pronunciation overrides at an app-owned file
+    /// (e.g. `Application Support/<App>/pronunciations.txt`). Pass
+    /// `nil` to return to default resolution (the
+    /// `RUST_TTS_PRONUNCIATIONS` environment variable, then
+    /// `~/.rust-tts-wrapper/pronunciations.txt`). Takes effect on
+    /// the next utterance; edits to the file reload automatically.
+    @discardableResult
+    public static func setPronunciationsFile(_ path: String?) -> Bool {
+        if let path {
+            return path.withCString { tts_set_pronunciations_file($0) != 0 }
+        }
+        return tts_set_pronunciations_file(nil) != 0
+    }
+
+    /// Are overrides active (a file resolved with at least one
+    /// entry)? Badge editors when this is false — e.g. a bindings
+    /// pin older than the feature silently ignores the file.
+    public static var pronunciationsActive: Bool {
+        tts_pronunciations_active() != 0
+    }
+
+    /// Dry-run the text-form overrides: the text after respell
+    /// substitutions — what a plain-text engine will speak. Phoneme
+    /// forms are not substituted here. Editor previews and frontend
+    /// self-tests use this.
+    public static func applyPronunciations(_ text: String) -> String {
+        guard let out = text.withCString(tts_apply_pronunciations) else { return text }
+        defer { tts_free_string(out) }
+        return String(cString: out)
+    }
+
+    /// Entry count and malformed-line count for the active file, so
+    /// an editor can flag `botox =` typos in place.
+    public static func pronunciationsStats() -> (entries: Int, skipped: Int) {
+        var entries: Int32 = 0
+        var skipped: Int32 = 0
+        _ = tts_pronunciations_stats(&entries, &skipped)
+        return (entries: Int(entries), skipped: Int(skipped))
+    }
+
     // --- error handling ------------------------------------------------
 
     /// Last error for this context, or `nil` if none.

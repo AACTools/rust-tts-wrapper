@@ -11,6 +11,9 @@ let package = Package(
     name: "RustTtsWrapper",
     products: [
         .library(name: "RustTtsWrapper", targets: ["RustTtsWrapper"]),
+        // #130: exported for consumers that need raw C access (e.g.
+        // calling ABI additions before the Swift surface wraps them)
+        .library(name: "CRustTtsWrapper", targets: ["CRustTtsWrapper"]),
     ],
     targets: [
         // C shim over the cbindgen header. The header is a committed copy

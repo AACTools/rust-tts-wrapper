@@ -6,7 +6,18 @@
 
 #[cfg(test)]
 mod ffi_null_handling_tests {
-    use rust_tts_wrapper::{tts_destroy, tts_get_engine_count, tts_pause, tts_resume, tts_stop};
+    #[cfg(any(
+        feature = "cloud",
+        feature = "sherpaonnx",
+        feature = "system",
+        feature = "cloning",
+        feature = "floravox",
+        feature = "pocket-timing",
+        feature = "qwen3-local",
+        feature = "omnivoice-local"
+    ))]
+    use rust_tts_wrapper::tts_get_engine_count;
+    use rust_tts_wrapper::{tts_destroy, tts_pause, tts_resume, tts_stop};
 
     #[test]
     fn test_destroy_null_noop() {
@@ -30,6 +41,20 @@ mod ffi_null_handling_tests {
 
     #[test]
     fn test_engine_count_is_positive() {
+        // zero-engine builds are legitimate (a lone front-end feature
+        // compiles no engines) — see factory_reachability
+        #[cfg(any(
+            feature = "cloud",
+            feature = "sherpaonnx",
+            feature = "system",
+            feature = "cloning",
+            feature = "floravox",
+            feature = "pocket-timing",
+            feature = "qwen3-local",
+            feature = "omnivoice-local",
+            all(feature = "sapi", target_os = "windows"),
+            all(feature = "avsynth", target_os = "macos")
+        ))]
         assert!(tts_get_engine_count() > 0);
     }
 

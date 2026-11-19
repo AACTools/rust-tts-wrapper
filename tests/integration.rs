@@ -6,6 +6,7 @@
 )]
 use rust_tts_wrapper::factory;
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_engine_list_contains_cloud() {
     let engines = factory::engine_list();
@@ -38,6 +39,7 @@ fn test_engine_list_contains_cloud() {
     }
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_engine_count() {
     let engines = factory::engine_list();
@@ -48,6 +50,7 @@ fn test_engine_count() {
     );
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_cloud_engine_needs_credentials() {
     let engines = factory::engine_list();
@@ -89,6 +92,7 @@ fn test_create_system_engine() {
     assert_eq!(engine.unwrap().engine_id(), "system");
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_cloud_engine() {
     let engine = factory::create_engine("openai", r#"{"apiKey":"test-key"}"#);
@@ -125,6 +129,7 @@ fn test_system_engine_stop_graceful() {
     }
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_all_cloud_engines() {
     let cloud_ids = [
@@ -151,6 +156,7 @@ fn test_create_all_cloud_engines() {
     }
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_azure_with_region() {
     let engine = factory::create_engine(
@@ -160,6 +166,7 @@ fn test_create_azure_with_region() {
     assert!(engine.is_ok());
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_watson_with_all_creds() {
     let engine = factory::create_engine(
@@ -169,6 +176,7 @@ fn test_create_watson_with_all_creds() {
     assert!(engine.is_ok());
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_create_polly_with_all_creds() {
     // AWS Polly is SigV4-signed now (sigv4.rs) — a full credential set
@@ -197,6 +205,7 @@ fn test_sherpaonnx_engine_has_voices() {
     assert!(bare.get_voices().expect("voices").is_empty());
 }
 
+#[cfg(feature = "cloud")]
 #[test]
 fn test_engine_id_matches() {
     let engine = factory::create_engine("openai", r#"{"apiKey":"test-key"}"#).unwrap();
@@ -253,6 +262,7 @@ fn test_word_boundary_empty_text() {
     assert!(boundaries.is_empty());
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_detection() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
@@ -265,6 +275,7 @@ fn test_speech_markdown_detection() {
     );
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_plain_text_passthrough() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
@@ -273,6 +284,7 @@ fn test_speech_markdown_plain_text_passthrough() {
     assert_eq!(result, "Hello world");
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_azure_platform() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
@@ -284,6 +296,7 @@ fn test_speech_markdown_azure_platform() {
     );
 }
 
+#[cfg(feature = "speechmarkdown")]
 #[test]
 fn test_speech_markdown_google_platform() {
     use rust_tts_wrapper::engine::preprocess_speech_markdown;
