@@ -196,8 +196,12 @@ const STRESS_MARKS: [char; 2] = ['\u{02C8}', '\u{02CC}'];
 /// raised (`̝`), pre-aspirated (`ˀ`). Occurrence counts in the v0.3.1
 /// German bundles are recorded in SHERPA_NONENGLISH_G2P_PLAN.md (the
 /// offglide breve is common — ~12k — the rest ≤60 each).
-const STRIPPABLE_DIACRITICS: [char; 8] = [
+const STRIPPABLE_DIACRITICS: [char; 9] = [
     '\u{032F}', '\u{0329}', '\u{0325}', '\u{0303}', '\u{031E}', '\u{032A}', '\u{031D}', '\u{02C0}',
+    // ʱ voiced-aspiration release (wave-3: WikiPron hi/ur/gu emit ɡʱ;
+    // the voices carry plain ɡ — a modifier LETTER, so NFD never
+    // drops it)
+    '\u{02B1}',
 ];
 
 /// ASCII→IPA homoglyphs: phonemizers that emit ASCII look-alikes for IPA
@@ -216,7 +220,30 @@ const HOMOGLYPHS: &[(char, char)] = &[('g', '\u{0261}')];
 /// r + U+030C composes to the precomposed `ř` (U+0159). In-vocab
 /// identity always outranks the fold, so a Czech voice whose
 /// vocabulary carries its own `ř` is untouched.
-const SOUND_EQUIV: &[(&str, &str)] = &[("r\u{030C}", "ʐ"), ("\u{0159}", "ʐ")];
+const SOUND_EQUIV: &[(&str, &str)] = &[
+    ("r\u{030C}", "ʐ"),
+    ("\u{0159}", "ʐ"),
+    // retroflex flap → tap (wave-3 bn: mimic3 carries ɾ not ɽ; voices
+    // that carry their own ɽ win at identity)
+    ("\u{027D}", "\u{027E}"),
+    // prenasalized g → ŋ + ɡ (wave-3 sw: the voice carries both
+    // separately; a MULTI-SYMBOL target — the ladder splits on
+    // spaces and requires every part in-vocabulary)
+    ("\u{1D51}g", "\u{014B} \u{0261}"),
+    // the prenasalization modifier alone (the OOV fallback emits
+    // ᵑ and g as separate symbols) → the plain nasal
+    ("\u{1D51}", "\u{014B}"),
+    // the rest of the prenasalized class (sw lexicon): each
+    // decomposes to its nasal + stop, which the voices carry
+    // separately — ᵐɓ m ɓ, ⁿd̄ n d, ⁿz n z, ⁿd͡ʒ n d ʒ
+    ("\u{1D50}\u{0253}", "m \u{0253}"),
+    ("\u{207F}\u{0257}", "n \u{0257}"),
+    ("\u{207F}z", "n z"),
+    ("\u{207F}d\u{0361}\u{0292}", "n d \u{0292}"),
+    // lone modifiers (the fallback path emits them detached)
+    ("\u{1D50}", "m"),
+    ("\u{207F}", "n"),
+];
 
 fn homoglyph_sub(s: &str) -> String {
     s.chars()
@@ -236,6 +263,18 @@ fn sound_equiv_sub(s: &str) -> String {
         .iter()
         .find(|(a, _)| s == *a)
         .map_or_else(|| s.to_string(), |(_, b)| b.to_string())
+}
+
+/// Resolve a sound-equivalence candidate that may be MULTI-SYMBOL
+/// (space-separated): every part must be in the vocabulary, else the
+/// mapping does not apply (wave-3: ᵑg → "ŋ ɡ").
+fn sound_equiv_multi(vocab: &std::collections::HashSet<String>, sym: &str) -> Option<Vec<String>> {
+    let target = sound_equiv_sub(sym);
+    if target == sym || !target.contains(' ') {
+        return None;
+    }
+    let parts: Vec<String> = target.split(' ').map(str::to_string).collect();
+    parts.iter().all(|p| vocab.contains(p)).then_some(parts)
 }
 
 /// A bundle phone symbol → model-token-sequence mapper driven entirely
@@ -317,6 +356,11 @@ impl VocabPhonemeMap {
                 return Some(vec![candidate]);
             }
         }
+        // multi-symbol sound equivalence (ᵑg → "ŋ ɡ"): every part
+        // must be in-vocabulary (wave-3)
+        if let Some(parts) = sound_equiv_multi(&self.target_vocab, sym) {
+            return Some(parts);
+        }
         // rule 3: tie bars
         if sym.chars().any(|c| TIE_BARS.contains(&c)) {
             let stripped: String = sym.chars().filter(|c| !TIE_BARS.contains(c)).collect();
@@ -349,6 +393,10 @@ impl VocabPhonemeMap {
             if self.target_vocab.contains(&candidate) {
                 return Some(vec![candidate]);
             }
+        }
+        // multi-symbol sound equivalence (segment level)
+        if let Some(parts) = sound_equiv_multi(&self.target_vocab, seg) {
+            return Some(parts);
         }
         // rule 4: trailing length mark splits off; the base resolves
         // recursively (e.g. `ɡ̥ː` strips U+0325 first, then splits)
@@ -1278,6 +1326,32 @@ mod tests {
 
     /// The measured v0.3.1 German lexicon symbols that drive the ladder
     /// rules — one case per rule, counts in the plan's inventory table.
+    /// wave-3 folds: retroflex flap→tap, the prenasalized class →
+    /// nasal+stop (multi-symbol), voiced aspiration release strips.
+    #[test]
+    fn wave3_sound_equivalence_folds() {
+        let tokens = write_test_tokens(&[
+            "a", "ɛ", "i", "m", "n", "z", "ŋ", "ɡ", "ɾ", "ɓ", "ɗ", "d", "ʒ",
+        ]);
+        let mut map = VocabPhonemeMap::for_language(&tokens).unwrap();
+        // retroflex flap → tap
+        assert_eq!(map.map_symbol("\u{027D}").unwrap(), vec!["\u{027E}"]);
+        // prenasalized g → ŋ + ɡ (multi-symbol target)
+        assert_eq!(map.map_symbol("\u{1D51}g").unwrap(), vec!["ŋ", "ɡ"]);
+        // the rest of the prenasalized class (sw lexicon)
+        assert_eq!(map.map_symbol("\u{1D50}\u{0253}").unwrap(), vec!["m", "ɓ"]);
+        assert_eq!(map.map_symbol("\u{207F}z").unwrap(), vec!["n", "z"]);
+        assert_eq!(
+            map.map_symbol("\u{207F}d\u{0361}\u{0292}").unwrap(),
+            vec!["n", "d", "ʒ"]
+        );
+        // lone modifiers (the OOV fallback emits them detached)
+        assert_eq!(map.map_symbol("\u{1D51}").unwrap(), vec!["ŋ"]);
+        assert_eq!(map.map_symbol("\u{1D50}").unwrap(), vec!["m"]);
+        // voiced aspiration release strips: ɡʱ → ɡ
+        assert_eq!(map.map_symbol("ɡ\u{02B1}").unwrap(), vec!["ɡ"]);
+    }
+
     #[test]
     fn vocab_ladder_resolves_german_symbol_inventory() {
         let tokens = thorsten_vocab();

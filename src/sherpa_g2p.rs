@@ -221,6 +221,18 @@ pub fn normalizer_for(lang: &str) -> Box<dyn LangNormalizer> {
         "sq" => Box::new(AlbanianNormalizer),
         "sr" => Box::new(SerbianNormalizer),
         "uk" => Box::new(UkrainianNormalizer),
+        // wave-3 campaign (#92 wave 3)
+        "fa" => Box::new(PersianNormalizer),
+        "ar" => Box::new(ArabicNormalizer),
+        "hi" => Box::new(HindiNormalizer),
+        "tr" => Box::new(TurkishNormalizer),
+        "fi" => Box::new(FinnishNormalizer),
+        "el" => Box::new(GreekNormalizer),
+        "ro" => Box::new(RomanianNormalizer),
+        "id" => Box::new(IndonesianNormalizer),
+        "ur" => Box::new(UrduNormalizer),
+        "bn" => Box::new(BengaliNormalizer),
+        "sw" => Box::new(SwahiliNormalizer),
         _ => Box::new(IdentityNormalizer),
     }
 }
@@ -257,6 +269,7 @@ fn iso639_3_to_primary(tag: &str) -> String {
         ("spa", "es"),
         ("swe", "sv"),
         ("tam", "ta"),
+        ("swa", "sw"),
         ("tur", "tr"),
         ("urd", "ur"),
     ];
@@ -4552,6 +4565,1536 @@ fn uk_integer(n: u64) -> Option<String> {
     Some(w.join(" "))
 }
 
+// ──────────────────────────────────────────────────────────────────
+// Wave-3 locales (#92 wave 3): fa ar hi tr fi el ro id ur bn sw —
+// probe-validated 0-dropped; three ladder folds (ʱ strip, ɽ→ɾ,
+// ᵑ→ŋ) live in the vocab mapper. hi/ur/bn carry lexicalized 21-58
+// compound tables (the ne pattern); tr inverts (on bir); fi uses
+// partitive tens (kahdeksankymmentä); ro has -sprezece teens.
+// ──────────────────────────────────────────────────────────────────
+
+fn fa_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "صفر", "یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه",
+    ];
+    const T: [&str; 10] = [
+        "ده",
+        "یازده",
+        "دوازده",
+        "سیزده",
+        "چهارده",
+        "پانزده",
+        "شانزده",
+        "هفده",
+        "هجده",
+        "نوزده",
+    ];
+    // vigesimal tens: bist/ceh/šast/haftâd — plus 30/50/70/90 from si/panjâh/haftâd/nawad
+    const X: [&str; 8] = ["بیست", "سی", "چهل", "پنجاه", "شصت", "هفتاد", "هشتاد", "نود"];
+    if n > 999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("صفر".into());
+    }
+    // "و" joins tens and units (بیست و دو); hundreds closed with -؟
+    let tail = |x: u64| -> String {
+        if x <= 19 {
+            tens_units(x, &U, &T, &["", ""])
+        }
+        // 11-19 closed
+        else {
+            let t = X[((x / 10) - 2) as usize];
+            let u = (x % 10) as usize;
+            if u == 0 {
+                t.to_string()
+            } else {
+                format!("{t} و {}", U[u])
+            }
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("صد");
+        } else if h == 2 {
+            o.push_str("دویست");
+        } else if h == 3 {
+            o.push_str("سیصد");
+        } else if h == 4 {
+            o.push_str("چهارصد");
+        } else if h == 5 {
+            o.push_str("پانصد");
+        } else if h > 5 {
+            o.push_str(U[h as usize]);
+            o.push_str("صد");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push_str(" و ");
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let mil = n / 1_000;
+    let rest = n % 1_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil == 1 {
+        w.push("یک هزار".into());
+    } else if mil > 1 {
+        w.push(format!("{} هزار", h100(mil)));
+    }
+    if rest > 0 {
+        w.push(h100(rest));
+    }
+    Some(w.join(" و "))
+}
+
+/// The assimilated Arabic hundreds (ثلاثمائة, أربعمائة …) — MSA
+/// writes 3-9 hundred as one word with the numeral stem folded, not
+/// ثلاثة + مائة glued (loop-review catch).
+const AR_HUNDREDS: [&str; 10] = [
+    "",
+    "مائة",
+    "مئتان",
+    "ثلاثمائة",
+    "أربعمائة",
+    "خمسمائة",
+    "ستمائة",
+    "سبعمائة",
+    "ثمانمائة",
+    "تسعمائة",
+];
+
+fn ar_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "صفر",
+        "واحد",
+        "اثنان",
+        "ثلاثة",
+        "أربعة",
+        "خمسة",
+        "ستة",
+        "سبعة",
+        "ثمانية",
+        "تسعة",
+    ];
+    const T: [&str; 10] = [
+        "عشرة",
+        "أحد عشر",
+        "اثنا عشر",
+        "ثلاثة عشر",
+        "أربعة عشر",
+        "خمسة عشر",
+        "ستة عشر",
+        "سبعة عشر",
+        "ثمانية عشر",
+        "تسعة عشر",
+    ];
+    const X: [&str; 8] = [
+        "عشرون",
+        "ثلاثون",
+        "أربعون",
+        "خمسون",
+        "ستون",
+        "سبعون",
+        "ثمانون",
+        "تسعون",
+    ];
+    if n > 999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("صفر".into());
+    }
+    let tail = |x: u64| -> String {
+        // x < 10 — NOT <= 10: ten is T[0] ("عشرة"); U only has 0-9
+        // (loop-review: `<= 10` panicked on 110/210/.../10,000)
+        if x < 10 {
+            U[x as usize].to_string()
+        } else if x <= 19 {
+            T[(x - 10) as usize].to_string()
+        } else {
+            let t = X[((x / 10) - 2) as usize];
+            let u = (x % 10) as usize;
+            if u == 0 {
+                t.to_string()
+            } else {
+                format!("{} و {t}", U[u])
+            }
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h > 0 {
+            o.push_str(AR_HUNDREDS[h as usize]);
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push_str(" و ");
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    // the thousands multiplier may itself be 100-999 (loop-review:
+    // tail(mil) panicked for 100,000-999,999 — route through h100)
+    let under1000 = |x: u64| -> String {
+        if x < 100 {
+            tail(x)
+        } else {
+            h100(x)
+        }
+    };
+    let mil = n / 1_000;
+    let rest = n % 1_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil == 1 {
+        w.push("ألف".into());
+    } else if mil == 2 {
+        w.push("ألفان".into());
+    } else if (3..=10).contains(&mil) {
+        w.push(format!("{} آلاف", under1000(mil)));
+    } else if mil > 10 {
+        w.push(format!("{} ألف", under1000(mil)));
+    }
+    if rest > 0 {
+        w.push(h100(rest));
+    }
+    Some(w.join(" و "))
+}
+
+/// Hindi/Urdu/Bengali share the lexicalized 21-58 compound table
+/// (like Nepali — बयालीस class words); tables differ.
+/// The lexicalized 20-99 compounds (the ne pattern).
+const HI_20_99: [&str; 80] = [
+    "बीस",
+    "इक्कीस",
+    "बाईस",
+    "तेईस",
+    "चौबीस",
+    "पच्चीस",
+    "छब्बीस",
+    "सत्ताईस",
+    "अट्ठाईस",
+    "उनतीस",
+    "तीस",
+    "इकतीस",
+    "बत्तीस",
+    "तैंतीस",
+    "चौंतीस",
+    "पैंतीस",
+    "छत्तीस",
+    "सैंतीस",
+    "अड़तीस",
+    "उनतालीस",
+    "चालीस",
+    "इकतालीस",
+    "बयालीस",
+    "तैंतालीस",
+    "चवालीस",
+    "पैंतालीस",
+    "छियालीस",
+    "सैंतालीस",
+    "अड़तालीस",
+    "उनचास",
+    "पचास",
+    "इक्यावन",
+    "बावन",
+    "तिरपन",
+    "चौवन",
+    "पचपन",
+    "छप्पन",
+    "सत्तावन",
+    "अट्ठावन",
+    "उनसठ",
+    "साठ",
+    "इकसठ",
+    "बासठ",
+    "तिरसठ",
+    "चौंसठ",
+    "पैंसठ",
+    "छियासठ",
+    "सड़सठ",
+    "अड़सठ",
+    "उनहत्तर",
+    "सत्तर",
+    "इकहत्तर",
+    "बहत्तर",
+    "तिहत्तर",
+    "चौहत्तर",
+    "पचहत्तर",
+    "छिहत्तर",
+    "सतहत्तर",
+    "अठहत्तर",
+    "उन्यासी",
+    "अस्सी",
+    "इक्यासी",
+    "बयासी",
+    "तिरासी",
+    "चौरासी",
+    "पचासी",
+    "छियासी",
+    "सतासी",
+    "अट्ठासी",
+    "नवासी",
+    "नब्बे",
+    "इक्यानवे",
+    "बानवे",
+    "तिरानवे",
+    "चौरानवे",
+    "पंचानवे",
+    "छियानवे",
+    "सत्तानवे",
+    "अट्ठानवे",
+    "निन्यानवे",
+];
+
+fn hi_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "शून्य",
+        "एक",
+        "दो",
+        "तीन",
+        "चार",
+        "पाँच",
+        "छह",
+        "सात",
+        "आठ",
+        "नौ",
+    ];
+    const T: [&str; 10] = [
+        "दस",
+        "ग्यारह",
+        "बारह",
+        "तेरह",
+        "चौदह",
+        "पंद्रह",
+        "सोलह",
+        "सत्रह",
+        "अठारह",
+        "उन्नीस",
+    ];
+
+    if n > 99_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("शून्य".into());
+    }
+    let tail = |x: u64| -> String {
+        if x <= 19 {
+            tens_units(x, &U, &T, &["", ""])
+        } else {
+            HI_20_99[(x - 20) as usize].to_string()
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("एक सौ");
+        } else if h > 1 {
+            o.push_str(U[h as usize]);
+            o.push_str(" सौ");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    // the lakh multiplier stays under a hundred when spoken alone
+    // (एक लाख, बयालीस लाख); hundreds-lakh compounds via h100
+    let under1000 = |x: u64| -> String {
+        if x < 100 {
+            tail(x)
+        } else {
+            h100(x)
+        }
+    };
+    let lakh = n / 100_000;
+    let rest = n % 100_000;
+    let mut w: Vec<String> = Vec::new();
+    if lakh > 0 {
+        w.push(under1000(lakh));
+        w.push("लाख".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("एक हज़ार".into());
+        } else {
+            w.push(h100(t));
+            w.push("हज़ार".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+fn tr_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "sıfır", "bir", "iki", "üç", "dört", "beş", "altı", "yedi", "sekiz", "dokuz",
+    ];
+    // ON BİR inverted: ten-one
+    const T: [&str; 10] = [
+        "on", "on bir", "on iki", "on üç", "on dört", "on beş", "on altı", "on yedi", "on sekiz",
+        "on dokuz",
+    ];
+    const X: [&str; 8] = [
+        "yirmi", "otuz", "kırk", "elli", "altmış", "yetmiş", "seksen", "doksan",
+    ];
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("sıfır".into());
+    }
+    let tail = |x: u64| tens_units(x, &U, &T, &X);
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("yüz");
+        } else if h > 1 {
+            o.push_str(U[h as usize]);
+            o.push_str(" yüz");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let mil = n / 1_000_000;
+    let rest = n % 1_000_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil == 1 {
+        w.push("bir milyon".into());
+    } else if mil > 1 {
+        w.push(h100(mil));
+        w.push("milyon".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("bin".into());
+        }
+        // bin never takes bir
+        else {
+            w.push(h100(t));
+            w.push("bin".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+fn fi_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "nolla",
+        "yksi",
+        "kaksi",
+        "kolme",
+        "neljä",
+        "viisi",
+        "kuusi",
+        "seitsemän",
+        "kahdeksan",
+        "yhdeksän",
+    ];
+    const T: [&str; 10] = [
+        "kymmenen",
+        "yksitoista",
+        "kaksitoista",
+        "kolmetoista",
+        "neljätoista",
+        "viisitoista",
+        "kuusitoista",
+        "seitsemäntoista",
+        "kahdeksantoista",
+        "yhdeksäntoista",
+    ];
+    // partitive: 80 = kahdeksankymmentä (eight-of-tens)
+    const X: [&str; 8] = [
+        "kaksikymmentä",
+        "kolmekymmentä",
+        "neljäkymmentä",
+        "viisikymmentä",
+        "kuusikymmentä",
+        "seitsemänkymmentä",
+        "kahdeksankymmentä",
+        "yhdeksänkymmentä",
+    ];
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("nolla".into());
+    }
+    // closed compounds: neljäkymmentäkaksi
+    let tail = |x: u64| -> String {
+        if x <= 19 {
+            tens_units(x, &U, &T, &["", ""])
+        } else {
+            let t = X[((x / 10) - 2) as usize];
+            let u = (x % 10) as usize;
+            if u == 0 {
+                t.to_string()
+            } else {
+                format!("{t}{}", U[u])
+            }
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("sata");
+        } else if h > 1 {
+            o.push_str(U[h as usize]);
+            o.push_str("sataa");
+        }
+        if r > 0 {
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let mil = n / 1_000_000;
+    let rest = n % 1_000_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil == 1 {
+        w.push("miljoona".into());
+    } else if mil > 1 {
+        w.push(h100(mil));
+        w.push("miljoonaa".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("tuhat".into());
+        } else {
+            w.push(h100(t));
+            w.push("tuhatta".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+/// The Greek feminine multiplier phrase (1..=999) used before
+/// χιλιάδες (loop-review catch): μία/τρεις/τέσσερις units,
+/// δεκατρείς/δεκατέσσερις teens, διακόσιες… hundreds. The neuter
+/// table stays in use for εκατομμύρια and bare numbers.
+fn el_fem_multiplier(x: u64) -> String {
+    const UF: [&str; 10] = [
+        "μηδέν",
+        "μία",
+        "δύο",
+        "τρεις",
+        "τέσσερις",
+        "πέντε",
+        "έξι",
+        "εφτά",
+        "οχτώ",
+        "εννέα",
+    ];
+    const TF: [&str; 10] = [
+        "δέκα",
+        "έντεκα",
+        "δώδεκα",
+        "δεκατρείς",
+        "δεκατέσσερις",
+        "δεκαπέντε",
+        "δεκαέξι",
+        "δεκαεφτά",
+        "δεκαοχτώ",
+        "δεκαεννέα",
+    ];
+    const XF: [&str; 8] = [
+        "είκοσι",
+        "τριάντα",
+        "σαράντα",
+        "πενήντα",
+        "εξήντα",
+        "εβδομήντα",
+        "ογδόντα",
+        "ενενήντα",
+    ];
+    const HF: [&str; 10] = [
+        "",
+        "εκατό",
+        "διακόσιες",
+        "τριακόσιες",
+        "τετρακόσιες",
+        "πεντακόσιες",
+        "εξακόσιες",
+        "επτακόσιες",
+        "οκτακόσιες",
+        "εννιακόσιες",
+    ];
+    let h = x / 100;
+    let r = x % 100;
+    let mut o = String::new();
+    if h > 0 {
+        o.push_str(HF[h as usize]);
+    }
+    if r > 0 {
+        if !o.is_empty() {
+            o.push(' ');
+        }
+        o.push_str(&tens_units(r, &UF, &TF, &XF));
+    }
+    o
+}
+
+fn el_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "μηδέν",
+        "ένα",
+        "δύο",
+        "τρία",
+        "τέσσερα",
+        "πέντε",
+        "έξι",
+        "εφτά",
+        "οχτώ",
+        "εννέα",
+    ];
+    const T: [&str; 10] = [
+        "δέκα",
+        "έντεκα",
+        "δώδεκα",
+        "δεκατρία",
+        "δεκατέσσερα",
+        "δεκαπέντε",
+        "δεκαέξι",
+        "δεκαεφτά",
+        "δεκαοχτώ",
+        "δεκαεννέα",
+    ];
+    const X: [&str; 8] = [
+        "είκοσι",
+        "τριάντα",
+        "σαράντα",
+        "πενήντα",
+        "εξήντα",
+        "εβδομήντα",
+        "ογδόντα",
+        "ενενήντα",
+    ];
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("μηδέν".into());
+    }
+    let tail = |x: u64| tens_units(x, &U, &T, &X);
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("εκατό");
+        } else if h == 2 {
+            o.push_str("διακόσια");
+        } else if h == 3 {
+            o.push_str("τριακόσια");
+        } else if h == 4 {
+            o.push_str("τετρακόσια");
+        } else if h == 5 {
+            o.push_str("πεντακόσια");
+        } else if h == 6 {
+            o.push_str("εξακόσια");
+        } else if h == 7 {
+            o.push_str("επτακόσια");
+        } else if h == 8 {
+            o.push_str("οκτακόσια");
+        } else if h == 9 {
+            o.push_str("εννιακόσια");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let mil = n / 1_000_000;
+    let rest = n % 1_000_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil == 1 {
+        w.push("ένα εκατομμύριο".into());
+    } else if mil > 1 {
+        w.push(h100(mil));
+        w.push("εκατομμύρια".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("χίλια".into());
+        } else {
+            // χιλιάδες is feminine: μία/τρεις/τέσσερις,
+            // διακόσιες (loop-review catch)
+            w.push(el_fem_multiplier(t));
+            w.push("χιλιάδες".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+/// The Romanian feminine multiplier phrase (1..=999) used before
+/// mii/milioane (loop-review catch): bare 2 → două (not doi), 12 →
+/// douăsprezece, units inside compounds feminine (trei sute patruzeci
+/// și două de mii). The caller applies the partitive "de" rule for
+/// multipliers of 20+ and adds the noun.
+fn ro_fem_multiplier(x: u64) -> String {
+    const UF: [&str; 10] = [
+        "zero", "una", "două", "trei", "patru", "cinci", "șase", "șapte", "opt", "nouă",
+    ];
+    const TF: [&str; 10] = [
+        "zece",
+        "unsprezece",
+        "douăsprezece",
+        "treisprezece",
+        "paisprezece",
+        "cincisprezece",
+        "șaisprezece",
+        "șaptesprezece",
+        "optsprezece",
+        "nouăsprezece",
+    ];
+    const XF: [&str; 8] = [
+        "douăzeci",
+        "treizeci",
+        "patruzeci",
+        "cincizeci",
+        "șaizeci",
+        "șaptezeci",
+        "optzeci",
+        "nouăzeci",
+    ];
+    let tail = |t: u64| -> String {
+        if t <= 19 {
+            tens_units(t, &UF, &TF, &["", ""])
+        } else {
+            // compounds join with "și", same as the masculine tail
+            let tt = XF[((t / 10) - 2) as usize];
+            let u = (t % 10) as usize;
+            if u == 0 {
+                tt.to_string()
+            } else {
+                format!("{tt} și {}", UF[u])
+            }
+        }
+    };
+    let h = x / 100;
+    let r = x % 100;
+    let mut o = String::new();
+    match h {
+        1 => o.push_str("o sută"),
+        2 => o.push_str("două sute"),
+        hh if hh > 2 => {
+            o.push_str(UF[hh as usize]);
+            o.push_str(" sute");
+        }
+        _ => {}
+    }
+    if r > 0 {
+        if !o.is_empty() {
+            o.push(' ');
+        }
+        o.push_str(&tail(r));
+    }
+    o
+}
+
+fn ro_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "zero", "unu", "doi", "trei", "patru", "cinci", "șase", "șapte", "opt", "nouă",
+    ];
+    // -sprezece teens (opt + spre + zece = 8-toward-10); 11-19
+    const T: [&str; 10] = [
+        "zece",
+        "unsprezece",
+        "doisprezece",
+        "treisprezece",
+        "paisprezece",
+        "cincisprezece",
+        "șaisprezece",
+        "șaptesprezece",
+        "optsprezece",
+        "nouăsprezece",
+    ];
+    const X: [&str; 8] = [
+        "douăzeci",
+        "treizeci",
+        "patruzeci",
+        "cincizeci",
+        "șaizeci",
+        "șaptezeci",
+        "optzeci",
+        "nouăzeci",
+    ];
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("zero".into());
+    }
+    let tail = |x: u64| -> String {
+        if x <= 19 {
+            tens_units(x, &U, &T, &["", ""])
+        } else {
+            let t = X[((x / 10) - 2) as usize];
+            let u = (x % 10) as usize;
+            if u == 0 {
+                t.to_string()
+            } else {
+                format!("{t} și {}", U[u])
+            }
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("o sută");
+        } else if h == 2 {
+            o.push_str("două sute");
+        } else if h > 2 {
+            o.push_str(U[h as usize]);
+            o.push_str(" sute");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let mil = n / 1_000_000;
+    let rest = n % 1_000_000;
+    let mut w: Vec<String> = Vec::new();
+    // mii/milioane are feminine plural nouns: 2 → două (not doi),
+    // 12 → douăsprezece, feminine units inside compounds, and the
+    // partitive "de" for multipliers of 20+ (douăzeci de milioane,
+    // o sută de mii — loop-review catches)
+    let plural_group = |x: u64, noun: &str| -> String {
+        if x < 20 {
+            format!("{} {noun}", ro_fem_multiplier(x))
+        } else {
+            format!("{} de {noun}", ro_fem_multiplier(x))
+        }
+    };
+    if mil == 1 {
+        w.push("un milion".into());
+    } else if mil == 2 {
+        w.push("două milioane".into());
+    } else if mil > 2 {
+        w.push(plural_group(mil, "milioane"));
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("o mie".into());
+        } else if t == 2 {
+            w.push("două mii".into());
+        } else {
+            w.push(plural_group(t, "mii"));
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+fn id_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "nol", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan",
+    ];
+    // sebelas = one-ten (se- prefix)
+    const T: [&str; 10] = [
+        "sepuluh",
+        "sebelas",
+        "dua belas",
+        "tiga belas",
+        "empat belas",
+        "lima belas",
+        "enam belas",
+        "tujuh belas",
+        "delapan belas",
+        "sembilan belas",
+    ];
+    const X: [&str; 8] = [
+        "dua puluh",
+        "tiga puluh",
+        "empat puluh",
+        "lima puluh",
+        "enam puluh",
+        "tujuh puluh",
+        "delapan puluh",
+        "sembilan puluh",
+    ];
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("nol".into());
+    }
+    let tail = |x: u64| tens_units(x, &U, &T, &X);
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("seratus");
+        } else if h > 1 {
+            o.push_str(U[h as usize]);
+            o.push_str(" ratus");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let mil = n / 1_000_000;
+    let rest = n % 1_000_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil == 1 {
+        w.push("sejuta".into());
+    } else if mil > 1 {
+        w.push(h100(mil));
+        w.push("juta".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("seribu".into());
+        } else {
+            w.push(h100(t));
+            w.push("ribu".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+/// The lexicalized 20-99 compounds (the ne pattern).
+const UR_20_99: [&str; 80] = [
+    "بیس",
+    "اکائیس",
+    "بائیس",
+    "تئیس",
+    "چوبیس",
+    "پچیس",
+    "چھبیس",
+    "ستائیس",
+    "اٹھائیس",
+    "انتیس",
+    "تیس",
+    "اکتیس",
+    "بتیس",
+    "تینتیس",
+    "چونتیس",
+    "پینتیس",
+    "چھتیس",
+    "سینتیس",
+    "اڑتیس",
+    "انتالیس",
+    "چالیس",
+    "اکتالیس",
+    "بیالیس",
+    "تینتالیس",
+    "چوالیس",
+    "پینتالیس",
+    "چھیالیس",
+    "سینتالیس",
+    "اڑتالیس",
+    "انچاس",
+    "پچاس",
+    "اکاون",
+    "باون",
+    "ترپن",
+    "چون",
+    "پچپن",
+    "چھپن",
+    "ستاون",
+    "اٹھاون",
+    "انسٹھ",
+    "ساٹھ",
+    "اکسٹھ",
+    "باسٹھ",
+    "ترسٹھ",
+    "چونسٹھ",
+    "پینسٹھ",
+    "چھیاسٹھ",
+    "سڑسٹھ",
+    "اڑسٹھ",
+    "انہتر",
+    "ستر",
+    "اکہتر",
+    "بہتر",
+    "تہتر",
+    "چوہتر",
+    "پچہتر",
+    "چھہتر",
+    "ستتر",
+    "اٹھہتر",
+    "اناسی",
+    "اسی",
+    "اکیاسی",
+    "باسی",
+    "تراسی",
+    "چوراسی",
+    "پچاسی",
+    "چھیاسی",
+    "ستاسی",
+    "اٹھاسی",
+    "نواسی",
+    "نوے",
+    "اکانوے",
+    "بانوے",
+    "ترانوے",
+    "چورانوے",
+    "پچانوے",
+    "چھیانوے",
+    "ستانوے",
+    "اٹھانوے",
+    "نناوے",
+];
+
+fn ur_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "صفر", "ایک", "دو", "تین", "چار", "پانچ", "چھ", "سات", "آٹھ", "نو",
+    ];
+    const T: [&str; 10] = [
+        "دس",
+        "گیارہ",
+        "بارہ",
+        "تیرہ",
+        "چودہ",
+        "پندرہ",
+        "سولہ",
+        "سترہ",
+        "اٹھارہ",
+        "انیس",
+    ];
+
+    if n > 99_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("صفر".into());
+    }
+    let tail = |x: u64| -> String {
+        if x <= 19 {
+            tens_units(x, &U, &T, &["", ""])
+        } else {
+            UR_20_99[(x - 20) as usize].to_string()
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("ایک سو");
+        } else if h > 1 {
+            o.push_str(U[h as usize]);
+            o.push_str(" سو");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let under1000 = |x: u64| -> String {
+        if x < 100 {
+            tail(x)
+        } else {
+            h100(x)
+        }
+    };
+    let lakh = n / 100_000;
+    let rest = n % 100_000;
+    let mut w: Vec<String> = Vec::new();
+    if lakh > 0 {
+        w.push(under1000(lakh));
+        w.push("لاکھ".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("ایک ہزار".into());
+        } else {
+            w.push(h100(t));
+            w.push("ہزار".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+/// The lexicalized 20-99 compounds (the ne pattern).
+const BN_20_99: [&str; 80] = [
+    "বিশ",
+    "একুশ",
+    "বাইশ",
+    "তেইশ",
+    "চব্বিশ",
+    "পঁচিশ",
+    "ছাব্বিশ",
+    "সাতাশ",
+    "আটাশ",
+    "উনত্রিশ",
+    "ত্রিশ",
+    "একত্রিশ",
+    "বত্রিশ",
+    "তেত্রিশ",
+    "চৌত্রিশ",
+    "পঁয়ত্রিশ",
+    "ছত্রিশ",
+    "সাঁইত্রিশ",
+    "আটত্রিশ",
+    "উনচল্লিশ",
+    "চল্লিশ",
+    "একচল্লিশ",
+    "বিয়াল্লিশ",
+    "তেতাল্লিশ",
+    "চুয়াল্লিশ",
+    "পঁয়তাল্লিশ",
+    "ছেচল্লিশ",
+    "সাতচল্লিশ",
+    "আটচল্লিশ",
+    "উনপঞ্চাশ",
+    "পঞ্চাশ",
+    "একান্ন",
+    "বায়ান্ন",
+    "তিপ্পান্ন",
+    "চুয়ান্ন",
+    "পঞ্চান্ন",
+    "ছাপ্পান্ন",
+    "সাতান্ন",
+    "আটান্ন",
+    "উনষাট",
+    "ষাট",
+    "একষট্টি",
+    "বাষট্টি",
+    "তেষট্টি",
+    "চৌষট্টি",
+    "পঁয়ষট্টি",
+    "ছেষট্টি",
+    "সাতষট্টি",
+    "আটষট্টি",
+    "উনসত্তর",
+    "সত্তর",
+    "একাত্তর",
+    "বাহাত্তর",
+    "তিয়াত্তর",
+    "চুয়াত্তর",
+    "পঁচাত্তর",
+    "ছিয়াত্তর",
+    "সাতাত্তর",
+    "আটাত্তর",
+    "উনআশি",
+    "আশি",
+    "একাশি",
+    "বিরাশি",
+    "তিরাশি",
+    "চুরাশি",
+    "পঁচাশি",
+    "ছিয়াশি",
+    "সাতাশি",
+    "আটাশি",
+    "নিরাশি",
+    "নব্বই",
+    "একানব্বই",
+    "বিরানব্বই",
+    "তিরানব্বই",
+    "চুরানব্বই",
+    "পঁচানব্বই",
+    "ছিয়ানব্বই",
+    "সাতানব্বই",
+    "আটানব্বই",
+    "নিরানব্বই",
+];
+
+fn bn_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = ["শূন্য", "এক", "দুই", "তিন", "চার", "পাঁচ", "ছয়", "সাত", "আট", "নয়"];
+    const T: [&str; 10] = [
+        "দশ",
+        "এগারো",
+        "বারো",
+        "তেরো",
+        "চৌদ্দ",
+        "পনেরো",
+        "ষোলো",
+        "সতেরো",
+        "আঠারো",
+        "উনিশ",
+    ];
+
+    if n > 99_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("শূন্য".into());
+    }
+    let tail = |x: u64| -> String {
+        if x <= 19 {
+            tens_units(x, &U, &T, &["", ""])
+        } else {
+            BN_20_99[(x - 20) as usize].to_string()
+        }
+    };
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("একশো");
+        } else if h > 1 {
+            o.push_str(U[h as usize]);
+            o.push_str("শো");
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push(' ');
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    let under1000 = |x: u64| -> String {
+        if x < 100 {
+            tail(x)
+        } else {
+            h100(x)
+        }
+    };
+    let lakh = n / 100_000;
+    let rest = n % 100_000;
+    let mut w: Vec<String> = Vec::new();
+    if lakh > 0 {
+        w.push(under1000(lakh));
+        w.push("লাখ".into());
+    }
+    if rest >= 1_000 {
+        let t = rest / 1_000;
+        if t == 1 {
+            w.push("এক হাজার".into());
+        } else {
+            w.push(h100(t));
+            w.push("হাজার".into());
+        }
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+fn sw_integer(n: u64) -> Option<String> {
+    const U: [&str; 10] = [
+        "sifuri", "moja", "mbili", "tatu", "nne", "tano", "sita", "saba", "nane", "tisa",
+    ];
+    const T: [&str; 10] = [
+        "kumi",
+        "kumi na moja",
+        "kumi na mbili",
+        "kumi na tatu",
+        "kumi na nne",
+        "kumi na tano",
+        "kumi na sita",
+        "kumi na saba",
+        "kumi na nane",
+        "kumi na tisa",
+    ];
+    const X: [&str; 8] = [
+        "ishirini",
+        "thelathini",
+        "arobaini",
+        "hamsini",
+        "sitini",
+        "sabini",
+        "themanini",
+        "tisini",
+    ];
+    if n > 999_999_999 {
+        return None;
+    }
+    if n == 0 {
+        return Some("sifuri".into());
+    }
+    let tail = |x: u64| -> String {
+        // Swahili joins tens and units with "na" (arobaini na mbili);
+        // the teens table carries it inline (kumi na moja)
+        if x <= 9 {
+            U[x as usize].to_string()
+        } else if x <= 19 {
+            T[(x - 10) as usize].to_string()
+        } else {
+            let t = X[((x / 10) - 2) as usize];
+            let u = (x % 10) as usize;
+            if u == 0 {
+                t.to_string()
+            } else {
+                format!("{t} na {}", U[u])
+            }
+        }
+    };
+    // the multiplier FOLLOWS mia (mia mbili = two hundred); the
+    // remainder joins with "na" (mia tatu na arobaini na tano)
+    let h100 = |x: u64| -> String {
+        let h = x / 100;
+        let r = x % 100;
+        let mut o = String::new();
+        if h == 1 {
+            o.push_str("mia moja");
+        } else if h > 1 {
+            o.push_str("mia");
+            o.push(' ');
+            o.push_str(U[h as usize]);
+        }
+        if r > 0 {
+            if !o.is_empty() {
+                o.push_str(" na ");
+            }
+            o.push_str(&tail(r));
+        }
+        o
+    };
+    // elfu/milioni precede their multiplier the same way (elfu
+    // mbili, milioni moja); h100 doubles as under-1000 (h == 0 →
+    // the tail alone)
+    let mil = n / 1_000_000;
+    let rest = n % 1_000_000;
+    let mut w: Vec<String> = Vec::new();
+    if mil > 0 {
+        w.push("milioni".into());
+        w.push(h100(mil));
+    }
+    if rest >= 1_000 {
+        w.push("elfu".into());
+        w.push(h100(rest / 1_000));
+    }
+    let r = rest % 1_000;
+    if r > 0 {
+        w.push(h100(r));
+    }
+    Some(w.join(" "))
+}
+
+// ── wave-3 specs + registration ──
+
+batch1_normalizer!(
+    PersianNormalizer,
+    "fa",
+    Batch1Spec {
+        integer: fa_integer,
+        decimal_word: "ممیز",
+        digits: [
+            "صفر", "یک", "دو", "سه", "چهار", "پنج", "شش", "هفت", "هشت", "نه"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    ArabicNormalizer,
+    "ar",
+    Batch1Spec {
+        integer: ar_integer,
+        decimal_word: "فاصلة",
+        digits: [
+            "صفر",
+            "واحد",
+            "اثنان",
+            "ثلاثة",
+            "أربعة",
+            "خمسة",
+            "ستة",
+            "سبعة",
+            "ثمانية",
+            "تسعة"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    HindiNormalizer,
+    "hi",
+    Batch1Spec {
+        integer: hi_integer,
+        decimal_word: "दशमलव",
+        digits: [
+            "शून्य",
+            "एक",
+            "दो",
+            "तीन",
+            "चार",
+            "पाँच",
+            "छह",
+            "सात",
+            "आठ",
+            "नौ"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    TurkishNormalizer,
+    "tr",
+    Batch1Spec {
+        integer: tr_integer,
+        decimal_word: "virgül",
+        digits: [
+            "sıfır", "bir", "iki", "üç", "dört", "beş", "altı", "yedi", "sekiz", "dokuz"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    FinnishNormalizer,
+    "fi",
+    Batch1Spec {
+        integer: fi_integer,
+        decimal_word: "pilkku",
+        digits: [
+            "nolla",
+            "yksi",
+            "kaksi",
+            "kolme",
+            "neljä",
+            "viisi",
+            "kuusi",
+            "seitsemän",
+            "kahdeksan",
+            "yhdeksän"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    GreekNormalizer,
+    "el",
+    Batch1Spec {
+        integer: el_integer,
+        decimal_word: "κόμμα",
+        digits: [
+            "μηδέν",
+            "ένα",
+            "δύο",
+            "τρία",
+            "τέσσερα",
+            "πέντε",
+            "έξι",
+            "εφτά",
+            "οχτώ",
+            "εννέα"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    RomanianNormalizer,
+    "ro",
+    Batch1Spec {
+        integer: ro_integer,
+        decimal_word: "virgulă",
+        digits: ["zero", "unu", "doi", "trei", "patru", "cinci", "șase", "șapte", "opt", "nouă"],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    IndonesianNormalizer,
+    "id",
+    Batch1Spec {
+        integer: id_integer,
+        decimal_word: "koma",
+        digits: [
+            "nol", "satu", "dua", "tiga", "empat", "lima", "enam", "tujuh", "delapan", "sembilan"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    UrduNormalizer,
+    "ur",
+    Batch1Spec {
+        integer: ur_integer,
+        decimal_word: "اعشاریہ",
+        digits: [
+            "صفر", "ایک", "دو", "تین", "چار", "پانچ", "چھ", "سات", "آٹھ", "نو"
+        ],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    BengaliNormalizer,
+    "bn",
+    Batch1Spec {
+        integer: bn_integer,
+        decimal_word: "দশমিক",
+        digits: ["শূন্য", "এক", "দুই", "তিন", "চার", "পাঁচ", "ছয়", "সাত", "আট", "নয়"],
+        dot_thousands: false,
+    }
+);
+batch1_normalizer!(
+    SwahiliNormalizer,
+    "sw",
+    Batch1Spec {
+        integer: sw_integer,
+        decimal_word: "nukta",
+        digits: ["sifuri", "moja", "mbili", "tatu", "nne", "tano", "sita", "saba", "nane", "tisa"],
+        dot_thousands: false,
+    }
+);
+
 // ── batch-2 specs + registration ──
 
 batch1_normalizer!(
@@ -5854,6 +7397,166 @@ mod tests {
     }
 
     #[test]
+    fn wave3_digit_normalizers() {
+        // Persian: "و" joins tens-units and groups; هزار sits inside
+        // its multiplier group (دو هزار, not دو و هزار)
+        let f = |t: &str| PersianNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "چهل و دو");
+        assert_eq!(f("21"), "بیست و یک");
+        assert_eq!(f("11"), "یازده");
+        assert_eq!(f("100"), "صد");
+        assert_eq!(f("125"), "صد و بیست و پنج");
+        assert_eq!(f("342"), "سیصد و چهل و دو");
+        assert_eq!(f("1000"), "یک هزار");
+        assert_eq!(f("2000"), "دو هزار");
+        assert_eq!(f("2100"), "دو هزار و صد");
+        assert_eq!(f("1,5"), "یک ممیز پنج");
+        assert!(PersianNormalizer.normalize_numeric("1000000").is_none());
+        // Arabic: unit قبل ten (اثنان و أربعون), مائة hundreds, the
+        // آلاف plural for 3-10 thousands
+        let f = |t: &str| ArabicNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "اثنان و أربعون");
+        assert_eq!(f("21"), "واحد و عشرون");
+        assert_eq!(f("11"), "أحد عشر");
+        assert_eq!(f("100"), "مائة");
+        assert_eq!(f("200"), "مئتان");
+        assert_eq!(f("1000"), "ألف");
+        assert_eq!(f("2000"), "ألفان");
+        assert_eq!(f("3000"), "ثلاثة آلاف");
+        assert_eq!(f("11000"), "أحد عشر ألف");
+        // loop-review regression pins: the two ar panic regions
+        assert_eq!(f("110"), "مائة و عشرة"); // tail(10) panicked (U[10])
+        assert_eq!(f("10000"), "عشرة آلاف"); // the آلاف branch hit tail(10)
+        assert_eq!(f("100000"), "مائة ألف"); // tail(mil >= 100) panicked
+        assert_eq!(
+            f("999999"),
+            "تسعمائة و تسعة و تسعون ألف و تسعمائة و تسعة و تسعون"
+        );
+        assert_eq!(f("300"), "ثلاثمائة"); // assimilated hundreds
+        assert_eq!(f("1,5"), "واحد فاصلة خمسة");
+        assert!(ArabicNormalizer.normalize_numeric("1000000").is_none());
+        // Hindi: 20-99 lexicalized (the ne pattern), लाख tier
+        let f = |t: &str| HindiNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "बयालीस");
+        assert_eq!(f("21"), "इक्कीस");
+        assert_eq!(f("43"), "तैंतालीस");
+        assert_eq!(f("99"), "निन्यानवे");
+        assert_eq!(f("100"), "एक सौ");
+        assert_eq!(f("105"), "एक सौ पाँच");
+        assert_eq!(f("1000"), "एक हज़ार");
+        assert_eq!(f("42000"), "बयालीस हज़ार");
+        assert_eq!(f("100000"), "एक लाख");
+        assert_eq!(f("142000"), "एक लाख बयालीस हज़ार");
+        assert_eq!(f("1,5"), "एक दशमलव पाँच");
+    }
+
+    #[test]
+    fn wave3_digit_normalizers_latin() {
+        // Turkish: on bir inversion, bin never takes bir
+        let f = |t: &str| TurkishNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "kırk iki");
+        assert_eq!(f("11"), "on bir");
+        assert_eq!(f("100"), "yüz");
+        assert_eq!(f("200"), "iki yüz");
+        assert_eq!(f("1000"), "bin");
+        assert_eq!(f("2000"), "iki bin");
+        assert_eq!(f("200000"), "iki yüz bin");
+        assert_eq!(f("1000000"), "bir milyon");
+        assert_eq!(f("1,5"), "bir virgül beş");
+        assert!(TurkishNormalizer.normalize_numeric("1000000000").is_none());
+        // Finnish: closed compounds, partitive tens
+        let f = |t: &str| FinnishNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "neljäkymmentäkaksi");
+        assert_eq!(f("20"), "kaksikymmentä");
+        assert_eq!(f("11"), "yksitoista");
+        assert_eq!(f("100"), "sata");
+        assert_eq!(f("200"), "kaksisataa");
+        assert_eq!(f("1000"), "tuhat");
+        assert_eq!(f("2000"), "kaksi tuhatta");
+        assert_eq!(f("200000"), "kaksisataa tuhatta");
+        assert_eq!(f("1000000"), "miljoona");
+        assert_eq!(f("1,5"), "yksi pilkku viisi");
+        // Greek: inverted teens, διακόσια hundreds
+        let f = |t: &str| GreekNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "σαράντα δύο");
+        assert_eq!(f("11"), "έντεκα");
+        assert_eq!(f("100"), "εκατό");
+        assert_eq!(f("200"), "διακόσια");
+        assert_eq!(f("1000"), "χίλια");
+        assert_eq!(f("2000"), "δύο χιλιάδες");
+        // feminine agreement before χιλιάδες (loop-review catch)
+        assert_eq!(f("200000"), "διακόσιες χιλιάδες");
+        assert_eq!(f("21000"), "είκοσι μία χιλιάδες");
+        assert_eq!(f("1000000"), "ένα εκατομμύριο");
+        assert_eq!(f("1,5"), "ένα κόμμα πέντε");
+        // Romanian: -sprezece teens, și conjunction, o sută / o mie
+        let f = |t: &str| RomanianNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "patruzeci și doi");
+        assert_eq!(f("18"), "optsprezece");
+        assert_eq!(f("11"), "unsprezece");
+        assert_eq!(f("100"), "o sută");
+        assert_eq!(f("200"), "două sute");
+        assert_eq!(f("1000"), "o mie");
+        assert_eq!(f("2000"), "două mii");
+        // loop-review agreement pins: feminine + the partitive "de"
+        assert_eq!(f("2000000"), "două milioane"); // was "doi milioane"
+        assert_eq!(f("21000000"), "douăzeci și una de milioane");
+        assert_eq!(f("342000"), "trei sute patruzeci și două de mii");
+        assert_eq!(f("1,5"), "unu virgulă cinci");
+        // Indonesian: se- prefixes (sebelas, seratus, seribu)
+        let f = |t: &str| IndonesianNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "empat puluh dua");
+        assert_eq!(f("21"), "dua puluh satu");
+        assert_eq!(f("11"), "sebelas");
+        assert_eq!(f("100"), "seratus");
+        assert_eq!(f("1000"), "seribu");
+        assert_eq!(f("1200"), "seribu dua ratus");
+        assert_eq!(f("1,5"), "satu koma lima");
+        // Urdu: 20-99 lexicalized, لاکھ tier
+        let f = |t: &str| UrduNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "بیالیس");
+        assert_eq!(f("29"), "انتیس");
+        assert_eq!(f("99"), "نناوے");
+        assert_eq!(f("100"), "ایک سو");
+        assert_eq!(f("100000"), "ایک لاکھ");
+        // Bengali: 20-99 lexicalized, closed -শো hundreds, লাখ tier
+        let f = |t: &str| BengaliNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "বিয়াল্লিশ");
+        assert_eq!(f("99"), "নিরানব্বই");
+        assert_eq!(f("200"), "দুইশো");
+        assert_eq!(f("100000"), "এক লাখ");
+        // Swahili: multiplier FOLLOWS mia/elfu/milioni; na joins
+        let f = |t: &str| SwahiliNormalizer.normalize_numeric(t).expect("in range");
+        assert_eq!(f("42"), "arobaini na mbili");
+        assert_eq!(f("11"), "kumi na moja");
+        assert_eq!(f("100"), "mia moja");
+        assert_eq!(f("200"), "mia mbili");
+        assert_eq!(f("345"), "mia tatu na arobaini na tano");
+        assert_eq!(f("1000"), "elfu moja");
+        assert_eq!(f("2000"), "elfu mbili");
+        assert_eq!(f("1000000"), "milioni moja");
+        assert_eq!(f("1,5"), "moja nukta tano");
+    }
+
+    #[test]
+    fn wave3_normalizer_routes() {
+        // bare codes, region forms, and the 639-3 tags the expanded
+        // manifest carries (ara/ell/fas/fin/hin/ind/ron/tur/urd/swa)
+        for l in [
+            "fa", "ar", "hi", "tr", "fi", "el", "ro", "id", "ur", "bn", "sw",
+        ] {
+            assert_eq!(normalizer_for(l).lang(), l);
+        }
+        assert_eq!(normalizer_for("fa-IR").lang(), "fa");
+        assert_eq!(normalizer_for("ara").lang(), "ar");
+        assert_eq!(normalizer_for("ell").lang(), "el");
+        assert_eq!(normalizer_for("fas").lang(), "fa");
+        assert_eq!(normalizer_for("swa").lang(), "sw");
+        assert_eq!(normalizer_for("sw-CD").lang(), "sw");
+        // unchanged: unknown locales stay identity
+        assert_eq!(normalizer_for("zz").lang(), "");
+    }
+
     fn batch2_normalizer_routes() {
         // bare codes, region forms, and the 639-3 tags the expanded
         // manifest carries (isl → is is the one that matters live)

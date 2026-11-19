@@ -3404,7 +3404,7 @@ mod tests {
     /// every other model do not. Resolution itself is pinned in
     /// sherpa_lang's registry test; this pins the model-family half.
     /// batch-2 pin: review deliberately on registry bumps
-    const EXPECTED_COMPAT_ELIGIBLE: usize = 483;
+    const EXPECTED_COMPAT_ELIGIBLE: usize = 560;
 
     #[test]
     fn test_compat_gate_against_full_registry() {
@@ -3471,6 +3471,17 @@ mod tests {
                             | "sq"
                             | "sr"
                             | "uk"
+                            | "fa"
+                            | "ar"
+                            | "hi"
+                            | "tr"
+                            | "fi"
+                            | "el"
+                            | "ro"
+                            | "id"
+                            | "ur"
+                            | "bn"
+                            | "sw"
                     )),
                     "id {id}"
                 );
