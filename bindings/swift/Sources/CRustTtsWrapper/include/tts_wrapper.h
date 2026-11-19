@@ -325,6 +325,17 @@ void tts_set_on_end(struct tts_ctx *ctx, CVoidCb cb, void *userdata);
 void tts_set_on_error(struct tts_ctx *ctx, CErrorCb cb, void *userdata);
 
 /**
+ * Point the user pronunciation overrides (#125) at an explicit
+ * file (see `include/tts_wrapper.h`). Empty/NULL resets to the
+ * default resolution. Returns 1 on success.
+ *
+ * # Safety
+ *
+ * `path` must be a valid null-terminated C string when non-null.
+ */
+int32_t tts_set_pronunciations_file(const char *path);
+
+/**
  * Return the number of registered engines.
  */
 int32_t tts_get_engine_count(void);

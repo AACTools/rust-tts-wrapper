@@ -760,8 +760,26 @@ impl SherpaOnnxEngine {
         // plain-text path (and the compat lexicon above) remain the
         // behavior when the feature is off or the front-end is
         // unavailable.
+        // #125 user pronunciation overrides, mode-aware: the phoneme
+        // front-end's input KEEPS phoneme-bearing words for its
+        // per-token IPA injection (KeepPhonemeWords); the plain-text
+        // path substitutes every respell form including the respell
+        // twins of phoneme entries (AllRespell — a lexicon voice
+        // cannot use IPA). No active file → both are pass-through.
+        let pronunciation_overrides = crate::pronunciation::active()
+            .filter(|p| !p.is_empty())
+            .map(|p| Arc::clone(&p));
         #[cfg(feature = "sherpa-g2p")]
-        let phoneme_codepoints = self.phonemize_for_model(&model_dir, model_info, text);
+        let g2p_input = pronunciation_overrides.as_ref().map(|p| {
+            p.apply(text, crate::pronunciation::Policy::KeepPhonemeWords)
+                .text
+        });
+        let spoken_text = pronunciation_overrides
+            .as_ref()
+            .map(|p| p.apply(text, crate::pronunciation::Policy::AllRespell).text);
+        #[cfg(feature = "sherpa-g2p")]
+        let phoneme_codepoints =
+            self.phonemize_for_model(&model_dir, model_info, g2p_input.as_deref().unwrap_or(text));
         #[cfg(not(feature = "sherpa-g2p"))]
         let phoneme_codepoints: Option<Vec<Vec<i32>>> = None;
         // MMS front-ends read raw characters and have NO number rules
@@ -778,7 +796,10 @@ impl SherpaOnnxEngine {
                     .language
                     .first()
                     .map_or("", |l| l.lang_code.as_str());
-                let (normalized, dropped) = crate::sherpa_g2p::normalize_digits_in_text(text, lang);
+                let (normalized, dropped) = crate::sherpa_g2p::normalize_digits_in_text(
+                    spoken_text.as_deref().unwrap_or(text),
+                    lang,
+                );
                 if dropped > 0 && !self.mms_dropped_logged.swap(true, Ordering::Relaxed) {
                     eprintln!(
                         "sherpa: MMS digit normalization dropped {dropped} \
@@ -790,7 +811,7 @@ impl SherpaOnnxEngine {
                 // degradation (mirrors the codepoints all-dropped
                 // guard)
                 if normalized.is_empty() && !text.trim().is_empty() {
-                    Some(text.to_string())
+                    Some(spoken_text.clone().unwrap_or_else(|| text.to_string()))
                 } else {
                     Some(normalized)
                 }
@@ -804,7 +825,9 @@ impl SherpaOnnxEngine {
         let tts_text = if phoneme_codepoints.is_some() {
             ""
         } else {
-            mms_digit_words.as_deref().unwrap_or(text)
+            spoken_text
+                .as_deref()
+                .unwrap_or(mms_digit_words.as_deref().unwrap_or(text))
         };
 
         let config = sherpa_onnx::OfflineTtsConfig {

@@ -1438,6 +1438,27 @@ impl G2pFrontend {
         })
     }
 
+    /// Map a user-provided IPA override (#125) through the vocab
+    /// ladder. Symbols are whitespace/dot separated runs; each run
+    /// resolves as one ladder symbol (or its splits). None → the
+    /// caller falls back to the normal chain.
+    fn map_override_ipa(&mut self, ipa: &str) -> Option<Vec<char>> {
+        let mut out: Vec<char> = Vec::new();
+        for run in ipa.split([' ', '.']) {
+            if run.is_empty() {
+                continue;
+            }
+            for tok in self.mapper.map_symbol(run)? {
+                let mut chars = tok.chars();
+                match (chars.next(), chars.next()) {
+                    (Some(c), None) => out.push(c),
+                    _ => return None, // multi-char target: not addressable
+                }
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
     /// Phonemize an utterance into per-sentence codepoint streams.
     /// Tokens with digits are first expanded to words in the bundle's
     /// language (`LangNormalizer`); each remaining token is looked up
@@ -1451,9 +1472,41 @@ impl G2pFrontend {
         let mut sentences = Vec::new();
         let mut words = 0usize;
         let mut dropped = 0usize;
+        // #125: one override-table snapshot per utterance (the
+        // mtime-checked global refresh IS the reload semantic)
+        let overrides = crate::pronunciation::active();
         for sentence in split_sentences(text) {
             let mut codepoints: Vec<i32> = Vec::new();
             for token in sentence.split_whitespace() {
+                // #125 user pronunciation override (phoneme form): a
+                // token the active file gives IPA for bypasses the
+                // chain; the IPA symbols map through the SAME vocab
+                // ladder (whitespace/dot separated; the ladder's own
+                // length-mark and char-split rules apply). ANY symbol
+                // the voice rejects falls back to the normal chain —
+                // a bad line in a user file never drops a word.
+                // word_core strips edge punctuation the same way the
+                // dictionary lookup does — an override must fire on
+                // "Botox," and "(botox)" too (loop-review catch: the
+                // raw token never matched)
+                let core_owned: String =
+                    floravox_g2p_fst::word_core(token).map_or_else(String::new, str::to_string);
+                let core_nfc: String = core_owned.nfc().collect();
+                let ipa = overrides
+                    .as_ref()
+                    .and_then(|p| p.phoneme_for(&core_nfc).map(str::to_string));
+                if let Some(ipa) = ipa {
+                    if let Some(cps) = self.map_override_ipa(&ipa) {
+                        // the same inter-word space token the normal
+                        // path emits below
+                        if !codepoints.is_empty() {
+                            codepoints.push(' ' as i32);
+                        }
+                        codepoints.extend(cps.iter().map(|&c| c as i32));
+                        words += 1;
+                        continue;
+                    }
+                }
                 // Numeric tokens (#82 loop reviews, live-verified): a
                 // token whose word core CONTAINS a digit must expand to
                 // German or DROP — never reach the fallback chain,
@@ -6704,6 +6757,106 @@ mod tests {
     }
 
     #[test]
+    /// #125 phoneme overrides at the G2P seam: an active file's IPA
+    /// for a word bypasses the dictionary/fallback chain, mapping
+    /// through the SAME vocab ladder; an unmappable symbol falls
+    /// back to the normal chain (a bad user line never drops a word).
+    fn phonemize_applies_user_phoneme_overrides() {
+        let _env = crate::local_models::test_util::env_lock();
+        let dir = tempfile::tempdir().unwrap().keep();
+        mini_bundle(&dir);
+        let tokens = mini_tokens(&dir);
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
+
+        let pron = dir.join("pron.txt");
+        // "haus" via override IPA that DIFFERS from the dictionary
+        // row (h a ʊ s vs the lexicon's h aʊ̯ s) so the source of the
+        // codepoints is unambiguous; "guten" carries an unmappable
+        // symbol (ɸ — not in the mini vocabulary) to pin the
+        // fallback; "botox" is OOV for the chain and ONLY speakable
+        // via the override
+        std::fs::write(
+            &pron,
+            "haus = /h a ʊ s/\nguten = /ɡ uː ɸ n/\nbotox = /b o t o k s/\n",
+        )
+        .unwrap();
+        crate::pronunciation::set_file(Some(pron.clone()));
+
+        // override wins: no space token inside, exactly h a ʊ s
+        let r = fe.phonemize("Haus");
+        assert_eq!((r.words, r.dropped), (1, 0));
+        let cps: Vec<char> = r.sentences[0].iter().map(|&c| c as u8 as char).collect();
+        assert_eq!(
+            r.sentences[0],
+            vec!['h' as i32, 'a' as i32, 'ʊ' as i32, 's' as i32]
+        );
+        let _ = cps;
+
+        // unmappable symbol (ɸ): falls back to the dictionary row —
+        // still spoken, never dropped (uː length-splits → 6 codepoints)
+        let r = fe.phonemize("guten");
+        assert_eq!((r.words, r.dropped), (1, 0));
+        assert_eq!(r.sentences[0].len(), 6); // ɡ u ː t ə n
+
+        // OOV word that ONLY the override rescues
+        let r = fe.phonemize("botox");
+        assert_eq!((r.words, r.dropped), (1, 0));
+        assert_eq!(
+            r.sentences[0],
+            vec!['b' as i32, 'o' as i32, 't' as i32, 'o' as i32, 'k' as i32, 's' as i32]
+        );
+
+        crate::pronunciation::set_file(None);
+        let _ = &dir; // keep the tempdir for the assertion lifetime
+    }
+
+    /// Loop-review catch: the override lookup must fire on
+    /// punctuation-attached tokens ("Botox," / "(botox)") — the
+    /// dictionary path strips edges via word_core and the override
+    /// must match that behavior.
+    #[test]
+    fn override_fires_on_punctuation_attached_tokens() {
+        let _env = crate::local_models::test_util::env_lock();
+        let dir = tempfile::tempdir().unwrap().keep();
+        mini_bundle(&dir);
+        let tokens = mini_tokens(&dir);
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
+        let pron = dir.join("pron.txt");
+        std::fs::write(&pron, "botox = /b o t o k s/\n").unwrap();
+        crate::pronunciation::set_file(Some(pron));
+
+        // WITHOUT the override, botox is OOV for the mini chain and
+        // drops; with it, both the bare and punctuated forms speak
+        let r = fe.phonemize("Botox, (botox)!");
+        assert_eq!((r.words, r.dropped), (2, 0), "both forms resolve");
+        assert_eq!(
+            r.sentences[0],
+            vec![
+                'b' as i32, 'o' as i32, 't' as i32, 'o' as i32, 'k' as i32, 's' as i32, ' ' as i32,
+                'b' as i32, 'o' as i32, 't' as i32, 'o' as i32, 'k' as i32, 's' as i32,
+            ]
+        );
+
+        crate::pronunciation::set_file(None);
+    }
+
+    /// dot-separated IPA and empty runs (the issue's
+    /// /ˈboʊ.tɑːks/ shape) split the same as spaces.
+    #[test]
+    fn override_ipa_accepts_dot_separators() {
+        let _env = crate::local_models::test_util::env_lock();
+        let dir = tempfile::tempdir().unwrap().keep();
+        mini_bundle(&dir);
+        let tokens = mini_tokens(&dir);
+        let mut fe = G2pFrontend::open(&dir, "de", &tokens).expect("frontend");
+        let pron = dir.join("pron.txt");
+        std::fs::write(&pron, "botox = /b o . t o k s/\n").unwrap();
+        crate::pronunciation::set_file(Some(pron));
+        let mapped = fe.map_override_ipa("b o . t o k s").expect("maps");
+        assert_eq!(mapped, vec!['b', 'o', 't', 'o', 'k', 's']);
+        crate::pronunciation::set_file(None);
+    }
+
     fn phonemize_drops_unhandled_numerics_and_expands_suffix_forms() {
         let dir = tempfile::tempdir().unwrap().keep();
         // the mini dictionary gains the suffix-expanded word

@@ -95,6 +95,8 @@ pub mod floravox_model_source;
 pub mod local_models;
 #[cfg(feature = "omnivoice-local")]
 pub mod omnivoice_model_source;
+pub mod pronunciation;
+pub mod pronunciation_mw;
 #[cfg(all(feature = "sapi", target_os = "windows"))]
 mod sapi_engine;
 #[cfg(feature = "sherpaonnx")]
@@ -1249,6 +1251,32 @@ pub extern "C" fn tts_set_on_error(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = ErrorCallback { cb, userdata };
     }));
+}
+
+/// Point the user pronunciation overrides (#125) at an explicit
+/// file (see `include/tts_wrapper.h`). Empty/NULL resets to the
+/// default resolution. Returns 1 on success.
+///
+/// # Safety
+///
+/// `path` must be a valid null-terminated C string when non-null.
+#[no_mangle]
+pub extern "C" fn tts_set_pronunciations_file(path: *const c_char) -> i32 {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let raw = if path.is_null() {
+            None
+        } else {
+            Some(
+                unsafe { CStr::from_ptr(path) }
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        };
+        let file = raw.filter(|s| !s.is_empty()).map(std::path::PathBuf::from);
+        pronunciation::set_file(file);
+        1
+    }))
+    .unwrap_or(0)
 }
 
 /// Return the number of registered engines.

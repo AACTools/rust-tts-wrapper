@@ -150,9 +150,31 @@ use crate::system_engine::SystemEngine;
 /// `EngineNotAvailable` for unknown/compiled-out ids,
 /// `MissingConfiguration` (with the field key) when a required local
 /// setup path is absent, and engine-specific codes for load failures.
+///
+/// The returned engine carries the user pronunciation overrides
+/// (#125) where the engine applies them itself: every engine except
+/// `sherpaonnx` (which owns both the respell and the phoneme-form
+/// application) is wrapped in
+/// [`crate::pronunciation_mw::PronouncingEngine`], so text-form overrides
+/// apply uniformly for every consumer of this factory.
+pub fn create_engine(
+    engine_id: &str,
+    credentials_json: &str,
+) -> Result<Arc<dyn TtsEngine>, EngineSetupError> {
+    let engine = create_engine_inner(engine_id, credentials_json)?;
+    if engine.engine_id() == "sherpaonnx" {
+        // self-managed: the sherpa engine applies overrides at its
+        // own text-prep and G2P seams (mode-aware)
+        return Ok(engine);
+    }
+    Ok(Arc::new(crate::pronunciation_mw::PronouncingEngine::new(
+        engine,
+    )))
+}
+
 #[allow(unused_variables)]
 #[allow(clippy::too_many_lines)]
-pub fn create_engine(
+fn create_engine_inner(
     engine_id: &str,
     credentials_json: &str,
 ) -> Result<Arc<dyn TtsEngine>, EngineSetupError> {
