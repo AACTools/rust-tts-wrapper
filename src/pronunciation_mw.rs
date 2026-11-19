@@ -181,6 +181,29 @@ impl TtsEngine for PronouncingEngine {
         )
     }
 
+    // The middleware DELEGATES every non-text method explicitly —
+    // inheriting the trait's DEFAULTS here would silently replace the
+    // inner engine's own semantics (check_credentials_status would
+    // downgrade Rejected to Unverified; pause/resume would become
+    // no-ops for engines that implement them). Caught by the
+    // integration suite (tests/error_detail_ffi.rs) after the lib-only
+    // local gate passed.
+    fn check_credentials(&self) -> TtsResult<bool> {
+        self.inner.check_credentials()
+    }
+
+    fn check_credentials_status(&self) -> TtsResult<crate::engine::CredentialCheck> {
+        self.inner.check_credentials_status()
+    }
+
+    fn pause(&self) -> TtsResult<()> {
+        self.inner.pause()
+    }
+
+    fn resume(&self) -> TtsResult<()> {
+        self.inner.resume()
+    }
+
     fn stop(&self) -> TtsResult<()> {
         self.inner.stop()
     }
