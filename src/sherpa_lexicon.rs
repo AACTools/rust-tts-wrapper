@@ -753,7 +753,25 @@ pub(crate) fn lexicon_cache_dir() -> PathBuf {
     }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     match home {
-        Some(h) => PathBuf::from(h).join(".voicegarden").join("lexicons"),
+        Some(h) => {
+            // iOS data-container roots reject direct child creation on
+            // device (the simulator permissively allows it —
+            // Dasher-Apple saw exactly that split: same code,
+            // provisioning "creating …/.voicegarden/lexicons" fails on
+            // hardware and passes in the sim), so the dot-directory
+            // default is uncreatable there. Library/Caches is the
+            // idiomatic, guaranteed-writable spot; under storage
+            // pressure the system clears it and the bundle re-fetches
+            // (checksums intact).
+            #[cfg(target_os = "ios")]
+            let dir = PathBuf::from(h)
+                .join("Library")
+                .join("Caches")
+                .join("voicegarden-lexicons");
+            #[cfg(not(target_os = "ios"))]
+            let dir = PathBuf::from(h).join(".voicegarden").join("lexicons");
+            dir
+        }
         None => PathBuf::from(".voicegarden-lexicons"),
     }
 }
