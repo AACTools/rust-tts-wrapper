@@ -46,6 +46,15 @@ jobs:
     - name: Run tests
       run: cargo test ${{ env.FEATURES }} --verbose
 
+    - name: Run speaker-feature tests (#139 cpal playback)
+      # The cpal player's unit tests (incl. the C1 handoff pin) run
+      # only under this combo — the per-platform sets above don't
+      # enable it. Linux-only needs libasound2-dev.
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        scripts/ci/apt-install-resilient.sh libasound2-dev
+        cargo test --no-default-features --features sherpaonnx,speaker --lib --verbose
+
     - name: Run FFI safety tests
       run: cargo test ${{ env.FEATURES }} --test ffi_safety --verbose
 

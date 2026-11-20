@@ -23,6 +23,9 @@ jobs:
     - name: Install system dependencies
       run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
 
+    - name: Install ALSA headers (the speaker feature's cpal backend)
+      run: scripts/ci/apt-install-resilient.sh libasound2-dev
+
     - name: Run rustfmt check
       run: cargo fmt --all -- --check
 
@@ -36,6 +39,10 @@ jobs:
       # of features that actually build here.
       run: |
         cargo clippy --no-default-features --features system,cloud,sherpaonnx --all-targets -- -D warnings
+
+    - name: Run clippy (speaker feature, #139 cpal playback)
+      run: |
+        cargo clippy --no-default-features --features sherpaonnx,speaker --all-targets -- -D warnings
 
     - name: Formatting standards summary
       run: |
