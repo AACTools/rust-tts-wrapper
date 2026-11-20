@@ -202,8 +202,10 @@ front-end drops them).
   bundle (the German default is the expanded `deu` bundle; Icelandic
   routes to the expanded `isl` bundle, Norwegian to `nob`), fetched
   and sha-verified automatically on first use and cached under
-  `~/.voicegarden/lexicons` (pre-seed it for fully-offline first use — the cache root honors
-  `VOICEGARDEN_LEXICON_DIR`). Numbers, decimals, and digit runs are
+  `~/.voicegarden/lexicons` on desktop platforms, `Library/Caches/voicegarden-lexicons`
+  on iOS (the data-container root rejects the dot-directory on hardware, #138)
+  — pre-seed it for fully-offline first use; the cache root honors
+  `VOICEGARDEN_LEXICON_DIR` everywhere. Numbers, decimals, and digit runs are
   normalized per language (`sherpa_g2p::normalizer_for`), including
   closed compounds where the language writes them closed (hu, ml, ne,
   fi), conjunction-linked tens (is/sr/sq/ar/sw), vigesimal systems
