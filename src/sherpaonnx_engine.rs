@@ -1092,7 +1092,10 @@ impl SherpaOnnxEngine {
             #[cfg(all(target_os = "linux", feature = "speaker"))]
             let played_in_process = play_pcm_cpal(&processed, audio.sample_rate() as u32)
                 || CANCEL_REQUESTED.load(Ordering::SeqCst);
-            #[cfg(any(not(target_os = "linux"), not(feature = "speaker")))]
+            #[cfg(not(any(target_os = "windows", all(target_os = "linux", feature = "speaker"))))]
+            // iOS/Android compile no fallback consumer — the binding
+            // is read only on linux/macos/windows
+            #[allow(unused_variables)]
             let played_in_process = false;
             // The subprocess fallback exists only where a player
             // command exists (aplay/afplay/powershell): iOS and
@@ -1534,7 +1537,7 @@ fn play_wav_file(path: &std::path::Path) {
         ]);
         #[cfg(target_os = "windows")]
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW (#120)
-        cmd.spawn().map(|mut c| c.wait())
+        cmd.spawn().map(register_fallback_player)
     } else {
         return;
     };
@@ -1554,8 +1557,9 @@ fn register_fallback_player(
         // a previous player should already be gone; if it lingers,
         // kill it so one voice plays at a time (the overlapping-
         // voices report)
-        if let Some(old) = slot.as_mut() {
+        if let Some(mut old) = slot.take() {
             let _ = old.kill();
+            let _ = old.wait(); // reap — no zombie players
         }
         *slot = Some(child);
     }
