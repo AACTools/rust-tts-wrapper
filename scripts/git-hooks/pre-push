@@ -22,6 +22,7 @@ COMBOS=(
     "cloud,sherpaonnx"
     "cloud,sherpaonnx,sherpa-g2p"
     "sherpa-g2p"           # not in CI, but a regression here bit us once
+    "sherpaonnx,speaker"   # #139 cpal playback (needs libasound2-dev locally)
     "cloning"
     "floravox"
     "pocket-timing"

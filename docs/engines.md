@@ -85,6 +85,37 @@ Omit `modelPath` to use the default install dir
 
 ## Local engine guides
 
+### Local playback architecture (#139)
+
+The sherpa engine's local-play path (callers without an audio
+callback — plain `tts_speak`):
+
+- **Windows**: in-process WASAPI (#120) — no subprocess, no temp file
+- **Linux with the `speaker` feature**: in-process cpal (ALSA;
+  PipeWire through the ALSA plugin) — ONE persistent output stream
+  kept warm across utterances, samples resampled mono→device
+  rate/channels up front, `stop()` clears the queue from the audio
+  callback (playback stops within one buffer). Enable with
+  `--features sherpaonnx,speaker` (needs `libasound2-dev` at build
+  time; opt-in so the default sherpaonnx build stays header-free)
+- **otherwise**: the subprocess fallback (`aplay`/`afplay`/
+  powershell SoundPlayer) — with #139's hardening: unique temp names
+  (overlapping utterances cannot clobber each other), delete-on-drop
+  (spoken audio never outlives the utterance on disk), and `stop()`
+  kills the player (the wait loop polls cancellation instead of
+  blocking)
+- **macOS**: `afplay` stays as the best-effort `tts_speak` fallback;
+  the supported route is the same as iOS (Dasher-Apple review):
+  `tts_synth_to_bytes` + `AVAudioPlayer` — route changes (hearing
+  aids, headphones), interruptions and session management come free
+  with AVFoundation
+- **iOS / Android**: no subprocess player exists and the WAV write is
+  skipped entirely (no pointless disk exposure) — the supported route
+  is `tts_synth_to_bytes` + your own player (Dasher-Apple's pattern).
+  Frontends that own a player on ANY platform can use
+  `tts_set_on_audio` — the engine then streams chunks instead of
+  playing locally.
+
 ### User pronunciation overrides (every engine)
 
 A per-user plain-text file teaches the wrapper how words should sound

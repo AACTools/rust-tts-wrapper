@@ -16,6 +16,14 @@ use std::sync::{Arc, Mutex};
 /// Shared cancellation flag — set by `stop()`, read by the progress callback.
 static CANCEL_REQUESTED: AtomicBool = AtomicBool::new(false);
 
+/// #139: in-process cpal playback for the local-play path
+/// (Linux/macOS, `speaker` feature) — mirrors WASAPI's contract.
+#[cfg(all(target_os = "linux", feature = "speaker", feature = "sherpaonnx"))]
+mod cpal_player;
+
+#[cfg(all(target_os = "linux", feature = "speaker", feature = "sherpaonnx"))]
+use cpal_player::play_pcm_cpal;
+
 // The sherpa-onnx generate callback must be 'static, but speak() holds the
 // caller's on_audio/on_boundary borrows only for the method body. The C++
 // runtime invokes the callback synchronously on the same thread inside the
@@ -1074,18 +1082,42 @@ impl SherpaOnnxEngine {
                 // stopped (review: the stop() regression — only a
                 // genuine WASAPI unavailability takes the fallback)
                 || CANCEL_REQUESTED.load(Ordering::SeqCst);
-            #[cfg(not(windows))]
+            // #139: Linux under the `speaker` feature plays in-process
+            // via cpal (persistent stream, resampled to the device,
+            // stop()-interruptible); the same
+            // cancellation-is-not-failure rescue as the WASAPI arm.
+            // macOS deliberately stays on the afplay fallback — bytes
+            // + AVAudioPlayer is the supported Apple route
+            // (Dasher-Apple review: route changes/interruptions).
+            #[cfg(all(target_os = "linux", feature = "speaker"))]
+            let played_in_process = play_pcm_cpal(&processed, audio.sample_rate() as u32)
+                || CANCEL_REQUESTED.load(Ordering::SeqCst);
+            #[cfg(any(not(target_os = "linux"), not(feature = "speaker")))]
             let played_in_process = false;
+            // The subprocess fallback exists only where a player
+            // command exists (aplay/afplay/powershell): iOS and
+            // Android skip the WAV write entirely — the bytes path
+            // (tts_synth_to_bytes / on_audio) is the supported route
+            // there, and a written-then-deleted file is a pointless
+            // privacy exposure (Dasher-Apple review)
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             if !played_in_process {
-                let filename = std::env::temp_dir().join("rust-tts-wrapper-sherpa.wav");
+                // #139 stopgaps for the subprocess fallback: a UNIQUE
+                // temp name (the old fixed name let two overlapping
+                // utterances clobber each other's file mid-play) and
+                // a delete-on-drop guard (a crash or kill no longer
+                // leaves spoken audio on disk — #120's privacy point)
+                static WAV_COUNTER: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let n = WAV_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let filename = std::env::temp_dir().join(format!(
+                    "rust-tts-wrapper-sherpa-{}-{n}.wav",
+                    std::process::id()
+                ));
+                let _guard = TempWavGuard(&filename);
                 if write_wav(&filename, &processed, audio.sample_rate()) {
                     play_wav_file(&filename);
                 }
-                // #120 privacy: never leave spoken audio on disk —
-                // applies to every platform's fallback (deletion
-                // after play_wav_file's blocking wait; playback is
-                // never cut)
-                let _ = std::fs::remove_file(&filename);
             }
 
             // No streaming took place; estimates fire as before.
@@ -1171,7 +1203,9 @@ impl TtsEngine for SherpaOnnxEngine {
 
     fn stop(&self) -> TtsResult<()> {
         // The progress callback reads this flag on every chunk and aborts
-        // synthesis when set.
+        // synthesis when set; the fallback player's wait loop and the
+        // in-process cpal callback read it too, so playback stops as
+        // well (#139 — stop() used to be a no-op against aplay/afplay).
         CANCEL_REQUESTED.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -1449,6 +1483,21 @@ fn play_pcm_wasapi(samples: &[f32], sample_rate: u32) -> bool {
     played
 }
 
+/// Deletes the temp WAV when it goes out of scope — playback,
+/// crash, or kill-on-stop (#139: spoken audio never outlives the
+/// utterance on disk, generalizing #120's delete-after-wait).
+struct TempWavGuard<'a>(&'a std::path::Path);
+impl Drop for TempWavGuard<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
+/// The spawned fallback player, if one is running — `stop()` kills
+/// it so cancellation reaches PLAYBACK, not just synthesis (#139:
+/// the old path's stop() was a no-op against aplay/afplay).
+static FALLBACK_PLAYER: Mutex<Option<std::process::Child>> = Mutex::new(None);
+
 /// Play a temp WAV via the platform fallback command — Windows
 /// primary playback is in-process WASAPI (`play_pcm_wasapi`, #120);
 /// this file path runs only when WASAPI is unavailable (no endpoint,
@@ -1467,12 +1516,12 @@ fn play_wav_file(path: &std::path::Path) {
             .arg("-q")
             .arg(path)
             .spawn()
-            .map(|mut c| c.wait())
+            .map(register_fallback_player)
     } else if cfg!(target_os = "macos") {
         std::process::Command::new("afplay")
             .arg(path)
             .spawn()
-            .map(|mut c| c.wait())
+            .map(register_fallback_player)
     } else if cfg!(target_os = "windows") {
         let p = path.to_string_lossy().replace('\'', "''");
         #[cfg(target_os = "windows")]
@@ -1490,6 +1539,65 @@ fn play_wav_file(path: &std::path::Path) {
         return;
     };
     let _ = result;
+}
+
+/// Track the spawned player so `stop()` can kill it, then blocking-
+/// wait — waking early when CANCEL_REQUESTED fires (#139: stop()
+/// must interrupt playback, not just synthesis).
+fn register_fallback_player(
+    child: std::process::Child,
+) -> std::io::Result<std::process::ExitStatus> {
+    {
+        let mut slot = FALLBACK_PLAYER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // a previous player should already be gone; if it lingers,
+        // kill it so one voice plays at a time (the overlapping-
+        // voices report)
+        if let Some(old) = slot.as_mut() {
+            let _ = old.kill();
+        }
+        *slot = Some(child);
+    }
+    loop {
+        if CANCEL_REQUESTED.load(Ordering::SeqCst) {
+            let mut slot = FALLBACK_PLAYER
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(c) = slot.as_mut() {
+                let _ = c.kill();
+            }
+            *slot = None;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "playback cancelled",
+            ));
+        }
+        // try_wait polls without blocking the cancellation checks
+        let mut slot = FALLBACK_PLAYER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(c) = slot.as_mut() {
+            match c.try_wait() {
+                Ok(Some(status)) => {
+                    *slot = None;
+                    return Ok(status);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    *slot = None;
+                    return Err(e);
+                }
+            }
+        } else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "player slot cleared",
+            ));
+        }
+        drop(slot);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 // ===== Model-config builders =====
@@ -2221,6 +2329,48 @@ fn build_vits_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #139: the delete-on-drop guard removes the temp WAV even when
+    /// playback is killed mid-flight (spoken audio never outlives the
+    /// utterance on disk).
+    #[test]
+    fn temp_wav_guard_deletes_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("utterance.wav");
+        std::fs::write(&wav, b"RIFF").unwrap();
+        {
+            let _guard = TempWavGuard(&wav);
+            assert!(wav.is_file());
+        }
+        assert!(!wav.exists(), "guard deleted the file");
+    }
+
+    /// #139: stop() during fallback playback kills the child and the
+    /// wait returns Interrupted (the old blocking wait ignored
+    /// cancellation entirely).
+    #[test]
+    fn fallback_player_wait_honours_cancel() {
+        CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+        let child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let t = std::thread::spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(80));
+            CANCEL_REQUESTED.store(true, Ordering::SeqCst);
+        });
+        let res = register_fallback_player(child);
+        t.join().unwrap();
+        assert!(res.is_err(), "cancelled wait is an error");
+        let err = format!("{}", res.unwrap_err());
+        assert!(err.contains("cancelled"), "names the cause: {err}");
+        CANCEL_REQUESTED.store(false, Ordering::SeqCst);
+        // the slot is clear again
+        let slot = FALLBACK_PLAYER
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(slot.is_none());
+    }
 
     #[test]
     fn test_apply_volume_and_pitch_identity() {

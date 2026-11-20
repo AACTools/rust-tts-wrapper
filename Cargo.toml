@@ -75,6 +75,12 @@ omnivoice-local = [
   "dep:ureq", "dep:tar", "dep:bzip2-rs", "dep:flate2", "dep:fs2", "dep:sha2",
   "dep:sherpa-onnx-models",
 ]
+# #139: in-process playback (cpal) for the sherpa local-play path on
+# LINUX. Opt-in: cpal's ALSA backend needs libasound2-dev at build
+# time, and sherpaonnx is a default feature — the subprocess
+# fallback stays for builds without this. On macOS the feature is
+# inert (bytes + AVAudioPlayer is the supported route).
+speaker = ["dep:cpal", "sherpaonnx"]
 sherpaonnx = ["sherpa-onnx", "dep:sherpa-onnx-models", "dep:unicode-normalization",
     # #120: in-process WASAPI playback on Windows (the windows crate
     # is target-gated — resolves to nothing elsewhere)
@@ -228,6 +234,12 @@ icu_locid = { version = "1.4", optional = true }
 windows = { version = "0.62", features = ["Win32_Media_Speech", "Win32_Media_Audio", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_System_Ole", "Win32_Globalization"], optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# cpal (#139): the `speaker` feature's in-process playback backend —
+# LINUX ONLY by design (Dasher-Apple review: macOS routes through
+# AVFoundation bytes, not a cached audio stream). Needs
+# libasound2-dev at build time; optional so default builds stay
+# header-free.
+cpal = { version = "0.18", optional = true }
 # speech-dispatcher is the Linux system TTS daemon; the crate's bindgen step
 # requires libclang and the daemon isn't available on Windows/macOS, so it is
 # gated to Linux.
