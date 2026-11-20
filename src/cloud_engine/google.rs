@@ -47,7 +47,7 @@ pub fn build_google_request(
         serde_json::json!({ "text": text })
     };
 
-    let mut body = serde_json::json!({
+    let body = serde_json::json!({
         "input": input,
         "voice": voice_obj,
         // sampleRateHertz is pinned so the decoded PCM rate is knowable by
@@ -56,10 +56,12 @@ pub fn build_google_request(
         "audioConfig": { "audioEncoding": "MP3", "sampleRateHertz": 24000 }
     });
 
-    if add_marks {
-        body["enableTimePointing"] = serde_json::json!(["SSML_MARK"]);
-    }
-
+    // NO enableTimePointing here: that field belongs to the v1beta1
+    // long-running API (enable_time_pointing) — the classic v1
+    // text:synthesize endpoint rejects it with 400 INVALID_ARGUMENT
+    // on EVERY request (#136). v1 returns timepoints for <mark> tags
+    // in the input SSML without any request flag; the marks above
+    // and parse_google_timepoints below are all that is needed.
     (body, words_list)
 }
 

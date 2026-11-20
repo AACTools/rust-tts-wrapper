@@ -474,7 +474,18 @@ pub(crate) fn test_build_google_request_with_marks() {
     assert_eq!(words.len(), 2);
     assert_eq!(words[0], "Hello");
     assert_eq!(words[1], "world");
-    assert!(body.get("enableTimePointing").is_some());
+    // #136: the v1 text:synthesize body is EXACTLY {input, voice,
+    // audioConfig} — enableTimePointing is a v1beta1 field the v1
+    // endpoint rejects with 400. This test used to pin the bug.
+    assert!(
+        body.get("enableTimePointing").is_none(),
+        "enableTimePointing must not reach the v1 endpoint"
+    );
+    let mut keys: Vec<&str> = body
+        .as_object()
+        .map_or_else(Vec::new, |o| o.keys().map(String::as_str).collect());
+    keys.sort_unstable();
+    assert_eq!(keys, ["audioConfig", "input", "voice"]);
 }
 
 #[test]
