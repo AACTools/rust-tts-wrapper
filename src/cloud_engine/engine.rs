@@ -327,8 +327,11 @@ impl CloudEngine {
                 format!(
                     "wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1\
                      ?TrustedClientToken={EDGE_TRUSTED_CLIENT_TOKEN}\
+                     &ConnectionId={conn_id}\
                      &Sec-MS-GEC={gec}\
-                     &Sec-MS-GEC-Version=1-142.0.3595.94",
+                     &Sec-MS-GEC-Version={}",
+                    EDGE_SEC_MS_GEC_VERSION,
+                    conn_id = crate::cloud_engine::edge_fresh_connection_id(),
                     gec = edge_sec_ms_gec()
                 )
             } else {
@@ -363,6 +366,17 @@ impl CloudEngine {
                     .map_err(|e| TtsError(format!("User-Agent header: {e}")))?;
                 h.insert("Origin", origin);
                 h.insert("User-Agent", ua);
+                // #141: the 2026-10 handshake also expects a random
+                // muid cookie and the browser's cache pragmata
+                // (mirrors edge-tts DRM.headers_with_muid)
+                let muid = format!("muid={}", crate::cloud_engine::edge_fresh_muid());
+                h.insert(
+                    "Cookie",
+                    muid.parse()
+                        .map_err(|e| TtsError(format!("Cookie header: {e}")))?,
+                );
+                h.insert("Pragma", "no-cache".parse().unwrap());
+                h.insert("Cache-Control", "no-cache".parse().unwrap());
             }
             // Prefer a pooled (warm) connection; only do the full TLS+WS
             // handshake when the pool has nothing for this URL. `clean_finish`

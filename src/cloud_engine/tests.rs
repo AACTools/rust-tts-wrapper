@@ -677,16 +677,54 @@ pub(crate) fn test_edge_config_is_credential_free_ws() {
 }
 
 #[test]
-pub(crate) fn test_edge_sec_ms_gec_is_uppercase_hex_sha256() {
-    // Sec-MS-GEC is SHA-256 → 32 bytes → 64 uppercase hex chars.
+pub(crate) fn test_edge_sec_ms_gec_is_uppercase_hex_v2_shape() {
+    // v2 Sec-MS-GEC is "<16 hex>-<64 hex>" (CS64 + custom SHA-256).
     let token = edge_sec_ms_gec();
-    assert_eq!(token.len(), 64, "token must be 64 hex chars: {token}");
+    assert_eq!(token.len(), 16 + 1 + 64, "token shape: {token}");
     assert!(
         token
             .chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()),
-        "token must be uppercase hex: {token}"
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'),
+        "token must be uppercase hex + dash: {token}"
     );
+    assert_eq!(token.as_bytes()[16], b'-', "dash after the CS64 half");
+}
+
+/// #141: golden vectors from the reference implementation
+/// (edge-tts PR #492, transcribed) — pins the whole v2 pipeline:
+/// custom-IV SHA-256 + CS64 + the tick formatting.
+#[test]
+pub(crate) fn test_edge_sec_ms_gec_v2_golden_vectors() {
+    let cases: &[(u64, &str)] = &[
+        (
+            0,
+            "52BC7A17B50DFEC9-28C4394775C8751CD2F6859C030C06DB1489ACAB3B3A7651831FC26895177ED6",
+        ),
+        (
+            300,
+            "F7535A20A262E331-28675BF85C7106BBF20035A78FCB0B6890813EAD5C3B983EF3424931B720BABB",
+        ),
+        (
+            1729,
+            "165E71BD6DC303D3-50280FE5438CE8F4A762635A7A481525186EA7FBA8A9D6731557199BAA7EBE38",
+        ),
+        (
+            1_735_689_600,
+            "54404AFE67C9B44A-E72E51D8B4F5F75E9A96B7E20D7877227455BC310433BD30C817CD54A1D9313E",
+        ),
+        (
+            1_764_000_000,
+            "BB2B3ADE6A8DD1F3-B07567543B86F99C3539F563D8D3368C59A22CAF50BF1E35F42DA34792F80A76",
+        ),
+        (
+            1_764_100_123,
+            "005202A2C6B3CBE3-1975F4BB4B2FFD193E319C7A3EFB09A584E4B57CAC7A6F306805C00D1196B80D",
+        ),
+    ];
+    for (secs, expected) in cases {
+        let got = edge_sec_ms_gec_v2_at(u128::from(*secs) * 1_000_000_000);
+        assert_eq!(&got, expected, "at {secs}s");
+    }
 }
 
 #[test]
