@@ -75,7 +75,7 @@ mod cloud_engine;
 #[cfg(feature = "cloud-core")]
 pub mod cloud_core {
     pub use crate::cloud_engine::{
-        authorization_header, build_gemini_request, build_google_request, edge_sec_ms_gec_at,
+        authorization_header, build_gemini_request, build_google_request, edge_sec_ms_gec_v2_at,
         elevenlabs_smd_platform, parse_elevenlabs_alignment, parse_gemini_interaction_audio,
         sha256_hex, ssml_to_dialect, CloudConfig, GeminiAudioBlock, SigV4Credentials, SignedUrl,
     };
