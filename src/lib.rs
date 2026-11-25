@@ -119,6 +119,8 @@ pub mod sherpaonnx_engine;
 /// Pure helpers for the qwen3-local engine — always compiled (and
 /// unit-tested in CI) even when the engine feature is off.
 pub mod qwen3_local_support;
+#[cfg(feature = "qwen3-local")]
+pub mod qwen3_stream;
 
 /// Local Qwen3-TTS via qwen3-tts.cpp (GGML). Requires the user-built C++
 /// library — see `scripts/build-qwen3-local.sh` and the feature docs in

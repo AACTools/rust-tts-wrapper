@@ -139,12 +139,30 @@ QWEN3_TTS_LIB=~/spikes/qwen3-tts.cpp cargo build --features qwen3-local
 ```
 
 Pass a reference WAV path as the voice for zero-shot cloning, a
-language id (`en`, `fr`, … — 10 locales), `"default"`, or an
-`emb:<base64>` speaker-embedding handle from the local cloner.
+language id (`en`, `fr`, … — 10 locales), `"default"`, an
+`emb:<base64>` speaker-embedding handle from the local cloner, or —
+the 2026-11 library upgrade — `icl:<wav-path>|<transcript>` for
+**in-context cloning**: the reference's accent and prosody are
+preserved, not just timbre (the cloner emits these handles
+automatically when the identity's clips carry transcripts; the
+reference persists under `~/.cache/rust-tts-wrapper/qwen3-icl/`; the
+path must not contain `|` — the transcript may).
+
+With an audio callback attached, plain and ICL synthesis **stream**:
+audio chunks arrive while the model still generates (first chunk
+after ~2 s of generated audio on accelerated hardware; in ICL the
+reference is decode warmup — it delays the first chunk and is never
+delivered), and `stop()` cancels mid-utterance — the generation loop
+halts at the next chunk boundary. `emb:` handles have no streaming
+route upstream and fall back to batch delivery. SSML with `<break>`
+segments synthesizes per-segment batch (no streaming, no volume gain).
+
 PCM16 mono 24 kHz; CPU synthesis is batch-grade (~0.1× realtime on 6
-cores — use Metal/CUDA builds for speed); calls are serialized
-(upstream is not concurrent-safe). A dev-stub for offline development
-lives in [`scripts/dev-stubs/`](../scripts/dev-stubs/).
+cores — use Metal/CUDA/CoreML builds for speed: the upstream
+benchmark is 3.2× faster than the PyTorch reference, first chunk in
+~2 s); calls are serialized (upstream is not concurrent-safe). A
+dev-stub for offline development lives in
+[`scripts/dev-stubs/`](../scripts/dev-stubs/).
 
 ### omnivoice-local
 

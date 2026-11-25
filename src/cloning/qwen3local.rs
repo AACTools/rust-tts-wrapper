@@ -43,9 +43,43 @@ impl VoiceCloning for Qwen3LocalCloner {
                 "qwen3-local cloning: identity has no clips".into(),
             ));
         };
-        // The C API extracts embeddings from a WAV path: materialise the
-        // clip in the system temp dir (deleted after). pid + nanos keeps
-        // concurrent clone_voice calls from racing on the file name.
+        // ICL FIRST (#145-grade upgrade): a transcripted clip clones
+        // in-context — accent and prosody are preserved, not just
+        // timbre. The reference WAV must PERSIST (it is re-read every
+        // utterance): it lands in a per-identity cache slot under the
+        // user's cache dir, so handles stay valid across restarts.
+        if let Some(transcript) = clip.transcript.as_ref().filter(|t| !t.is_empty()) {
+            let dir = icl_cache_dir()?;
+            std::fs::create_dir_all(&dir)
+                .map_err(|e| TtsError(format!("create {}: {e}", dir.display())))?;
+            let slot = dir.join(format!(
+                "{}.wav",
+                stable_identity_key(&identity.name, &clip.pcm)
+            ));
+            // Guard BEFORE writing: a '|' in the cache path would
+            // misparse the icl: handle at speak time (first-pipe
+            // split). The path is ours (safe key chars; only HOME
+            // varies) — pathological HOME → a clean error, no file
+            // written, the caller can fall back to an emb: flow.
+            if slot.display().to_string().contains('|') {
+                return Err(TtsError(
+                    "qwen3-local ICL cache path contains '|' — cannot build an icl: handle".into(),
+                ));
+            }
+            let wav = wav_bytes(&clip.pcm, clip.sample_rate);
+            // atomic write (temp + rename): a concurrent speak reading
+            // a half-written WAV would fail spuriously — loop review
+            write_atomic(&slot, &wav)?;
+            return Ok(CloneOutcome::Ready(CloneHandle {
+                engine: "qwen3-local".into(),
+                // the engine's ICL convention: path + transcript
+                voice_id: format!("icl:{}|{transcript}", slot.display()),
+                model: None,
+            }));
+        }
+        // No transcript: x-vector embedding (timbre-only) — the C API
+        // extracts from a WAV path, so materialise the clip in the
+        // temp dir (deleted after; pid + nanos avoids races).
         let wav = wav_bytes(&clip.pcm, clip.sample_rate);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -77,4 +111,55 @@ impl VoiceCloning for Qwen3LocalCloner {
         // Dropping the registry entry is the whole lifecycle.
         Ok(())
     }
+}
+
+/// The persistent ICL reference cache: `~/.cache/rust-tts-wrapper/
+/// qwen3-icl` (HOME → USERPROFILE, the #123 resolution).
+fn icl_cache_dir() -> TtsResult<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| TtsError("qwen3-local ICL cache: no home directory".into()))?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".cache")
+        .join("rust-tts-wrapper")
+        .join("qwen3-icl"))
+}
+
+/// A stable, filesystem-safe cache key for one (identity, clip)
+/// pair: identity name + a byte-hash of the PCM. Same clip → same
+/// slot → the cache converges instead of accumulating.
+fn stable_identity_key(name: &str, pcm: &[u8]) -> String {
+    fn hash(bytes: &[u8]) -> u64 {
+        // FNV-1a: deterministic, no dependency
+        let mut h = 0xcbf2_9ce4_8422_2325_u64;
+        for &b in bytes {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x1000_0000_01b3);
+        }
+        h
+    }
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(48)
+        .collect();
+    format!("{safe}-{:016x}", hash(pcm))
+}
+
+/// Atomic file write: temp file in the same directory, then rename
+/// (POSIX rename is atomic — a concurrent reader sees old or new,
+/// never partial).
+fn write_atomic(slot: &std::path::Path, bytes: &[u8]) -> TtsResult<()> {
+    let tmp = slot.with_extension("wav.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| TtsError(format!("write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, slot)
+        .map_err(|e| TtsError(format!("rename to {}: {e}", slot.display())))?;
+    Ok(())
 }

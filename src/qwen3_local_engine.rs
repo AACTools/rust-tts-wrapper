@@ -4,22 +4,26 @@
 //! and located via `QWEN3_TTS_LIB`.
 //!
 //! Third offline engine (after sherpa-onnx and floravox), and the only
-//! local one with zero-shot voice cloning: any voice string passed to
-//! `speak` is treated as a reference-audio WAV path — or an
-//! `emb:<base64>` speaker embedding produced by the `qwen3-local`
-//! cloner (see `crate::cloning`).
+//! local one with zero-shot voice cloning: a voice string passed to
+//! `speak` is a reference-audio WAV path, an `emb:<base64>` speaker
+//! embedding produced by the `qwen3-local` cloner, or
+//! `icl:<wav>|<transcript>` for in-context cloning (see
+//! `crate::cloning`).
 //!
 //! Output: PCM16 LE mono 24 kHz (`on_audio`), word boundaries are
 //! duration-scaled estimates (the C++ pipeline exposes no timestamps).
 //!
-//! # Cloning quality caveat (2026-10-10 finding)
-//! Upstream implements **x-vector-only** cloning (ECAPA embedding):
-//! timbre is cloned, but accent/prosody come from the model prior —
-//! with `language_id=en` that prior is predominantly American-accented.
-//! This is the official `x_vector_only_mode=true` "reduced quality"
-//! mode; in-context (codec-prefix) cloning is unimplemented upstream.
-//! Full analysis + the upstream-PR plan live in the project's
-//! voice-cloning plan notes (kept out of the repository).
+//! # Cloning (2026-11 library: both routes)
+//! `icl:<wav>|<transcript>` — in-context cloning (embedding +
+//! reference codec tokens + transcript): accent and prosody are
+//! preserved. `emb:<base64>` or a bare WAV path — x-vector-only
+//! (ECAPA): timbre cloned, accent/prosody from the model prior (the
+//! pre-2026-11 upstream mode; the 2026-10-10 "ICL unimplemented"
+//! finding is retired). With an audio callback, plain and ICL
+//! synthesis STREAM (first chunk during generation) and `stop()`
+//! cancels mid-utterance; `emb:` clones have no upstream streaming
+//! route and deliver batch. SSML-with-breaks segments synthesize
+//! per-segment batch.
 
 use crate::engine::{strip_ssml_to_text, weighted_boundaries_scaled, TtsEngine};
 use crate::qwen3_local_support::{
@@ -55,7 +59,23 @@ macro_rules! qwen3_ffi {
             n_threads: i32,
             repetition_penalty: f32,
             language_id: i32,
+            /// Optional pre-computed codec tokens file (ICL only).
+            /// THE ABI-FIX FIELD (#145-class drift): upstream added it
+            /// after our initial port; without it the struct is 12
+            /// bytes short and `qwen3_tts_default_params` wrote past
+            /// our allocation — stack corruption against any library
+            /// built from 2026-11 master onward.
+            ref_code_path: *const c_char,
         }
+
+        /// Pin the ABI: size AND the ref_code_path offset (a
+        /// same-width field reorder would pass a size-only pin and
+        /// still corrupt — loop review). 28 bytes of scalars + 4
+        /// alignment padding + the 8-byte pointer at offset 32.
+        /// A change here means the hand-declared FFI needs re-reading
+        /// against `src/qwen3tts_c_api.h`.
+        const _: () = assert!(std::mem::size_of::<Qwen3TtsParams>() == 40);
+        const _: () = assert!(std::mem::offset_of!(Qwen3TtsParams, ref_code_path) == 32);
 
         #[repr(C)]
         pub(crate) struct Qwen3TtsAudio {
@@ -71,10 +91,16 @@ macro_rules! qwen3_ffi {
             pub(crate) _private: [u8; 0],
         }
 
+        /// Streaming callback: `(samples, n, user_data) -> 0 stops
+        /// generation early` (the C++ contract).
+        pub(crate) type Qwen3StreamCallback =
+            extern "C" fn(*const c_float, i32, *mut std::ffi::c_void) -> c_int;
+
         extern "C" {
             fn qwen3_tts_default_params(params: *mut Qwen3TtsParams);
             fn qwen3_tts_create(model_dir: *const c_char, n_threads: c_int) -> *mut Qwen3Tts;
             fn qwen3_tts_is_loaded(tts: *const Qwen3Tts) -> c_int;
+            fn qwen3_tts_sample_rate(tts: *const Qwen3Tts) -> c_int;
             fn qwen3_tts_synthesize(
                 tts: *mut Qwen3Tts,
                 text: *const c_char,
@@ -86,6 +112,16 @@ macro_rules! qwen3_ffi {
                 tts: *mut Qwen3Tts,
                 text: *const c_char,
                 reference_audio_path: *const c_char,
+                params: *const Qwen3TtsParams,
+            ) -> *mut Qwen3TtsAudio;
+            /// Clone from RAW f32 samples (no temp WAV on disk).
+            /// (Declared for parity; no call site yet — the cloner's
+            /// emb: handles and file paths cover current routes.)
+            fn qwen3_tts_synthesize_with_voice_samples(
+                tts: *mut Qwen3Tts,
+                text: *const c_char,
+                ref_samples: *const c_float,
+                n_ref_samples: i32,
                 params: *const Qwen3TtsParams,
             ) -> *mut Qwen3TtsAudio;
             fn qwen3_tts_extract_embedding_file(
@@ -102,6 +138,39 @@ macro_rules! qwen3_ffi {
                 params: *const Qwen3TtsParams,
             ) -> *mut Qwen3TtsAudio;
             fn qwen3_tts_get_error(tts: *const Qwen3Tts) -> *const c_char;
+            /// In-context cloning (embedding + codec tokens + transcript)
+            // (upstream quirk: the ICL batch entry drops top_p/
+            // n_threads and reports failures to stderr, not via
+            // get_error — the STREAMING ICL entry is the well-behaved
+            // one; we route streaming first when a callback exists)
+            fn qwen3_tts_synthesize_in_context(
+                tts: *mut Qwen3Tts,
+                text: *const c_char,
+                reference_audio_path: *const c_char,
+                reference_text: *const c_char,
+                params: *const Qwen3TtsParams,
+            ) -> *mut Qwen3TtsAudio;
+            /// Streaming: plain synthesis with progressive audio
+            /// (first chunk after ~2 s of generated audio).
+            fn qwen3_tts_synthesize_streaming(
+                tts: *mut Qwen3Tts,
+                text: *const c_char,
+                params: *const Qwen3TtsParams,
+                callback: Qwen3StreamCallback,
+                user_data: *mut std::ffi::c_void,
+            ) -> *mut Qwen3TtsAudio;
+            /// Streaming ICL: the reference is decode warmup (never
+            /// delivered); the first delivered chunk additionally
+            /// waits for the echo plus a transition margin.
+            fn qwen3_tts_synthesize_in_context_streaming(
+                tts: *mut Qwen3Tts,
+                text: *const c_char,
+                reference_audio_path: *const c_char,
+                reference_text: *const c_char,
+                params: *const Qwen3TtsParams,
+                callback: Qwen3StreamCallback,
+                user_data: *mut std::ffi::c_void,
+            ) -> *mut Qwen3TtsAudio;
         }
     };
 }
@@ -133,6 +202,103 @@ impl std::fmt::Debug for Qwen3LocalEngine {
 // across threads within one engine instance.
 unsafe impl Send for Qwen3LocalEngine {}
 unsafe impl Sync for Qwen3LocalEngine {}
+
+/// Test seam: set the cancellation flag (mirrors stop()).
+#[doc(hidden)]
+pub fn stop_for_tests() {
+    QWEN_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Test seam: the params struct's size (the ABI pin, by name).
+#[doc(hidden)]
+#[must_use]
+pub fn params_size_probe() -> usize {
+    std::mem::size_of::<Qwen3TtsParams>()
+}
+
+/// Test seam: clear the cancellation flag (the engine resets per
+/// speak; parallel tests need an explicit reset).
+#[doc(hidden)]
+pub fn reset_cancel_for_tests() {
+    QWEN_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Read by the stream trampoline (crate-visible for it).
+pub(crate) fn qwen_cancel_requested() -> bool {
+    QWEN_CANCEL.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Cancellation for streaming synthesis: `stop()` sets it, the
+/// stream callback returns 0 and the C++ pipeline stops generating
+/// (the upstream contract). Reset at each speak, like sherpa's flag.
+static QWEN_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The parsed voice convention for one utterance.
+#[derive(Debug, Clone, PartialEq)]
+pub enum VoiceSpec {
+    /// No reference audio (the default timbre; a language voice also
+    /// lands here after setting `language_id`)
+    Plain,
+    /// `emb:<base64>` — cached x-vector embedding (timbre-only clone)
+    Embedding(Vec<f32>),
+    /// A WAV path — x-vector clone from file
+    ReferenceFile(String),
+    /// `icl:<wav-path>|<transcript>` — in-context cloning: accent and
+    /// prosody are cloned too, not just timbre
+    InContext {
+        /// the reference WAV path
+        path: String,
+        /// the reference's transcript (what was said)
+        transcript: String,
+    },
+}
+
+/// Parse the engine's voice string into a [`VoiceSpec`]. `None`,
+/// `""`, `"default"`, and supported language codes are Plain (the
+/// language sets `language_id` separately); `emb:` and `icl:` carry
+/// their payloads; anything else is a reference file path.
+///
+/// # Errors
+/// Malformed `emb:` base64, or an `icl:` voice missing its
+/// `<path>|<transcript>` pair — both caller fixable.
+pub fn parse_voice_spec(voice: Option<&str>) -> TtsResult<VoiceSpec> {
+    let v = voice
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "default");
+    let Some(v) = v else {
+        return Ok(VoiceSpec::Plain);
+    };
+    if let Some(rest) = v.strip_prefix("emb:") {
+        let raw = decode_embedding(rest)
+            .map_err(|e| TtsError(format!("qwen3-local: bad emb: voice: {e}")))?;
+        return Ok(VoiceSpec::Embedding(raw));
+    }
+    if let Some(rest) = v.strip_prefix("icl:") {
+        // `icl:<wav-path>|<transcript>` — the transcript is REQUIRED
+        // (accent/prosody cloning reads it); split on the FIRST pipe
+        // so transcripts may contain pipes
+        let (path, transcript) = rest.split_once('|').ok_or_else(|| {
+            TtsError(
+                "qwen3-local: icl: voice needs '<wav-path>|<transcript>' — the transcript \
+                 is what preserves accent and prosody"
+                    .into(),
+            )
+        })?;
+        if path.is_empty() || transcript.is_empty() {
+            return Err(TtsError(
+                "qwen3-local: icl: voice path and transcript must both be non-empty".into(),
+            ));
+        }
+        return Ok(VoiceSpec::InContext {
+            path: path.to_string(),
+            transcript: transcript.to_string(),
+        });
+    }
+    if language_id_for(v).is_some() {
+        return Ok(VoiceSpec::Plain);
+    }
+    Ok(VoiceSpec::ReferenceFile(v.to_string()))
+}
 
 impl Qwen3LocalEngine {
     /// Create from credentials: `modelsDir` (required — holds the two
@@ -169,6 +335,7 @@ impl Qwen3LocalEngine {
             n_threads: threads,
             repetition_penalty: 1.05,
             language_id: 2050, // en
+            ref_code_path: std::ptr::null(),
         };
         unsafe { qwen3_tts_default_params(std::ptr::addr_of_mut!(params)) };
         // Credential overrides after defaults.
@@ -195,62 +362,72 @@ impl Qwen3LocalEngine {
         }
     }
 
-    /// Run one synthesis and return PCM16 LE mono bytes. `voice`:
-    /// `None` or `"default"` — no reference; a path — reference WAV;
-    /// `emb:<base64>` — cached speaker embedding from the cloner.
+    /// Run one BATCH synthesis and return PCM16 LE mono bytes plus the
+    /// total sample count (for boundary estimation). `voice`: the
+    /// engine convention (`None`/language/`emb:`/path/`icl:path|text`).
     fn synthesize_to_pcm16(
         &self,
         text: &str,
         voice: Option<&str>,
         mut params: Qwen3TtsParams,
-    ) -> TtsResult<(Vec<u8>, i32)> {
-        // SSML-in: interpret say-as/sub/phoneme locally, then strip.
-        let plain = if text.trim_start().starts_with('<') {
-            plain_text_for_qwen(text)
-        } else {
-            text.to_string()
-        };
+    ) -> TtsResult<(Vec<u8>, i32, usize)> {
+        let plain = plain_text_for_qwen(text);
+        let spec = parse_voice_spec(voice)?;
+        // a language voice selects the codec language token
+        if let Some(lid) = voice.and_then(language_id_for) {
+            params.language_id = lid;
+        }
+        let (pcm, rate, samples) = self.run_batch(&plain, &spec, &params)?;
+        Ok((pcm, rate, samples))
+    }
+
+    /// The FFI dispatch for one batch utterance.
+    fn run_batch(
+        &self,
+        plain: &str,
+        spec: &VoiceSpec,
+        params: &Qwen3TtsParams,
+    ) -> TtsResult<(Vec<u8>, i32, usize)> {
         let c_text = CString::new(plain).map_err(|e| TtsError(format!("text: {e}")))?;
         // Upstream is not concurrent-safe: serialize at the C boundary.
         let _guard = CPP_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A language voice selects the codec language token; reference
-        // paths and emb: handles are cloning inputs instead.
-        let voice_trim = voice.map(str::trim);
-        if let Some(lang) = voice_trim.filter(|v| !v.is_empty() && *v != "default") {
-            if let Some(lid) = language_id_for(lang) {
-                params.language_id = lid;
-            }
-        }
-        let voice_for_audio = voice_trim.filter(|v| !v.is_empty() && *v != "default");
-        let is_language_voice = voice_for_audio.is_some_and(|v| language_id_for(v).is_some());
-        let audio_ptr = match voice_for_audio.filter(|_| !is_language_voice) {
-            None => unsafe {
-                qwen3_tts_synthesize(self.tts, c_text.as_ptr(), std::ptr::addr_of!(params))
+        let audio_ptr = match spec {
+            VoiceSpec::Plain => unsafe { qwen3_tts_synthesize(self.tts, c_text.as_ptr(), params) },
+            VoiceSpec::Embedding(raw) => unsafe {
+                qwen3_tts_synthesize_with_embedding(
+                    self.tts,
+                    c_text.as_ptr(),
+                    raw.as_ptr(),
+                    raw.len() as i32,
+                    params,
+                )
             },
-            Some(v) if v.starts_with("emb:") => {
-                let raw = decode_embedding(v)
-                    .map_err(|e| TtsError(format!("qwen3-local: bad emb: voice: {e}")))?;
-                unsafe {
-                    qwen3_tts_synthesize_with_embedding(
-                        self.tts,
-                        c_text.as_ptr(),
-                        raw.as_ptr(),
-                        raw.len() as i32,
-                        std::ptr::addr_of!(params),
-                    )
-                }
-            }
-            Some(path) => {
-                let c_path =
-                    CString::new(path).map_err(|e| TtsError(format!("reference path: {e}")))?;
+            VoiceSpec::ReferenceFile(path) => {
+                let c_path = CString::new(path.as_str())
+                    .map_err(|e| TtsError(format!("reference path: {e}")))?;
                 unsafe {
                     qwen3_tts_synthesize_with_voice_file(
                         self.tts,
                         c_text.as_ptr(),
                         c_path.as_ptr(),
-                        std::ptr::addr_of!(params),
+                        params,
+                    )
+                }
+            }
+            VoiceSpec::InContext { path, transcript } => {
+                let c_path = CString::new(path.as_str())
+                    .map_err(|e| TtsError(format!("reference path: {e}")))?;
+                let c_text_ref = CString::new(transcript.as_str())
+                    .map_err(|e| TtsError(format!("reference transcript: {e}")))?;
+                unsafe {
+                    qwen3_tts_synthesize_in_context(
+                        self.tts,
+                        c_text.as_ptr(),
+                        c_path.as_ptr(),
+                        c_text_ref.as_ptr(),
+                        params,
                     )
                 }
             }
@@ -277,12 +454,87 @@ impl Qwen3LocalEngine {
                 }
             }
             let rate = audio.sample_rate;
+            let n_samples = n;
             qwen3_tts_free_audio(audio_ptr);
             if pcm.is_empty() {
                 return Err(TtsError("qwen3-local: synthesis produced no audio".into()));
             }
-            Ok((pcm, rate))
+            Ok((pcm, rate, n_samples))
         }
+    }
+
+    /// STREAMING synthesis: delivers PCM16 chunks through `deliver`
+    /// as the C++ pipeline produces them (first chunk after ~2 s of
+    /// generated audio; in ICL the reference is decode WARMUP —
+    /// it delays the first chunk and is never delivered as audio).
+    /// Returns
+    /// (sample_rate, total_f32_samples) — or None when the voice spec
+    /// has no streaming route (`emb:` clones) and the caller should
+    /// take the batch path.
+    fn run_streaming(
+        &self,
+        plain: &str,
+        spec: &VoiceSpec,
+        params: &Qwen3TtsParams,
+        gain: f32,
+        deliver: &mut dyn FnMut(&[u8]),
+    ) -> TtsResult<Option<(i32, usize)>> {
+        // only Plain and ICL have streaming entry points; embeddings
+        // (no streaming FFI) and plain reference files fall back
+        let (use_icl, c_path, c_ref_text) = match spec {
+            VoiceSpec::Plain => (false, None, None),
+            VoiceSpec::InContext { path, transcript } => {
+                let c_path = CString::new(path.as_str())
+                    .map_err(|e| TtsError(format!("reference path: {e}")))?;
+                let c_ref = CString::new(transcript.as_str())
+                    .map_err(|e| TtsError(format!("reference transcript: {e}")))?;
+                (true, Some(c_path), Some(c_ref))
+            }
+            VoiceSpec::Embedding(_) | VoiceSpec::ReferenceFile(_) => return Ok(None),
+        };
+        let c_text = CString::new(plain).map_err(|e| TtsError(format!("text: {e}")))?;
+        let _guard = CPP_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = crate::qwen3_stream::StreamState::new(deliver, gain);
+        let audio_ptr = unsafe {
+            if use_icl {
+                qwen3_tts_synthesize_in_context_streaming(
+                    self.tts,
+                    c_text.as_ptr(),
+                    c_path.as_ref().unwrap().as_ptr(),
+                    c_ref_text.as_ref().unwrap().as_ptr(),
+                    params,
+                    crate::qwen3_stream::stream_trampoline,
+                    std::ptr::addr_of_mut!(state).cast::<std::ffi::c_void>(),
+                )
+            } else {
+                qwen3_tts_synthesize_streaming(
+                    self.tts,
+                    c_text.as_ptr(),
+                    params,
+                    crate::qwen3_stream::stream_trampoline,
+                    std::ptr::addr_of_mut!(state).cast::<std::ffi::c_void>(),
+                )
+            }
+        };
+        let total = state.total_samples;
+        let cancelled = state.cancelled;
+        if audio_ptr.is_null() {
+            return Err(TtsError(format!(
+                "qwen3-local: synthesis failed: {}",
+                self.last_error()
+            )));
+        }
+        // the returned audio also contains the FULL buffer (contract)
+        let rate = unsafe { (*audio_ptr).sample_rate };
+        unsafe { qwen3_tts_free_audio(audio_ptr) };
+        if total == 0 && !cancelled {
+            // streaming delivered nothing and nobody cancelled: the
+            // pipeline probably produced no audio
+            return Err(TtsError("qwen3-local: synthesis produced no audio".into()));
+        }
+        Ok(Some((rate, total)))
     }
 
     /// Extract a speaker embedding from a reference WAV (for the
@@ -389,7 +641,7 @@ fn speak_segments(
 
         // synthesise this segment
         let seg_text = seg.text.as_str();
-        let (pcm_bytes, _pcm_rate) =
+        let (pcm_bytes, _pcm_rate, _n) =
             engine.synthesize_to_pcm16(seg_text, voice, engine.params.clone())?;
         let seg_dur = pcm_bytes.len() as f32 / (sr as f32 * 2.0);
 
@@ -462,27 +714,52 @@ impl TtsEngine for Qwen3LocalEngine {
 
         // SSML-in: strip once here — both the C++ input and the word
         // boundary estimates use the plain text (tags are never words).
-        let plain = if text.trim_start().starts_with('<') {
-            plain_text_for_qwen(text)
-        } else {
-            text.to_string()
-        };
-        let params = self.params.clone();
-        let (pcm, rate) = self.synthesize_to_pcm16(&plain, voice, params)?;
-        // Volume is a real control here: linear PCM gain (clamped),
-        // applied before delivery. Rate/pitch have no pipeline control
-        // (see the engine docs).
-        let pcm = if (volume - 1.0).abs() > f32::EPSILON {
-            apply_gain(&pcm, volume.clamp(0.0, 4.0))
-        } else {
-            pcm
-        };
-        if let Some(cb) = on_audio.as_mut() {
-            // Match the cloud engines' delivery granularity (~150 ms).
-            for chunk in pcm.chunks(7200) {
-                cb(chunk);
-            }
+        let plain = plain_text_for_qwen(text);
+        let mut params = self.params.clone();
+        let spec = parse_voice_spec(voice)?;
+        // A language voice selects the codec language token. This MUST
+        // happen on the plain path too — the SSML-segments path does
+        // it inside synthesize_to_pcm16, and round-1's refactor
+        // dropped it here (loop review, FFI-boundary-proven: fr/de
+        // plain text reached the C++ entry with the default en token)
+        if let Some(lid) = voice.and_then(language_id_for) {
+            params.language_id = lid;
         }
+        // per-utterance cancel reset (same shape as sherpa's flag)
+        QWEN_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+        let gain = volume.clamp(0.0, 4.0);
+        // STREAMING FIRST (when a callback wants audio and the voice
+        // has a streaming route): chunks arrive while the model still
+        // generates — first audio after ~2 s instead of after the
+        // whole utterance. The volume gain rides each chunk (linear,
+        // so per-chunk == whole-buffer).
+        let (pcm, rate, n_samples) = if let Some(cb) = on_audio.as_mut() {
+            match self.run_streaming(&plain, &spec, &params, gain, cb) {
+                Ok(Some((rate, n))) => (Vec::new(), rate, n),
+                // no streaming route (emb:): batch below
+                Ok(None) => {
+                    let (pcm, rate, n) = self.run_batch(&plain, &spec, &params)?;
+                    let pcm = if (gain - 1.0).abs() > f32::EPSILON {
+                        apply_gain(&pcm, gain)
+                    } else {
+                        pcm
+                    };
+                    for chunk in pcm.chunks(7200) {
+                        cb(chunk);
+                    }
+                    (pcm, rate, n)
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            let (pcm, rate, n) = self.run_batch(&plain, &spec, &params)?;
+            let pcm = if (gain - 1.0).abs() > f32::EPSILON {
+                apply_gain(&pcm, gain)
+            } else {
+                pcm
+            };
+            (pcm, rate, n)
+        };
         if let Some(cb) = on_boundary.as_mut() {
             // No timestamps from the C++ pipeline (investigated: the
             // talker exposes no word-alignment signal — see the
@@ -490,8 +767,14 @@ impl TtsEngine for Qwen3LocalEngine {
             // syllable/pause weights, rescaled onto the exact duration:
             // long words get proportionally more time, punctuation beats
             // pause, and the last word ends at the audio end.
+            // streamed utterances carry the sample count (pcm is
+            // empty); batch utterances derive it from the buffer
             #[allow(clippy::cast_precision_loss)]
-            let total_secs = pcm.len() as f32 / (rate as f32 * 2.0);
+            let total_secs = if pcm.is_empty() {
+                n_samples as f32 / rate.max(1) as f32
+            } else {
+                pcm.len() as f32 / (rate as f32 * 2.0)
+            };
             let boundaries = weighted_boundaries_scaled(&plain, total_secs);
             for b in &boundaries {
                 #[allow(clippy::cast_precision_loss)]
@@ -530,7 +813,11 @@ impl TtsEngine for Qwen3LocalEngine {
     }
 
     fn stop(&self) -> TtsResult<()> {
-        Ok(()) // single-shot C++ calls; nothing to cancel mid-flight
+        // Streaming synthesis checks this from the stream callback
+        // and returns 0 — the C++ pipeline stops generating mid-
+        // utterance (the batch path has no interrupt, same as before).
+        QWEN_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     fn get_voices(&self) -> TtsResult<Vec<Voice>> {
