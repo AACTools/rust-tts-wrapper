@@ -145,14 +145,17 @@ the 2026-11 library upgrade — `icl:<wav-path>|<transcript>` for
 **in-context cloning**: the reference's accent and prosody are
 preserved, not just timbre (the cloner emits these handles
 automatically when the identity's clips carry transcripts; the
-reference persists under `~/.cache/rust-tts-wrapper/qwen3-icl/`).
+reference persists under `~/.cache/rust-tts-wrapper/qwen3-icl/`; the
+path must not contain `|` — the transcript may).
 
 With an audio callback attached, plain and ICL synthesis **stream**:
 audio chunks arrive while the model still generates (first chunk
-after ~2 s of generated audio on accelerated hardware; the reference
-echo plays first in ICL), and `stop()` cancels mid-utterance — the
-generation loop halts at the next chunk boundary. `emb:` handles have
-no streaming route upstream and fall back to batch delivery.
+after ~2 s of generated audio on accelerated hardware; in ICL the
+reference is decode warmup — it delays the first chunk and is never
+delivered), and `stop()` cancels mid-utterance — the generation loop
+halts at the next chunk boundary. `emb:` handles have no streaming
+route upstream and fall back to batch delivery. SSML with `<break>`
+segments synthesizes per-segment batch (no streaming, no volume gain).
 
 PCM16 mono 24 kHz; CPU synthesis is batch-grade (~0.1× realtime on 6
 cores — use Metal/CUDA/CoreML builds for speed: the upstream

@@ -111,6 +111,10 @@ fn stream_trampoline_honours_cancel() {
     assert_eq!(rc, 0, "cancelled → stop generating");
     assert!(state.cancelled);
     assert_eq!(state.total_samples, 0, "no audio after cancel");
+    // QWEN_CANCEL is a process global and tests run on parallel
+    // threads: RESET or the delivers-and-counts test flakes 1-in-3
+    // (loop review: observed live). The engine resets per speak.
+    rust_tts_wrapper::qwen3_local_engine::reset_cancel_for_tests();
 }
 
 #[test]

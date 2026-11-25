@@ -4,22 +4,26 @@
 //! and located via `QWEN3_TTS_LIB`.
 //!
 //! Third offline engine (after sherpa-onnx and floravox), and the only
-//! local one with zero-shot voice cloning: any voice string passed to
-//! `speak` is treated as a reference-audio WAV path — or an
-//! `emb:<base64>` speaker embedding produced by the `qwen3-local`
-//! cloner (see `crate::cloning`).
+//! local one with zero-shot voice cloning: a voice string passed to
+//! `speak` is a reference-audio WAV path, an `emb:<base64>` speaker
+//! embedding produced by the `qwen3-local` cloner, or
+//! `icl:<wav>|<transcript>` for in-context cloning (see
+//! `crate::cloning`).
 //!
 //! Output: PCM16 LE mono 24 kHz (`on_audio`), word boundaries are
 //! duration-scaled estimates (the C++ pipeline exposes no timestamps).
 //!
-//! # Cloning quality caveat (2026-10-10 finding)
-//! Upstream implements **x-vector-only** cloning (ECAPA embedding):
-//! timbre is cloned, but accent/prosody come from the model prior —
-//! with `language_id=en` that prior is predominantly American-accented.
-//! This is the official `x_vector_only_mode=true` "reduced quality"
-//! mode; in-context (codec-prefix) cloning is unimplemented upstream.
-//! Full analysis + the upstream-PR plan live in the project's
-//! voice-cloning plan notes (kept out of the repository).
+//! # Cloning (2026-11 library: both routes)
+//! `icl:<wav>|<transcript>` — in-context cloning (embedding +
+//! reference codec tokens + transcript): accent and prosody are
+//! preserved. `emb:<base64>` or a bare WAV path — x-vector-only
+//! (ECAPA): timbre cloned, accent/prosody from the model prior (the
+//! pre-2026-11 upstream mode; the 2026-10-10 "ICL unimplemented"
+//! finding is retired). With an audio callback, plain and ICL
+//! synthesis STREAM (first chunk during generation) and `stop()`
+//! cancels mid-utterance; `emb:` clones have no upstream streaming
+//! route and deliver batch. SSML-with-breaks segments synthesize
+//! per-segment batch.
 
 use crate::engine::{strip_ssml_to_text, weighted_boundaries_scaled, TtsEngine};
 use crate::qwen3_local_support::{
@@ -64,13 +68,14 @@ macro_rules! qwen3_ffi {
             ref_code_path: *const c_char,
         }
 
-        /// Pin the ABI: this must equal the upstream layout's size.
-        /// 28 bytes of scalars + 4 bytes alignment padding before the
-        /// 8-byte pointer = 40 on LP64. A change here means the
-        /// hand-declared FFI needs re-reading against
-        /// `src/qwen3tts_c_api.h` — field order and width are
-        /// load-bearing, not cosmetic.
+        /// Pin the ABI: size AND the ref_code_path offset (a
+        /// same-width field reorder would pass a size-only pin and
+        /// still corrupt — loop review). 28 bytes of scalars + 4
+        /// alignment padding + the 8-byte pointer at offset 32.
+        /// A change here means the hand-declared FFI needs re-reading
+        /// against `src/qwen3tts_c_api.h`.
         const _: () = assert!(std::mem::size_of::<Qwen3TtsParams>() == 40);
+        const _: () = assert!(std::mem::offset_of!(Qwen3TtsParams, ref_code_path) == 32);
 
         #[repr(C)]
         pub(crate) struct Qwen3TtsAudio {
@@ -110,6 +115,8 @@ macro_rules! qwen3_ffi {
                 params: *const Qwen3TtsParams,
             ) -> *mut Qwen3TtsAudio;
             /// Clone from RAW f32 samples (no temp WAV on disk).
+            /// (Declared for parity; no call site yet — the cloner's
+            /// emb: handles and file paths cover current routes.)
             fn qwen3_tts_synthesize_with_voice_samples(
                 tts: *mut Qwen3Tts,
                 text: *const c_char,
@@ -132,6 +139,10 @@ macro_rules! qwen3_ffi {
             ) -> *mut Qwen3TtsAudio;
             fn qwen3_tts_get_error(tts: *const Qwen3Tts) -> *const c_char;
             /// In-context cloning (embedding + codec tokens + transcript)
+            // (upstream quirk: the ICL batch entry drops top_p/
+            // n_threads and reports failures to stderr, not via
+            // get_error — the STREAMING ICL entry is the well-behaved
+            // one; we route streaming first when a callback exists)
             fn qwen3_tts_synthesize_in_context(
                 tts: *mut Qwen3Tts,
                 text: *const c_char,
@@ -148,8 +159,9 @@ macro_rules! qwen3_ffi {
                 callback: Qwen3StreamCallback,
                 user_data: *mut std::ffi::c_void,
             ) -> *mut Qwen3TtsAudio;
-            /// Streaming ICL: the reference echo plays first, then
-            /// the generated speech.
+            /// Streaming ICL: the reference is decode warmup (never
+            /// delivered); the first delivered chunk additionally
+            /// waits for the echo plus a transition margin.
             fn qwen3_tts_synthesize_in_context_streaming(
                 tts: *mut Qwen3Tts,
                 text: *const c_char,
@@ -192,14 +204,23 @@ unsafe impl Send for Qwen3LocalEngine {}
 unsafe impl Sync for Qwen3LocalEngine {}
 
 /// Test seam: set the cancellation flag (mirrors stop()).
+#[doc(hidden)]
 pub fn stop_for_tests() {
     QWEN_CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Test seam: the params struct's size (the ABI pin, by name).
+#[doc(hidden)]
 #[must_use]
 pub fn params_size_probe() -> usize {
     std::mem::size_of::<Qwen3TtsParams>()
+}
+
+/// Test seam: clear the cancellation flag (the engine resets per
+/// speak; parallel tests need an explicit reset).
+#[doc(hidden)]
+pub fn reset_cancel_for_tests() {
+    QWEN_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Read by the stream trampoline (crate-visible for it).
@@ -444,7 +465,9 @@ impl Qwen3LocalEngine {
 
     /// STREAMING synthesis: delivers PCM16 chunks through `deliver`
     /// as the C++ pipeline produces them (first chunk after ~2 s of
-    /// generated audio; ICL adds the reference echo first). Returns
+    /// generated audio; in ICL the reference is decode WARMUP —
+    /// it delays the first chunk and is never delivered as audio).
+    /// Returns
     /// (sample_rate, total_f32_samples) — or None when the voice spec
     /// has no streaming route (`emb:` clones) and the caller should
     /// take the batch path.
@@ -692,8 +715,16 @@ impl TtsEngine for Qwen3LocalEngine {
         // SSML-in: strip once here — both the C++ input and the word
         // boundary estimates use the plain text (tags are never words).
         let plain = plain_text_for_qwen(text);
-        let params = self.params.clone();
+        let mut params = self.params.clone();
         let spec = parse_voice_spec(voice)?;
+        // A language voice selects the codec language token. This MUST
+        // happen on the plain path too — the SSML-segments path does
+        // it inside synthesize_to_pcm16, and round-1's refactor
+        // dropped it here (loop review, FFI-boundary-proven: fr/de
+        // plain text reached the C++ entry with the default en token)
+        if let Some(lid) = voice.and_then(language_id_for) {
+            params.language_id = lid;
+        }
         // per-utterance cancel reset (same shape as sherpa's flag)
         QWEN_CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
         let gain = volume.clamp(0.0, 4.0);

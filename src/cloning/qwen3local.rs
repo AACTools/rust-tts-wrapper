@@ -56,9 +56,20 @@ impl VoiceCloning for Qwen3LocalCloner {
                 "{}.wav",
                 stable_identity_key(&identity.name, &clip.pcm)
             ));
+            // Guard BEFORE writing: a '|' in the cache path would
+            // misparse the icl: handle at speak time (first-pipe
+            // split). The path is ours (safe key chars; only HOME
+            // varies) — pathological HOME → a clean error, no file
+            // written, the caller can fall back to an emb: flow.
+            if slot.display().to_string().contains('|') {
+                return Err(TtsError(
+                    "qwen3-local ICL cache path contains '|' — cannot build an icl: handle".into(),
+                ));
+            }
             let wav = wav_bytes(&clip.pcm, clip.sample_rate);
-            std::fs::write(&slot, &wav)
-                .map_err(|e| TtsError(format!("write {}: {e}", slot.display())))?;
+            // atomic write (temp + rename): a concurrent speak reading
+            // a half-written WAV would fail spuriously — loop review
+            write_atomic(&slot, &wav)?;
             return Ok(CloneOutcome::Ready(CloneHandle {
                 engine: "qwen3-local".into(),
                 // the engine's ICL convention: path + transcript
@@ -140,4 +151,15 @@ fn stable_identity_key(name: &str, pcm: &[u8]) -> String {
         .take(48)
         .collect();
     format!("{safe}-{:016x}", hash(pcm))
+}
+
+/// Atomic file write: temp file in the same directory, then rename
+/// (POSIX rename is atomic — a concurrent reader sees old or new,
+/// never partial).
+fn write_atomic(slot: &std::path::Path, bytes: &[u8]) -> TtsResult<()> {
+    let tmp = slot.with_extension("wav.tmp");
+    std::fs::write(&tmp, bytes).map_err(|e| TtsError(format!("write {}: {e}", tmp.display())))?;
+    std::fs::rename(&tmp, slot)
+        .map_err(|e| TtsError(format!("rename to {}: {e}", slot.display())))?;
+    Ok(())
 }
