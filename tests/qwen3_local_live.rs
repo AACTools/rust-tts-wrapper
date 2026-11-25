@@ -154,4 +154,29 @@ fn qwen3_local_language_voice_ssml_and_volume() {
         .expect("speak fr");
     let pcm = audio.lock().unwrap().len();
     assert!(pcm > 16_000, "expected some audio, got {pcm}");
+
+    // PLAIN-TEXT language voice (the loop-review regression pin): a
+    // refactor once dropped the language_id override from speak()'s
+    // plain path, so fr/de/etc. silently synthesized English — the
+    // SSML case above masked it because the segments path kept its
+    // own override. This case exercises the plain path; the assert
+    // is existence-only (audio produced), but the voice's reach is
+    // verifiable with an LD_PRELOAD interposer logging language_id
+    // at the FFI boundary (fr → 2061, not 2050).
+    let audio2: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink2 = Arc::clone(&audio2);
+    engine
+        .speak(
+            "Bonjour, ceci est un test en français.",
+            Some("fr"),
+            1.0,
+            1.0,
+            1.0,
+            Some(&mut move |b: &[u8]| sink2.lock().unwrap().extend_from_slice(b)),
+            None,
+            None,
+        )
+        .expect("speak fr (plain text)");
+    let pcm2 = audio2.lock().unwrap().len();
+    assert!(pcm2 > 16_000, "expected some audio, got {pcm2}");
 }
