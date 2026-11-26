@@ -1,7 +1,7 @@
 //! Windows SAPI (Speech API) engine.
 
 use crate::engine::{estimate_word_boundaries, preprocess_speech_markdown, TtsEngine};
-use crate::types::{TtsError, TtsResult, Voice};
+use crate::types::{SynthesisDiagnostics, TtsError, TtsResult, Voice};
 use std::sync::Mutex;
 
 // Explicit imports rather than wildcard — clippy rejects `use foo::*` for
@@ -559,6 +559,23 @@ impl TtsEngine for SapiEngine {
             CoTaskMemFree(Some(format_ptr as *const _));
             Ok(wav)
         }
+    }
+
+    /// `speak` plays aloud and hands the audio callback nothing, so the
+    /// default measurement would time a playback and report no audio. This
+    /// measures the silent path above instead. The audio arrives once, at the
+    /// end: SAPI renders the whole utterance before any of it is read back.
+    fn synth_to_bytes_measured(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+    ) -> TtsResult<(Vec<u8>, SynthesisDiagnostics)> {
+        crate::engine::measured_whole_buffer(|| {
+            self.synth_to_bytes(text, voice, rate, pitch, volume)
+        })
     }
 
     fn stop(&self) -> TtsResult<()> {

@@ -1,7 +1,8 @@
 //! Core TTS engine trait.
 
-use crate::types::{SpeakOptions, TtsError, TtsResult, Voice, WordBoundary};
+use crate::types::{SpeakOptions, SynthesisDiagnostics, TtsError, TtsResult, Voice, WordBoundary};
 use std::fmt;
+use std::time::Instant;
 
 /// Callback for streaming audio chunks.
 pub type OnAudioCallback<'a> = &'a mut dyn FnMut(&[u8]);
@@ -394,6 +395,109 @@ pub trait TtsEngine: Send + Sync + fmt::Debug {
         let boundaries = estimate_word_boundaries(text);
         Ok((audio, boundaries))
     }
+
+    /// Synthesize to bytes and say what it cost.
+    ///
+    /// Goes through [`Self::speak`] with an audio callback, as the default
+    /// [`Self::synth_to_bytes`] does, and measures what arrives: see
+    /// [`SynthesisDiagnostics`]. Every engine is measured the same way, so
+    /// one can be compared with another.
+    fn synth_to_bytes_measured(
+        &self,
+        text: &str,
+        voice: Option<&str>,
+        rate: f32,
+        pitch: f32,
+        volume: f32,
+    ) -> TtsResult<(Vec<u8>, SynthesisDiagnostics)> {
+        let mut audio = Vec::new();
+        let mut meter = Meter::start();
+        self.speak(
+            text,
+            voice,
+            rate,
+            pitch,
+            volume,
+            Some(&mut |chunk: &[u8]| {
+                meter.audio(chunk);
+                audio.extend_from_slice(chunk);
+            }),
+            None,
+            None,
+        )?;
+        Ok((audio, meter.finish()))
+    }
+
+    /// Synthesize with [`SpeakOptions`] and say what it cost.
+    fn synth_to_bytes_measured_with_options(
+        &self,
+        text: &str,
+        options: Option<&SpeakOptions>,
+    ) -> TtsResult<(Vec<u8>, SynthesisDiagnostics)> {
+        let opts = options.cloned().unwrap_or_default();
+        self.synth_to_bytes_measured(
+            text,
+            opts.voice.as_deref(),
+            opts.effective_rate(),
+            opts.effective_pitch(),
+            opts.effective_volume(),
+        )
+    }
+}
+
+/// Times a synthesis from the outside, through the audio its engine delivers.
+struct Meter {
+    started: Instant,
+    first_audio: Option<Instant>,
+    audio_bytes: u64,
+    chunks: u64,
+}
+
+impl Meter {
+    fn start() -> Self {
+        Self {
+            started: Instant::now(),
+            first_audio: None,
+            audio_bytes: 0,
+            chunks: 0,
+        }
+    }
+
+    /// One delivery of audio. An empty one is not audio.
+    fn audio(&mut self, chunk: &[u8]) {
+        if chunk.is_empty() {
+            return;
+        }
+        self.first_audio.get_or_insert_with(Instant::now);
+        self.audio_bytes += u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        self.chunks += 1;
+    }
+
+    fn finish(self) -> SynthesisDiagnostics {
+        let since_start = |at: Instant| {
+            u64::try_from(at.duration_since(self.started).as_millis()).unwrap_or(u64::MAX)
+        };
+        SynthesisDiagnostics {
+            wall_ms: since_start(Instant::now()),
+            first_audio_ms: self.first_audio.map(since_start),
+            audio_bytes: self.audio_bytes,
+            chunks: self.chunks,
+        }
+    }
+}
+
+/// Measure a synthesis whose audio arrives all at once: the engine made
+/// everything before handing any of it over. For engines that synthesise
+/// through a path of their own and deliver nothing to [`TtsEngine::speak`]'s
+/// audio callback, which override [`TtsEngine::synth_to_bytes_measured`]
+/// with this.
+pub(crate) fn measured_whole_buffer(
+    synthesize: impl FnOnce() -> TtsResult<Vec<u8>>,
+) -> TtsResult<(Vec<u8>, SynthesisDiagnostics)> {
+    let mut meter = Meter::start();
+    let audio = synthesize()?;
+    meter.audio(&audio);
+    Ok((audio, meter.finish()))
 }
 
 /// Estimate word boundaries using word-length-adjusted timing with an
@@ -704,5 +808,259 @@ mod weighted_timing_tests {
         let b = estimate_word_boundaries("strength audio");
         // 1 syllable vs 3: the weighted model must reflect that
         assert!(b[1].duration > b[0].duration);
+    }
+}
+
+/// An engine that performs a script, for the tests: deliver these bytes,
+/// wait this long, or fail. It records what it was asked to say.
+#[cfg(test)]
+pub(crate) mod test_engine {
+    use super::{OnAudioCallback, OnBoundaryCallback, OnMarkCallback, TtsEngine};
+    use crate::types::{TtsError, TtsResult, Voice};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// One thing a scripted synthesis does, in order.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) enum Step {
+        /// Hand these bytes to the audio callback.
+        Chunk(&'static [u8]),
+        /// Wait before going on: the time an engine takes to make audio.
+        Wait(Duration),
+        /// Give up, with this message.
+        Fail(&'static str),
+    }
+
+    /// What one call asked for.
+    #[derive(Debug, Clone, PartialEq)]
+    pub(crate) struct Request {
+        pub(crate) text: String,
+        pub(crate) voice: Option<String>,
+        pub(crate) rate: f32,
+        pub(crate) pitch: f32,
+        pub(crate) volume: f32,
+    }
+
+    /// Performs a script on every `speak`, and remembers the requests.
+    #[derive(Debug)]
+    pub(crate) struct Scripted {
+        steps: Vec<Step>,
+        requests: Mutex<Vec<Request>>,
+    }
+
+    impl Scripted {
+        pub(crate) fn new(steps: &[Step]) -> Self {
+            Self {
+                steps: steps.to_vec(),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        /// Everything it has been asked to say, oldest first.
+        pub(crate) fn requests(&self) -> Vec<Request> {
+            self.requests.lock().unwrap().clone()
+        }
+    }
+
+    impl TtsEngine for Scripted {
+        fn speak(
+            &self,
+            text: &str,
+            voice: Option<&str>,
+            rate: f32,
+            pitch: f32,
+            volume: f32,
+            mut on_audio: Option<OnAudioCallback<'_>>,
+            _on_boundary: Option<OnBoundaryCallback<'_>>,
+            _on_mark: Option<OnMarkCallback<'_>>,
+        ) -> TtsResult<()> {
+            self.requests.lock().unwrap().push(Request {
+                text: text.to_string(),
+                voice: voice.map(str::to_string),
+                rate,
+                pitch,
+                volume,
+            });
+            for step in &self.steps {
+                match step {
+                    Step::Chunk(bytes) => {
+                        if let Some(on_audio) = on_audio.as_mut() {
+                            on_audio(bytes);
+                        }
+                    }
+                    Step::Wait(duration) => std::thread::sleep(*duration),
+                    Step::Fail(message) => return Err(TtsError((*message).to_string())),
+                }
+            }
+            Ok(())
+        }
+
+        fn speak_sync(
+            &self,
+            text: &str,
+            voice: Option<&str>,
+            rate: f32,
+            pitch: f32,
+            volume: f32,
+            on_audio: Option<OnAudioCallback<'_>>,
+            on_boundary: Option<OnBoundaryCallback<'_>>,
+            on_mark: Option<OnMarkCallback<'_>>,
+        ) -> TtsResult<()> {
+            self.speak(
+                text,
+                voice,
+                rate,
+                pitch,
+                volume,
+                on_audio,
+                on_boundary,
+                on_mark,
+            )
+        }
+
+        fn stop(&self) -> TtsResult<()> {
+            Ok(())
+        }
+
+        fn get_voices(&self) -> TtsResult<Vec<Voice>> {
+            Ok(Vec::new())
+        }
+
+        fn engine_id(&self) -> &'static str {
+            "scripted"
+        }
+    }
+}
+
+#[cfg(test)]
+mod measured_tests {
+    use super::test_engine::{Scripted, Step};
+    use super::{measured_whole_buffer, TtsEngine};
+    use crate::types::{SpeakOptions, SynthesisDiagnostics, TtsError, TtsResult};
+    use std::time::Duration;
+
+    /// Synthesize with the default voice, rate, pitch and volume.
+    fn measure(engine: &Scripted) -> TtsResult<(Vec<u8>, SynthesisDiagnostics)> {
+        engine.synth_to_bytes_measured("hello", None, 1.0, 1.0, 1.0)
+    }
+
+    fn is(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() <= f32::EPSILON,
+            "{actual} is not {expected}"
+        );
+    }
+
+    #[test]
+    fn audio_is_counted_and_the_first_of_it_timed() {
+        let engine = Scripted::new(&[
+            Step::Wait(Duration::from_millis(40)),
+            Step::Chunk(b"ab"),
+            Step::Wait(Duration::from_millis(40)),
+            Step::Chunk(b"cde"),
+        ]);
+        let (audio, measured) = engine
+            .synth_to_bytes_measured("hello", None, 1.0, 1.0, 1.0)
+            .unwrap();
+        assert_eq!(audio, b"abcde");
+        assert_eq!(measured.audio_bytes, 5);
+        assert_eq!(
+            measured.chunks, 2,
+            "two deliveries, however they split the audio"
+        );
+        let first = measured.first_audio_ms.expect("audio arrived");
+        assert!(
+            first >= 40,
+            "nothing arrives before the first wait is over: {first} ms"
+        );
+        assert!(
+            first < measured.wall_ms,
+            "the second delivery comes after the first: first {first} ms, all {} ms",
+            measured.wall_ms
+        );
+    }
+
+    #[test]
+    fn an_empty_delivery_is_not_audio() {
+        let engine = Scripted::new(&[Step::Chunk(b""), Step::Chunk(b"x"), Step::Chunk(b"")]);
+        let (audio, measured) = measure(&engine).unwrap();
+        assert_eq!(audio, b"x");
+        assert_eq!(measured.chunks, 1);
+        assert_eq!(measured.audio_bytes, 1);
+    }
+
+    #[test]
+    fn a_synthesis_without_audio_has_no_first_audio() {
+        let engine = Scripted::new(&[Step::Wait(Duration::from_millis(5))]);
+        let (audio, measured) = measure(&engine).unwrap();
+        assert_eq!(audio, b"");
+        assert_eq!(measured.first_audio_ms, None);
+        assert_eq!(measured.audio_bytes, 0);
+        assert_eq!(measured.chunks, 0);
+        assert!(measured.wall_ms > 0, "the wait is still time spent");
+    }
+
+    #[test]
+    fn a_failed_synthesis_reports_nothing() {
+        let engine = Scripted::new(&[Step::Chunk(b"a"), Step::Fail("engine out of memory")]);
+        let failed = measure(&engine);
+        assert_eq!(failed.unwrap_err().0, "engine out of memory");
+    }
+
+    #[test]
+    fn options_reach_the_engine() {
+        let engine = Scripted::new(&[Step::Chunk(b"a")]);
+        let options = SpeakOptions {
+            voice: Some("a-voice".to_string()),
+            rate: Some(1.5),
+            pitch: Some(1.1),
+            volume: Some(0.5),
+            ..SpeakOptions::default()
+        };
+        let (audio, measured) = engine
+            .synth_to_bytes_measured_with_options("hello", Some(&options))
+            .unwrap();
+        assert_eq!(audio, b"a");
+        assert_eq!(measured.audio_bytes, 1);
+        let request = &engine.requests()[0];
+        assert_eq!(request.text, "hello");
+        assert_eq!(request.voice.as_deref(), Some("a-voice"));
+        is(request.rate, 1.5);
+        is(request.pitch, 1.1);
+        is(request.volume, 0.5);
+    }
+
+    #[test]
+    fn without_options_the_defaults_reach_the_engine() {
+        let engine = Scripted::new(&[]);
+        engine
+            .synth_to_bytes_measured_with_options("hello", None)
+            .unwrap();
+        let request = &engine.requests()[0];
+        assert_eq!(request.voice, None);
+        is(request.rate, 1.0);
+        is(request.pitch, 1.0);
+        is(request.volume, 1.0);
+    }
+
+    #[test]
+    fn a_whole_buffer_arrives_once_at_the_end() {
+        let (audio, measured) = measured_whole_buffer(|| Ok(b"abc".to_vec())).unwrap();
+        assert_eq!(audio, b"abc");
+        assert_eq!(measured.audio_bytes, 3);
+        assert_eq!(measured.chunks, 1);
+        let first = measured.first_audio_ms.expect("audio arrived");
+        assert!(
+            first <= measured.wall_ms,
+            "made before any of it was handed over: first {first} ms, all {} ms",
+            measured.wall_ms
+        );
+
+        let (silent, measured) = measured_whole_buffer(|| Ok(Vec::new())).unwrap();
+        assert_eq!(silent, b"");
+        assert_eq!(measured.first_audio_ms, None);
+
+        let failed = measured_whole_buffer(|| Err(TtsError("boom".to_string())));
+        assert_eq!(failed.unwrap_err().0, "boom");
     }
 }
