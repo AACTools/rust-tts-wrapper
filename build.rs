@@ -1,6 +1,12 @@
 use std::env;
+use std::path::Path;
 
 fn main() {
+    // Set below only when the qwen3-local engine's library can stream
+    // clones. A cfg that a build script may set has to be declared either
+    // way, or every use of it is an "unexpected cfg" warning.
+    println!("cargo:rustc-check-cfg=cfg(qwen3_clone_streaming)");
+
     // Fail fast with a helpful message when the user enables `sapi` on a
     // non-Windows target. Without this the failure is a confusing
     // "crate not found" from the target-gated `windows` dependency.
@@ -53,6 +59,25 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}/build");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{lib_dir}/ggml/build/src");
         println!("cargo:rerun-if-env-changed=QWEN3_TTS_LIB");
+
+        // Streaming a clone (from a reference recording or an embedding)
+        // takes entry points upstream added after its first streaming
+        // release. They are only declared, and so only linked, when the
+        // library's C header has them: a build against an older library
+        // still works, and delivers those clones whole.
+        let header = Path::new(&lib_dir).join("src").join("qwen3tts_c_api.h");
+        println!("cargo:rerun-if-changed={}", header.display());
+        let streams_clones = std::fs::read_to_string(&header).is_ok_and(|text| {
+            [
+                "qwen3_tts_synthesize_with_voice_file_streaming",
+                "qwen3_tts_synthesize_with_embedding_streaming",
+            ]
+            .iter()
+            .all(|entry_point| text.contains(entry_point))
+        });
+        if streams_clones {
+            println!("cargo:rustc-cfg=qwen3_clone_streaming");
+        }
     }
 
     // omnivoice-local: link the user-built omnivoice.cpp shared library.
