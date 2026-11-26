@@ -379,8 +379,8 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                 SetupField::number("topK", "Top-K").default("50"),
                 SetupField::number("maxTokens", "Max audio tokens").default("4096"),
             ],
-            EngineCapabilityInfo::new(true, false, true, true, false, false, false, true)
-                .note("Word timings are estimates; pitch is ignored"),
+            EngineCapabilityInfo::new(true, false, true, true, false, true, false, true)
+                .note("Streams through the audio callback in ~2 s chunks: the default voice, clones and in-context cloning (clones need a qwen3-tts.cpp build with the streaming entry points for them). Word timings are estimates; pitch is ignored"),
         )),
         "omnivoice-local" => Some((
             vec![
@@ -895,6 +895,25 @@ mod tests {
                 .unwrap()
                 .capabilities
                 .requires_internet
+        );
+    }
+
+    /// With an audio callback attached, qwen3-local delivers while it
+    /// generates. Hosts read this flag to decide whether to offer
+    /// streaming, so it must not say the engine only speaks after
+    /// making everything.
+    #[cfg(feature = "qwen3-local")]
+    #[test]
+    fn qwen3_local_streams() {
+        let qwen = engine_setup_schemas()
+            .into_iter()
+            .find(|s| s.id == "qwen3-local")
+            .expect("qwen3-local in schema");
+        assert!(qwen.capabilities.supports_streaming);
+        let notes = qwen.capabilities.notes.expect("a note on what streams");
+        assert!(
+            notes.contains("clone"),
+            "the note says what a build against an older library cannot stream: {notes}"
         );
     }
 

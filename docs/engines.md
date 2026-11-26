@@ -12,7 +12,7 @@ build contains.
 | AVSpeech (macOS) | Local | None | — (system plays) | — | Estimated | — |
 | SAPI (Windows) | Local | None | — (system plays) | — | Estimated (SAPI events) | — |
 | Sherpa-ONNX | Local (1300+ models) | None | Sentence batches | Speakers | Estimated | — |
-| Qwen3-TTS local | Local (qwen3-tts.cpp, GGML) | Model dir (+ lib via `QWEN3_TTS_LIB`) | After generation | 10 languages + any reference audio | Estimated | Stripped |
+| Qwen3-TTS local | Local (qwen3-tts.cpp, GGML) | Model dir (+ lib via `QWEN3_TTS_LIB`) | During generation | 10 languages + any reference audio | Estimated | Stripped |
 | OmniVoice local | Local (omnivoice.cpp, GGML, 646 languages) | Model + codec GGUFs (+ lib via `OMNIVOICE_LIB`) | After generation | Runtime language table | Estimated | Stripped |
 | floravox | Local (piper/MMS/Matcha/Kokoro ONNX — ~1,100 languages) | Model dir | Streamed (per segment) | Filesystem scan | **Measured** (patched) / student / estimated | Native SSML |
 | Pocket (Kyutai) | Local (phoneme ONNX bundle + donor wav) | Bundle dir | Frame-by-frame | Reference wav | **Measured** (attention tap) | Native SSML + IPA |
@@ -148,14 +148,26 @@ automatically when the identity's clips carry transcripts; the
 reference persists under `~/.cache/rust-tts-wrapper/qwen3-icl/`; the
 path must not contain `|` — the transcript may).
 
-With an audio callback attached, plain and ICL synthesis **stream**:
-audio chunks arrive while the model still generates (first chunk
-after ~2 s of generated audio on accelerated hardware; in ICL the
-reference is decode warmup — it delays the first chunk and is never
-delivered), and `stop()` cancels mid-utterance — the generation loop
-halts at the next chunk boundary. `emb:` handles have no streaming
-route upstream and fall back to batch delivery. SSML with `<break>`
-segments synthesizes per-segment batch (no streaming, no volume gain).
+With an audio callback attached, every voice **streams**: the default
+voice, a clone from a reference recording or an `emb:` handle, and ICL.
+Audio chunks arrive while the model still generates (first chunk after
+~2 s of generated audio on accelerated hardware; in ICL the reference
+is decode warmup — it delays the first chunk and is never delivered),
+and `stop()` cancels mid-utterance — the generation loop halts at the
+next chunk boundary. Streaming a clone takes the streaming entry points
+that [qwen3-tts.cpp#46](https://github.com/predict-woo/qwen3-tts.cpp/pull/46)
+adds to its C API, and are picked up from the library's header at build
+time: against a library built before them, a clone is made whole and
+delivered in batch, as it was. SSML with `<break>` segments synthesizes
+per-segment batch (no streaming, no volume gain).
+
+On CPU, delivering a clone early costs the vocoder about half as long
+again in total. For one 6 s clone from a reference recording, measured:
+the first audio at 13.0 s and 32 s in all when streamed, against 21 s for
+the whole buffer. So a clone asked for as one buffer (`synth_to_bytes`) is
+still made in one go. A caller that only wants the buffer gains nothing
+from early delivery; one that plays audio as it arrives gets the first of
+it 40% sooner.
 
 PCM16 mono 24 kHz; CPU synthesis is batch-grade (~0.1× realtime on 6
 cores — use Metal/CUDA/CoreML builds for speed: the upstream
