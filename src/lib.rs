@@ -53,6 +53,9 @@ mod avsynth_engine;
 #[cfg(test)]
 mod bcp_audit;
 pub mod boundaries;
+pub mod word_aligner;
+#[cfg(feature = "word-align")]
+pub mod word_aligner_rt;
 
 #[cfg(feature = "omnivoice-local")]
 pub mod omnivoice_local_engine;
