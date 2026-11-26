@@ -277,14 +277,23 @@ pub(crate) fn static_voices(provider: &str) -> Option<Vec<Voice>> {
         };
 
     match provider {
-        // Qwen-Audio-TTS system voices (DashScope has no list endpoint —
-        // static table from the Qwen-Audio-TTS voice list doc). Chinese
-        // voices are bilingual zh/en; loong* are English-only. The two
-        // longan* entries belong to qwen-audio-3.0-tts-plus, the rest to
-        // qwen-audio-3.0-tts-flash; IDs are unique so one list serves both.
+        // Qwen cloud voices (DashScope has no list endpoint — static
+        // table). Voice ids are STRICTLY model-scoped (411/418 on
+        // mismatch, verified live — issue #149): bare longan*/loong*
+        // ids belong to qwen-audio-3.0-tts-flash (default; the two
+        // unsuffixed flagship entries to 3.0-plus), *_v3.1 ids to
+        // qwen-audio-3.1-tts-{plus,flash}, the prefixed
+        // qwen-audio-3.1-tts-flash-* ids to 3.1-flash minority-language
+        // voices, and *_v3 / bare longanyang to cosyvoice-v3-flash
+        // (requires modelId). With NO modelId credential the engine
+        // infers the model from the voice (qwen_voice_inferred_model),
+        // so any listed voice just works. Generated from the
+        // Qwen-Audio-TTS voice list doc (2026-11-23) and the CosyVoice
+        // voice list doc (2026-11-12).
         "qwen" => {
             let zh_en = || vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()];
-            Some(vec![
+            // 3.0 voices (the default model's list — plus voices marked below).
+            let mut v = vec![
                 voice(
                     "longanlingxin",
                     "Long An Ling Xin",
@@ -383,7 +392,688 @@ pub(crate) fn static_voices(provider: &str) -> Option<Vec<Voice>> {
                     "qwen",
                     vec![en_us()],
                 ),
-            ])
+            ];
+            // 3.1 multilingual flagship (dialects via languageHints).
+            v.extend([
+                voice(
+                    "longanlingxin_v3.1",
+                    "Long An Ling Xin",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "longanhuan_v3.1",
+                    "Long An Huan",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "longanfengyue_v3.1",
+                    "Long An Feng Yue",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "xunanchuan_v3.1",
+                    "Xunanchuan",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+            ]);
+            // 3.1 premium Chinese — a CURATED subset of the doc's list
+            // (Mandarin-only, plus the bilingual loongbella). The full
+            // table: the Qwen-Audio-TTS voice-list doc. Curated entries
+            // work identically (any listed voice synthesizes; see the
+            // inference rules) — curation only affects discoverability.
+            v.extend([
+                voice(
+                    "yuxiaoyun_v3.1",
+                    "Yu Xiaoyun",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "qiaoxiaojiao_v3.1",
+                    "Qiao Xiaojiao",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "xiaxiaochen_v3.1",
+                    "Xia Xiaochen",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "anmingyuan_v3.1",
+                    "An Mingyuan",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "wenhuaiqing_v3.1",
+                    "Wen Huaiqing",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "anxiaolan_v3.1",
+                    "An Xiaolan",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "xieshurou_v3.1",
+                    "Xie Shurou",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "baiqinglan_v3.1",
+                    "Bai Qinglan",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "xuyuyuan_v3.1",
+                    "Xu Yuyuan",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "anruorou_v3.1",
+                    "An Ruorou",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "wenhuaizhi_v3.1",
+                    "Wen Huaizhi",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "xiaoxingzhi_v3.1",
+                    "Xiao Xingzhi",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "guyunshu_v3.1",
+                    "Gu Yunshu",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "huozhuoshi_v3.1",
+                    "Huo Zhuoshi",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "yeqinghe_v3.1",
+                    "Ye Qinghe",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+                voice(
+                    "loongbella_v3.1",
+                    "Bella (Mandarin + English)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "xuyanchu_v3.1",
+                    "Xu Yanchu",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)")],
+                ),
+            ]);
+            // 3.1 premium English.
+            v.extend([
+                voice("Emily_v3.1", "Emily", Gender::Female, "qwen", vec![en_us()]),
+                voice("Luna_v3.1", "Luna", Gender::Female, "qwen", vec![en_us()]),
+                voice("Eric_v3.1", "Eric", Gender::Male, "qwen", vec![en_us()]),
+                voice("Luca_v3.1", "Luca", Gender::Male, "qwen", vec![en_us()]),
+                voice("Abby_v3.1", "Abby", Gender::Female, "qwen", vec![en_us()]),
+                voice("Annie_v3.1", "Annie", Gender::Female, "qwen", vec![en_us()]),
+                voice("Ava_v3.1", "Ava", Gender::Female, "qwen", vec![en_us()]),
+                voice("Beth_v3.1", "Beth", Gender::Female, "qwen", vec![en_us()]),
+                voice("Betty_v3.1", "Betty", Gender::Female, "qwen", vec![en_us()]),
+                voice("Cally_v3.1", "Cally", Gender::Female, "qwen", vec![en_us()]),
+                voice("Cindy_v3.1", "Cindy", Gender::Female, "qwen", vec![en_us()]),
+                voice("Donna_v3.1", "Donna", Gender::Female, "qwen", vec![en_us()]),
+                voice("Andy_v3.1", "Andy", Gender::Male, "qwen", vec![en_us()]),
+                voice("Brian_v3.1", "Brian", Gender::Male, "qwen", vec![en_us()]),
+                voice("David_v3.1", "David", Gender::Male, "qwen", vec![en_us()]),
+            ]);
+            // 3.1 minority-language system voices — the coverage win
+            // (id embeds the model: qwen-audio-3.1-tts-flash-<name>_<lang>).
+            v.extend([
+                voice(
+                    "qwen-audio-3.1-tts-flash-zora_bg",
+                    "Zora (Bulgarian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("bg", "bul", "Bulgarian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-linde_nl",
+                    "Linde (Dutch)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("nl", "nld", "Dutch")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-hajnal_hu",
+                    "Hajnal (Hungarian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("hu", "hun", "Hungarian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-senin_ro",
+                    "Senin (Romanian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ro", "ron", "Romanian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-birk_da",
+                    "Birk (Danish)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("da", "dan", "Danish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-lipa_hr",
+                    "Lipa (Croatian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("hr", "hrv", "Croatian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-avgi_el",
+                    "Avgi (Greek)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("el", "ell", "Greek")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-jitrenka_cs",
+                    "Jitřenka (Czech)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("cs", "ces", "Czech")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-solglimt_nn",
+                    "Solglimt (Norwegian (Nynorsk))",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("nn", "nno", "Norwegian (Nynorsk)")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-glimma_sv",
+                    "Glimma (Swedish)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("sv", "swe", "Swedish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-svar_hi",
+                    "Svar (Hindi)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("hi", "hin", "Hindi")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-iskra_sk",
+                    "Iskra (Slovak)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("sk", "slk", "Slovak")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-aava_fi",
+                    "Aava (Finnish)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("fi", "fin", "Finnish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-sahar_ur",
+                    "Sahar (Urdu)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ur", "urd", "Urdu")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-jasna_sr",
+                    "Jasna (Serbian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("sr", "srp", "Serbian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-brisa_es_mx",
+                    "Brisa (Mexican Spanish)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("es-MX", "spa", "Mexican Spanish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-ausra_lt",
+                    "Aušra (Lithuanian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("lt", "lit", "Lithuanian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-rasa_lv",
+                    "Rasa (Latvian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("lv", "lav", "Latvian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-deniz_tr",
+                    "Deniz (Turkish)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("tr", "tur", "Turkish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-ava_fa",
+                    "Ava (Persian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("fa", "pes", "Persian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-or_he",
+                    "Or (Hebrew)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("he", "heb", "Hebrew")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-ayalguu_mn",
+                    "Ayalguu (Mongolian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("mn", "mon", "Mongolian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-zarja_sl",
+                    "Zarja (Slovenian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("sl", "slv", "Slovenian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-ishiq_az",
+                    "Işıq (Azerbaijani)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("az", "aze", "Azerbaijani")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-zorza_pl",
+                    "Zorza (Polish)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("pl", "pol", "Polish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-alba_ca",
+                    "Alba (Catalan)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ca", "cat", "Catalan")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-romduol_km",
+                    "Romduol (Khmer)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("km", "khm", "Khmer")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-aurora_pt_br",
+                    "Aurora (Brazilian Portuguese)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("pt-BR", "por", "Brazilian Portuguese")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-dao_lo",
+                    "Dao (Lao)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("lo", "lao", "Lao")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-tsiskari_ka",
+                    "Tsiskari (Georgian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ka", "kat", "Georgian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-lente_af",
+                    "Lente (Afrikaans)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("af", "afr", "Afrikaans")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-kiran_ne",
+                    "Kiran (Nepali)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ne", "nep", "Nepali")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-zorka_be",
+                    "Zorka (Belarusian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("be", "bel", "Belarusian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-nilaav_ml",
+                    "Nilaav (Malayalam)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("ml", "mal", "Malayalam")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-staer_lb",
+                    "Stär (Luxembourgish)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("lb", "ltz", "Luxembourgish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-drita_sq",
+                    "Drita (Albanian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("sq", "sqi", "Albanian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-nila_ta",
+                    "Nila (Tamil)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("ta", "tam", "Tamil")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-aruna_si",
+                    "Aruna (Sinhala)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("si", "sin", "Sinhala")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-vennela_te",
+                    "Vennela (Telugu)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("te", "tel", "Telugu")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-sade_et",
+                    "Säde (Estonian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("et", "est", "Estonian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-bituon_ceb",
+                    "Bituon (Cebuano)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ceb", "ceb", "Cebuano")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-vedrina_bs",
+                    "Vedrina (Bosnian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("bs", "bos", "Bosnian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-layaung_my",
+                    "LaYaung (Burmese)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("my", "mya", "Burmese")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-luys_hy",
+                    "Luys (Armenian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("hy", "hye", "Armenian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-lumen_la",
+                    "Lumen (Latin)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("la", "lat", "Latin")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-birta_is",
+                    "Birta (Icelandic)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("is", "isl", "Icelandic")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-zerniq_mt",
+                    "Żerniq (Maltese)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("mt", "mlt", "Maltese")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-nuru_sw",
+                    "Nuru (Swahili)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("sw", "swa", "Swahili")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-arai_kk",
+                    "Arai (Kazakh)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("kk", "kaz", "Kazakh")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-zetwal_crs",
+                    "Zetwal (Seychellois Creole)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("crs", "crs", "Seychellois Creole")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-zoria_uk",
+                    "Zoria (Ukrainian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("uk", "ukr", "Ukrainian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-nagi_ja",
+                    "Nagi (Japanese)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ja", "jpn", "Japanese")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-haneul_ko",
+                    "Haneul (Korean)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ko", "kor", "Korean")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-aube_fr",
+                    "Aube (French)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("fr", "fra", "French")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-lerche_de",
+                    "Lerche (German)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("de", "deu", "German")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-veter_ru",
+                    "Veter (Russian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ru", "rus", "Russian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-rugiada_it",
+                    "Rugiada (Italian)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("it", "ita", "Italian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-albor_es",
+                    "Albor (Spanish)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("es", "spa", "Spanish")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-farol_pt",
+                    "Farol (Portuguese)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("pt", "por", "Portuguese")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-naseem_ar",
+                    "Naseem (Arabic)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ar", "ara", "Arabic")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-embun_id",
+                    "Embun (Indonesian)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("id", "ind", "Indonesian")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-may_vi",
+                    "Mây (Vietnamese)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("vi", "vie", "Vietnamese")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-bayu_ms",
+                    "Bayu (Malay)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("ms", "msa", "Malay")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-sailom_th",
+                    "Sailom (Thai)",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("th", "tha", "Thai")],
+                ),
+                voice(
+                    "qwen-audio-3.1-tts-flash-hiraya_tl",
+                    "Hiraya (Filipino (Tagalog))",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("tl", "tgl", "Filipino (Tagalog)")],
+                ),
+            ]);
+            // CosyVoice v3 benchmark voices — REQUIRE modelId:
+            // cosyvoice-v3-flash (bare long* names do not infer).
+            v.extend([
+                voice(
+                    "longanyang",
+                    "Long Anyang",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "longanhuan_v3",
+                    "Long Anhuan (V3)",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "longhuhu_v3",
+                    "Long Huhu",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "longwan_v3",
+                    "Long Wan",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "longcheng_v3",
+                    "Long Cheng",
+                    Gender::Male,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+                voice(
+                    "loongbella_v3",
+                    "Bella 3.0",
+                    Gender::Female,
+                    "qwen",
+                    vec![lang("zh-CN", "zho", "Chinese (Simplified)"), en_us()],
+                ),
+            ]);
+            Some(v)
         }
         "openai" => Some(vec![
             voice(
