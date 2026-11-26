@@ -188,8 +188,20 @@ the `volume` credential if needed; the runtime's own voice registry
 makes the same trade. `device` selects the GGML backend
 (`"CUDA0"`, `"Vulkan0"`, `"MTL0"`, `"CPU"`); omit it for the
 runtime's best-available default. `numSteps` trades MaskGIT quality
-for speed (default 32; 16 is ~2× faster with some quality loss —
-listen before shipping it to users).
+for speed: 16 is ~2× faster than the default 32 and passed a
+listening A/B (same text/seed/reference) — recommended for CPU-only
+deployments; 32 stays the default where quality edges out latency.
+
+Streaming: with an `on_audio` callback, chunks are converted and
+delivered as the runtime emits them. Short text (duration prior
+below ~30 s) keeps the tight duration estimate and arrives in a
+final end-burst of post-processing segments (single-shot
+generation — no progressivity for short utterances, by design);
+longer text switches to the runtime's chunked long-form pipeline
+(progressive chunks, cross-fade, consistent speaker — first audio
+partway through synthesis, at a ~40% CPU premium over single-shot).
+`stop()` mid-stream truncates the utterance — the delivered audio
+stands and `speak` returns `Ok`.
 
 ### floravox
 

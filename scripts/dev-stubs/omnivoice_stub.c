@@ -26,7 +26,8 @@ typedef struct {
     int mg_num_step; float mg_guidance_scale, mg_t_shift, mg_layer_penalty_factor, mg_position_temperature, mg_class_temperature;
     unsigned long long mg_seed; const int *ref_audio_tokens; int ref_T; const float *ref_audio_24k;
     int ref_n_samples; const char *ref_text; const char *dump_dir;
-    void *cancel; void *cancel_user_data; void *on_chunk; void *on_chunk_user_data; unsigned char postproc;
+    void *cancel; void *cancel_user_data;
+    _Bool (*on_chunk)(const float *, int, void *); void *on_chunk_user_data; unsigned char postproc;
 } ov_tts_params;
 
 static const char *LANGS[] = {"en", "english", "fr", "de", "es", "pt", "zh", "nl", "pl", "hi", "arb"};
@@ -72,6 +73,25 @@ int ov_synthesize(ov_context *ctx, const ov_tts_params *params, ov_audio *out) {
     int n = 24000;
     float *buf = malloc((size_t)n * sizeof(float));
     for (int i = 0; i < n; i++) buf[i] = 0.0f;
+
+    // Streaming mode (issue #151 P5): on_chunk registered -> the real
+    // runtime emits through the callback and leaves `out` unused.
+    // Emit in 4 x 0.25 s chunks; a callback returning false aborts
+    // (OV_STATUS_CANCELLED), matching the runtime's contract.
+    if (params->on_chunk) {
+        int chunk = 6000;
+        for (int off = 0; off < n; off += chunk) {
+            int len = (off + chunk <= n) ? chunk : n - off;
+            if (!params->on_chunk(buf + off, len, params->on_chunk_user_data)) {
+                free(buf);
+                snprintf(last_err, sizeof last_err, "ov_synthesize: cancelled by chunk callback");
+                return -5;
+            }
+        }
+        free(buf);
+        last_err[0] = 0;
+        return 0;
+    }
     out->samples = buf; out->n_samples = n; out->sample_rate = 24000; out->channels = 1;
     last_err[0] = 0;
     return 0;
