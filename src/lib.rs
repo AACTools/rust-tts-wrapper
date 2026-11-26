@@ -58,6 +58,8 @@ pub mod boundaries;
 pub mod omnivoice_local_engine;
 #[cfg(feature = "omnivoice-local")]
 pub mod omnivoice_local_support;
+#[cfg(feature = "omnivoice-local")]
+pub mod omnivoice_stream;
 #[cfg(feature = "ssml-expand")]
 pub mod ssml_expand;
 

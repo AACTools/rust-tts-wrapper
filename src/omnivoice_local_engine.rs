@@ -22,11 +22,18 @@
 //! bit-identical to the raw-samples path the runtime documents.
 //!
 //! # Streaming
-//! **Not yet implemented.** The C ABI exposes `on_chunk` but this engine
-//! currently uses the buffered path: the full audio is synthesised, then
-//! delivered through `on_audio` in ~150 ms chunks. Streaming requires a
-//! trampoline for the C callback (the `on_chunk_user_data` field is
-//! available); tracked as a follow-up.
+//! Implemented (issue #151 P5). When the caller registers `on_audio`,
+//! synthesis rides the runtime's `on_chunk` callback: each chunk is
+//! converted to PCM16 and delivered as it is produced (the
+//! `omnivoice_stream` trampoline). Long text (duration prior above
+//! ~30 s, the runtime's chunk threshold) drops `T_override` so the
+//! runtime's chunked long-form pipeline runs — progressive chunks
+//! with cross-fade and speaker consistency; short text keeps the
+//! tight duration prior (the clone-quality knob) and arrives as one
+//! final chunk. `stop()` mid-stream truncates the utterance: the
+//! already-delivered audio stands and `speak` returns `Ok` (the
+//! qwen3-local precedent). Without `on_audio` the buffered path is
+//! unchanged (full audio, then ~150 ms chunks).
 //!
 //! # SSML
 //! OmniVoice has no SSML parser. Input matching `<speak>` is
@@ -49,7 +56,8 @@ use crate::omnivoice_local_support::{
     bcp47_region_to_instruct, bcp47_to_omnivoice_lang, estimate_duration_secs, load_wav_24k_mono,
     omnivoice_language_codes, ov_audio, ov_audio_free, ov_context, ov_duration_sec_to_tokens,
     ov_free, ov_init, ov_init_default_params, ov_init_params, ov_last_error, ov_synthesize,
-    ov_tts_default_params, ov_tts_params, OmniVoiceError, OvVoiceRef, OV_ABI_VERSION, OV_STATUS_OK,
+    ov_tts_default_params, ov_tts_params, OmniVoiceError, OvVoiceRef, OV_ABI_VERSION,
+    OV_STATUS_CANCELLED, OV_STATUS_OK,
 };
 use crate::types::{Gender, TtsError, TtsResult, Voice};
 use std::ffi::CString;
@@ -60,6 +68,11 @@ static OV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 fn ov_lock() -> &'static Mutex<()> {
     OV_LOCK.get_or_init(|| Mutex::new(()))
 }
+
+/// Above this estimated duration, streaming calls drop `T_override`
+/// and let the runtime run its chunked long-form pipeline. Mirrors
+/// the runtime's default `chunk_threshold_sec` (30 s).
+const LONG_FORM_THRESHOLD_SECS: f32 = 30.0;
 
 /// Offline OmniVoice engine over the omnivoice.cpp C ABI: 646
 /// languages, voice-design instructs, zero-shot cloning from a
@@ -273,6 +286,7 @@ impl OmniVoiceLocalEngine {
         lang_override: Option<&str>,
         rate: f32,
         instruct_override: Option<&str>,
+        mut stream: Option<&mut crate::omnivoice_stream::OvStreamState<'_>>,
     ) -> Result<Vec<f32>, OmniVoiceError> {
         let _guard = ov_lock().lock().unwrap_or_else(PoisonError::into_inner);
         // Note: reset-after-stop race — a stop() arriving just before this
@@ -302,10 +316,27 @@ impl OmniVoiceLocalEngine {
         // critical clone-quality knob. Convert to frame count via the
         // runtime's own sec→tokens helper (handles codec hop size).
         let duration = self.target_duration(text, rate);
-        let t_override = unsafe { ov_duration_sec_to_tokens(self.ctx, duration) };
-        if t_override <= 0 {
-            return Err(OmniVoiceError("duration→tokens conversion failed".into()));
-        }
+        // Streaming + long text: drop T_override so the runtime's
+        // chunked long-form pipeline engages (progressive chunks,
+        // cross-fade, speaker consistency — the upstream reference
+        // behavior for long input). Buffered calls and short text
+        // keep the tight prior: without it the estimator over-allocates
+        // and clone output bleeds reference content. An explicit
+        // `duration_override` always wins (the user asked for it).
+        // Threshold mirrors the runtime's default chunk_threshold_sec
+        // (30 s) so our rule and its internal rule agree.
+        let long_form = stream.is_some()
+            && self.params.duration_override.is_none()
+            && duration > LONG_FORM_THRESHOLD_SECS;
+        let t_override = if long_form {
+            0
+        } else {
+            let t = unsafe { ov_duration_sec_to_tokens(self.ctx, duration) };
+            if t <= 0 {
+                return Err(OmniVoiceError("duration→tokens conversion failed".into()));
+            }
+            t
+        };
 
         let (tokens_ptr, ref_t, ref_text_c) = match (&self.voice_ref, &self.ref_text) {
             (Some(voice), Some(text)) => {
@@ -324,6 +355,18 @@ impl OmniVoiceLocalEngine {
             params.lang = lang_c.as_ptr();
             params.instruct = instruct_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
             params.T_override = t_override;
+            // Long-form streaming: our prior above the threshold is the
+            // DECISION; zeroing the runtime's own threshold is the
+            // MECHANISM. Without this the runtime re-tests its own
+            // (estimator-based) T_total against chunk_threshold_sec and
+            // keeps borderline texts single-shot — observed live: a
+            // ~35 s-prior text chunked zero times, all chunks arriving
+            // in one end-burst. threshold 0 + T_override 0 ⇒ always
+            // chunked (no_chunk requires T_override > 0 OR
+            // chunk_duration <= 0 OR T_total <= threshold).
+            if long_form {
+                params.chunk_threshold_sec = 0.0;
+            }
             params.mg_num_step = self.params.num_steps;
             params.mg_seed = self.params.seed;
             // Pre-encoded reference codes (extracted once at
@@ -335,6 +378,15 @@ impl OmniVoiceLocalEngine {
             // Cooperative cancellation
             params.cancel = Some(Self::cancel_trampoline);
             params.cancel_user_data = &raw const self.cancel_requested as *mut std::ffi::c_void;
+            // SAFETY: `stream` borrows state living on speak()'s stack
+            // for the whole ov_synthesize call; the runtime invokes the
+            // callback synchronously on this thread and never stores
+            // the pointer beyond the call.
+            if let Some(state) = stream.as_deref_mut() {
+                let state_ptr: *mut crate::omnivoice_stream::OvStreamState = state;
+                params.on_chunk = Some(crate::omnivoice_stream::ov_chunk_trampoline);
+                params.on_chunk_user_data = state_ptr.cast::<std::ffi::c_void>();
+            }
         }
 
         let mut audio = ov_audio {
@@ -345,6 +397,14 @@ impl OmniVoiceLocalEngine {
         };
 
         let status = unsafe { ov_synthesize(self.ctx, &raw const params, &raw mut audio) };
+        // Streaming + user stop: a truncated utterance is a success —
+        // the already-delivered chunks stand (qwen3-local precedent).
+        if status == OV_STATUS_CANCELLED && stream.is_some() {
+            // `out` is unused in streaming mode; the zeroed free is a
+            // documented no-op, kept for ownership clarity.
+            unsafe { ov_audio_free(&raw mut audio) };
+            return Ok(Vec::new());
+        }
         if status != OV_STATUS_OK {
             let detail = Self::last_error();
             // GH #64: a language the runtime rejects must not silence
@@ -368,8 +428,12 @@ impl OmniVoiceLocalEngine {
                 params.lang = std::ptr::null();
                 let retry_status =
                     unsafe { ov_synthesize(self.ctx, &raw const params, &raw mut audio) };
+                if retry_status == OV_STATUS_CANCELLED && stream.is_some() {
+                    unsafe { ov_audio_free(&raw mut audio) };
+                    return Ok(Vec::new());
+                }
                 if retry_status == OV_STATUS_OK {
-                    return Self::take_audio(audio);
+                    return Self::finish_streaming_or_buffered(stream, audio);
                 }
                 let retry_detail = Self::last_error();
                 return Err(OmniVoiceError(format!(
@@ -381,6 +445,31 @@ impl OmniVoiceLocalEngine {
             )));
         }
 
+        Self::finish_streaming_or_buffered(stream, audio)
+    }
+
+    /// Post-synthesis handling shared by the first attempt and the
+    /// language-fallback retry: streaming mode validates delivery
+    /// (the runtime leaves `out` unused when a chunk callback is
+    /// registered); buffered mode copies out and frees.
+    fn finish_streaming_or_buffered(
+        stream: Option<&mut crate::omnivoice_stream::OvStreamState<'_>>,
+        mut audio: ov_audio,
+    ) -> Result<Vec<f32>, OmniVoiceError> {
+        if let Some(state) = stream {
+            if state.total_samples == 0 {
+                // Nobody cancelled and nothing arrived — the pipeline
+                // produced no audio (qwen3-local mirror).
+                unsafe { ov_audio_free(&raw mut audio) };
+                return Err(OmniVoiceError(
+                    "streaming synthesis produced no audio".into(),
+                ));
+            }
+            // `out` is unused in streaming mode; the free is a
+            // documented no-op on the zeroed struct.
+            unsafe { ov_audio_free(&raw mut audio) };
+            return Ok(Vec::new());
+        }
         Self::take_audio(audio)
     }
 }
@@ -449,8 +538,39 @@ impl TtsEngine for OmniVoiceLocalEngine {
         let lang_opt = lang_override.as_deref().filter(|s| !s.is_empty());
         let accent_instruct = voice_sel.and_then(bcp47_region_to_instruct);
 
+        // Streaming route (#151 P5): with an on_audio sink, chunks are
+        // converted + delivered as the runtime emits them.
+        if let Some(cb) = on_audio {
+            let gain = volume.clamp(0.0, 4.0);
+            let mut state =
+                crate::omnivoice_stream::OvStreamState::new(cb, gain, Some(&self.cancel_requested));
+            self.synthesize_ov(
+                &plain,
+                lang_opt,
+                rate,
+                accent_instruct.as_deref(),
+                Some(&mut state),
+            )
+            .map_err(|e| TtsError(format!("omnivoice-local: {e}")))?;
+            // Duration-anchored word boundaries over the delivered
+            // audio (estimated, as in the buffered path).
+            if let Some(bcb) = on_boundary {
+                let total_secs = state.total_samples as f32 / 24_000.0;
+                if total_secs > 0.0 {
+                    let boundaries = crate::engine::weighted_boundaries_scaled(&plain, total_secs);
+                    for b in &boundaries {
+                        let start = b.offset as f32 / 1000.0;
+                        let end = (b.offset + b.duration) as f32 / 1000.0;
+                        bcb(&b.text, start, end, -1, -1, true);
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Buffered route (no sink): full audio, then conversion.
         let pcm_f32 = self
-            .synthesize_ov(&plain, lang_opt, rate, accent_instruct.as_deref())
+            .synthesize_ov(&plain, lang_opt, rate, accent_instruct.as_deref(), None)
             .map_err(|e| TtsError(format!("omnivoice-local: {e}")))?;
 
         // Volume: linear PCM gain (clamped)
@@ -461,18 +581,11 @@ impl TtsEngine for OmniVoiceLocalEngine {
             pcm_f32
         };
 
-        // Convert to PCM16 bytes for delivery (~150 ms chunks)
-        let pcm16: Vec<i16> = pcm_f32
-            .iter()
-            .map(|s| (s.clamp(-1.0, 1.0) * 32_767.0) as i16)
-            .collect();
-        let bytes: Vec<u8> = pcm16.iter().flat_map(|s| s.to_le_bytes()).collect();
-
-        if let Some(cb) = on_audio {
-            for chunk in bytes.chunks(7200) {
-                cb(chunk);
-            }
-        }
+        // `on_audio` is always None on this route — every `Some` sink
+        // took the streaming branch above and returned — so no PCM16
+        // conversion or chunked delivery happens here (loop-review
+        // finding: the old conversion + 7200-byte loop was unreachable
+        // dead code).
 
         // Duration-anchored word boundaries (syllable-weighted)
         if let Some(cb) = on_boundary {
@@ -740,6 +853,106 @@ mod voice_ref_tests {
             return;
         };
         assert!(engine.set_reference_samples(&[], "text").is_err());
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    /// Env-gated engine (stub or real GGUFs) — same pattern as above.
+    fn maybe_engine() -> Option<OmniVoiceLocalEngine> {
+        let model = std::env::var("OMNIVOICE_TEST_MODEL").ok()?;
+        let codec = std::env::var("OMNIVOICE_TEST_CODEC").ok()?;
+        OmniVoiceLocalEngine::new(OmniVoiceLocalParams {
+            model_path: model,
+            codec_path: codec,
+            ..Default::default()
+        })
+        .ok()
+    }
+
+    /// Issue #151 P5: with an on_audio sink, chunks arrive through the
+    /// C `on_chunk` trampoline (the stub emits 4 x 0.25 s = 1 s of
+    /// 24 kHz silence) and word boundaries fire over the delivered
+    /// audio. The buffered path must NOT run (no full-buffer PCM).
+    #[test]
+    fn streaming_delivers_chunks_and_boundaries() {
+        let Some(engine) = maybe_engine() else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
+        let chunks = Cell::new(0usize);
+        let bytes = Cell::new(0usize);
+        let mut deliver = |b: &[u8]| {
+            chunks.set(chunks.get() + 1);
+            bytes.set(bytes.get() + b.len());
+        };
+        let words = Cell::new(0usize);
+        let mut on_word = |_t: &str, _s: f32, _e: f32, _o: i32, _l: i32, _est: bool| {
+            words.set(words.get() + 1);
+        };
+        engine
+            .speak(
+                "hello streaming world",
+                None,
+                1.0,
+                1.0,
+                1.0,
+                Some(&mut deliver),
+                Some(&mut on_word),
+                None,
+            )
+            .expect("streaming speak");
+        assert!(chunks.get() >= 1, "chunks delivered: {}", chunks.get());
+        // stub: exactly 4 chunks x 6000 samples x 2 bytes — asserting
+        // the COUNT makes this test self-sufficient against a
+        // regression to buffered delivery (which would emit
+        // 7 x 7200-byte chunks; loop-review finding 3)
+        assert_eq!(chunks.get(), 4, "4 x 0.25 s streamed chunks");
+        assert_eq!(bytes.get(), 48_000, "1 s of 24 kHz PCM16");
+        assert!(words.get() >= 2, "boundaries over delivered audio");
+    }
+
+    /// A `stop()` mid-stream truncates the utterance: speak returns
+    /// Ok and the chunks delivered before the stop stand (the
+    /// qwen3-local precedent; the stub aborts on the callback's
+    /// false, returning OV_STATUS_CANCELLED).
+    #[test]
+    fn stop_mid_stream_truncates_ok() {
+        let Some(engine) = maybe_engine() else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
+        let chunks = Cell::new(0usize);
+        // The sink shares an immutable borrow of the engine's stop
+        // flag with speak's `&self` — set it after the first chunk.
+        let flag = &engine.cancel_requested;
+        let mut deliver = |_b: &[u8]| {
+            chunks.set(chunks.get() + 1);
+            if chunks.get() == 1 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        };
+        let result = engine.speak("hello", None, 1.0, 1.0, 1.0, Some(&mut deliver), None, None);
+        assert!(result.is_ok(), "truncated stream is Ok: {result:?}");
+        // Chunk 1 delivered, chunk 2's trampoline check aborts.
+        assert_eq!(chunks.get(), 1, "delivered until the stop");
+    }
+
+    /// No on_audio sink: the buffered path is unchanged (full audio
+    /// in one delivery).
+    #[test]
+    fn buffered_path_without_sink() {
+        let Some(engine) = maybe_engine() else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
+        // No sink: speak must still succeed via the buffered route.
+        assert!(engine
+            .speak("hello buffered", None, 1.0, 1.0, 1.0, None, None, None)
+            .is_ok());
     }
 }
 

@@ -22,6 +22,20 @@ Synthesis returns ~1 s of silence; `ov_synthesize` answers
 `unknown language '<lang>'` for anything outside the table (drives the
 auto-detect fallback test).
 
+Contract guards and streaming (issue #151):
+
+- `ov_synthesize` **rejects** the raw `ref_audio_24k` path and
+  mismatched `ref_T`/`ref_audio_tokens` pairs — the engine must send
+  pre-encoded reference tokens only, and these guards make a wiring
+  regression fail loudly instead of silently.
+- with `on_chunk` registered, the ~1 s of silence is emitted as
+  4 × 0.25 s chunks through the callback (the real runtime's
+  streaming mode) and `out` stays empty; a callback returning false
+  aborts with `OV_STATUS_CANCELLED` (-5) — the engine's
+  stop-mid-stream truncation tests ride exactly that.
+- `ov_extract_voice_ref` fabricates 8-codebook RVQ codes (one frame
+  per 960-sample hop); `ov_voice_ref_free` releases them.
+
 ```bash
 gcc -shared -fPIC -o build/libomnivoice.so omnivoice_stub.c
 cd ../../..   # repo root
