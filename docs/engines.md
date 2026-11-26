@@ -79,7 +79,7 @@ piper-en_US-john-medium` resolves `C:\models\piper-en_US-john-medium`).
 Omit `modelPath` to use the default install dir
 (`~/.rust-tts-wrapper/sherpaonnx`, relocatable via `TTS_MODELS_DIR`).
 | qwen3-local | `modelsDir` (required), `threads`, `temperature`, `topK`, `maxTokens` |
-| omnivoice-local | `modelPath`, `codecPath` (required GGUFs), `numSteps`, `seed`, `instruct`, `device`, `language` |
+| omnivoice-local | `modelPath`, `codecPath` (required GGUFs), `numSteps`, `seed`, `instruct`, `device`, `language`, `wordAligner` (opt-in, `word-align` feature) |
 | floravox | `modelsDir`, `modelId`, `misaki`, `chars`, `speaker` |
 | pocket | `bundleDir`, `reference` |
 
@@ -238,6 +238,24 @@ longer text switches to the runtime's chunked long-form pipeline
 partway through synthesis, at a ~40% CPU premium over single-shot).
 `stop()` mid-stream truncates the utterance — the delivered audio
 stands and `speak` returns `Ok`.
+
+### Word alignment for boundaries (`word-align` feature, #109)
+
+Estimate-only local engines (`omnivoice-local`, `qwen3-local`) can
+fire **real** word boundaries measured from the synthesized audio:
+add the `word-align` feature and a `wordAligner` credential naming
+the MMS CTC aligner ONNX (see `scripts/aligner/README.md` for the
+conversion recipe; the MMS weights are **CC-BY-NC 4.0** — an optional
+artifact, nothing embeds it, commercial builds simply keep the
+estimated-boundary path). The middleware applies the hybrid rule:
+engine-native timings win when present; otherwise the audio is
+CTC-aligned against the spoken text and `estimated=false` boundaries
+fire; alignment failure falls back to the estimates. Latin-script
+languages only in this version (uroman for non-Latin scripts is a
+follow-up). Note: the middleware accumulates the synthesized audio
+(~112 KB/s) when a boundary sink is attached — bounded by the
+utterance length.
+
 
 ### floravox
 

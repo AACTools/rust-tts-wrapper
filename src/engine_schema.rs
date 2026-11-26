@@ -396,9 +396,11 @@ fn catalogue_entry(id: &str) -> Option<(Vec<SetupField>, EngineCapabilityInfo)> 
                     .help("Voice-design attributes, e.g. \"female, child, british accent\""),
                 SetupField::text("language", "Language")
                     .help("ISO code or name; empty = auto-detect"),
+                SetupField::file("wordAligner", "MMS aligner ONNX")
+                    .help("Optional (word-align feature): real word boundaries via CTC forced alignment; see scripts/aligner/README.md"),
             ],
             EngineCapabilityInfo::new(true, false, true, true, false, false, false, true).note(
-                "Pitch is ignored; volume is PCM gain; timings are estimates; \
+                "Pitch is ignored; volume is PCM gain; word timings are real when wordAligner is set (CTC forced alignment), estimated otherwise; \
                       the advertised language list comes from the runtime's own table (GH #64)",
             ),
         )),

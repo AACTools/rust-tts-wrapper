@@ -162,6 +162,11 @@ pub fn create_engine(
     credentials_json: &str,
 ) -> Result<Arc<dyn TtsEngine>, EngineSetupError> {
     let engine = create_engine_inner(engine_id, credentials_json)?;
+    // #109: estimate-only engines get the word-align boundary
+    // middleware when a `wordAligner` model is configured (feature
+    // `word-align`). Native/mixed-tier engines are never wrapped —
+    // see word_aligner_mw's module docs.
+    let engine = maybe_wrap_aligner(engine, engine_id, credentials_json);
     if engine.engine_id() == "sherpaonnx" {
         // self-managed: the sherpa engine applies overrides at its
         // own text-prep and G2P seams (mode-aware)
@@ -477,7 +482,8 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
         name: "OmniVoice local (600+ languages, offline)".into(),
         needs_credentials: true,
         credential_keys_json:
-            r#"["modelPath","codecPath","numSteps","seed","instruct","language"]"#.into(),
+            r#"["modelPath","codecPath","numSteps","seed","instruct","language","wordAligner"]"#
+                .into(),
     });
 
     #[cfg(feature = "pocket-timing")]
@@ -555,6 +561,60 @@ pub fn engine_list() -> Vec<EngineDescriptor> {
     }
 
     engines
+}
+
+/// The estimate-only engines eligible for the aligner middleware, with
+/// their audio sample rates (#109). Mixed-tier engines (sherpa: some
+/// voices native; floravox: per-voice tiers) stay unwrapped — delaying
+/// their native events would be a regression.
+#[cfg(feature = "word-align")]
+const ALIGNER_ELIGIBLE: &[(&str, u32)] = &[("omnivoice-local", 24_000), ("qwen3-local", 24_000)];
+
+/// Wrap an estimate-only engine in the aligner middleware when the
+/// `wordAligner` credential names a loadable ONNX model. Any failure
+/// (missing credential, bad path) leaves the engine unwrapped — the
+/// boundary estimates are the status quo, not an error.
+#[cfg(feature = "word-align")]
+fn maybe_wrap_aligner(
+    engine: Arc<dyn TtsEngine>,
+    engine_id: &str,
+    credentials_json: &str,
+) -> Arc<dyn TtsEngine> {
+    use crate::word_aligner_mw::AligningEngine;
+    use crate::word_aligner_rt::WordAligner;
+    use std::path::PathBuf;
+
+    let Some((_id, rate)) = ALIGNER_ELIGIBLE.iter().find(|(id, _)| *id == engine_id) else {
+        return engine;
+    };
+    let creds = parse_credentials(credentials_json);
+    let Some(model) = creds.get("wordAligner").filter(|m| !m.is_empty()) else {
+        return engine;
+    };
+    match WordAligner::load(&PathBuf::from(model)) {
+        Ok(aligner) => {
+            eprintln!("word-align: {engine_id} boundaries via CTC forced alignment ({model})");
+            Arc::new(AligningEngine::new(engine, aligner, *rate))
+        }
+        Err(e) => {
+            eprintln!(
+                "word-align: could not load '{model}' for {engine_id} ({e}); \
+                 keeping proportional boundary estimates"
+            );
+            engine
+        }
+    }
+}
+
+/// Without the feature the middleware is compiled out: the credential
+/// is ignored and the engine passes through.
+#[cfg(not(feature = "word-align"))]
+fn maybe_wrap_aligner(
+    engine: Arc<dyn TtsEngine>,
+    _engine_id: &str,
+    _credentials_json: &str,
+) -> Arc<dyn TtsEngine> {
+    engine
 }
 
 #[cfg(test)]

@@ -55,6 +55,8 @@ mod bcp_audit;
 pub mod boundaries;
 pub mod word_aligner;
 #[cfg(feature = "word-align")]
+pub mod word_aligner_mw;
+#[cfg(feature = "word-align")]
 pub mod word_aligner_rt;
 
 #[cfg(feature = "omnivoice-local")]
