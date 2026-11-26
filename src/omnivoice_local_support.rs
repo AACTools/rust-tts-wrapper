@@ -74,6 +74,23 @@ pub struct ov_audio {
     pub channels: c_int,
 }
 
+/// omnivoice.h v4: pre-encoded voice-reference codes — the in-process
+/// equivalent of an `omnivoice-codec` CLI encode (a `.rvq` file).
+/// `ref_codes` is `[num_codebooks, ref_T]` row-major (T fastest),
+/// malloc'd by `ov_extract_voice_ref`, released by `ov_voice_ref_free`,
+/// and feeds straight back through `ov_tts_params::ref_audio_tokens` /
+/// `ref_T` to skip the codec encode on every synthesis.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ov_voice_ref {
+    /// RVQ code matrix, `[num_codebooks][ref_T]` row-major.
+    pub ref_codes: *mut i32,
+    /// Reference length in codec frames (25 fps).
+    pub ref_T: c_int,
+    /// Codebook count (8 for the Higgs Audio v2 codec).
+    pub num_codebooks: c_int,
+}
+
 /// omnivoice.h v4: 40 bytes on x86-64. `use_fa` / `clamp_fp16` are
 /// packed bools at offsets 24/25; `device` selects the ggml backend.
 /// `ov_init` parameters (start from `ov_init_default_params`).
@@ -197,6 +214,18 @@ macro_rules! omnivoice_ffi {
             pub fn ov_language_name(index: c_int) -> *const c_char;
             /// Convert a duration in seconds to codec frames.
             pub fn ov_duration_sec_to_tokens(ctx: *const ov_context, seconds: f32) -> c_int;
+            /// Extract reusable voice-clone codes from 24 kHz mono f32
+            /// samples (applies the same preprocessing as the `--ref-wav`
+            /// path, so the codes are bit-identical to it).
+            pub fn ov_extract_voice_ref(
+                ctx: *const ov_context,
+                ref_audio_24k: *const f32,
+                ref_n_samples: c_int,
+                out: *mut ov_voice_ref,
+            ) -> ov_status;
+            /// Release the code buffer owned by an `ov_voice_ref`
+            /// (safe on a zero-initialised struct).
+            pub fn ov_voice_ref_free(r: *mut ov_voice_ref);
         }
     };
 }
@@ -209,11 +238,13 @@ omnivoice_ffi!();
 // fields (e.g. writing `n_threads` over `use_fa` + `clamp_fp16`).
 #[cfg(target_arch = "x86_64")]
 mod layout_asserts {
-    use super::{ov_audio, ov_init_params, ov_tts_params};
+    use super::{ov_audio, ov_init_params, ov_tts_params, ov_voice_ref};
     const _: () = assert!(std::mem::size_of::<ov_audio>() == 24);
     const _: () = assert!(std::mem::size_of::<ov_init_params>() == 40);
     // ov_tts_params: 27 fields, ABI v4
     const _: () = assert!(std::mem::size_of::<ov_tts_params>() == 168);
+    // ov_voice_ref: ptr + 2 ints, ABI v4
+    const _: () = assert!(std::mem::size_of::<ov_voice_ref>() == 16);
 }
 
 // ── Safe wrappers ────────────────────────────────────────────────────
@@ -225,6 +256,88 @@ pub struct OmniVoiceError(pub String);
 impl fmt::Display for OmniVoiceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+/// Thread-local last-error detail from the runtime (empty when never
+/// set or after success).
+pub(crate) fn last_error_string() -> String {
+    unsafe {
+        let ptr = ov_last_error();
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }
+    }
+}
+
+/// Owned voice-reference codes extracted once per voice via
+/// [`ov_extract_voice_ref`] (issue #151 P2). Reusing them through
+/// `ov_tts_params.ref_audio_tokens` skips the codec encode
+/// (HuBERT + DAC encoder + RVQ) on every synthesis — previously the
+/// raw 24 kHz samples were re-encoded on each call.
+///
+/// The codes are bit-identical to the `--ref-wav` path because
+/// `ov_extract_voice_ref` applies the same preprocessing (RMS
+/// auto-gain, silence trim, hop truncation).
+pub(crate) struct OvVoiceRef {
+    raw: ov_voice_ref,
+}
+
+impl OvVoiceRef {
+    /// Extract codes from 24 kHz mono f32 samples. One-time cost per
+    /// voice; requires a codec-loaded context (any live engine).
+    ///
+    /// # Errors
+    /// Returns [`OmniVoiceError`] with the runtime status and
+    /// `ov_last_error` detail on failure.
+    pub(crate) fn extract(ctx: *const ov_context, samples: &[f32]) -> Result<Self, OmniVoiceError> {
+        if samples.is_empty() {
+            return Err(OmniVoiceError("reference samples are empty".into()));
+        }
+        let mut raw: ov_voice_ref = unsafe { std::mem::zeroed() };
+        // SAFETY: ctx comes from a live engine; samples/len are a valid
+        // borrow; raw is a zero-initialised out-struct per the header.
+        let status = unsafe {
+            ov_extract_voice_ref(ctx, samples.as_ptr(), samples.len() as c_int, &raw mut raw)
+        };
+        if status != OV_STATUS_OK || raw.ref_codes.is_null() {
+            let detail = last_error_string();
+            // Defense-in-depth: a non-conformant runtime could set the
+            // pointer before failing — free it rather than leak (the
+            // header promises failure leaves `out` empty, and the free
+            // is documented safe on any struct, including zeroed).
+            unsafe { ov_voice_ref_free(&raw mut raw) };
+            return Err(OmniVoiceError(format!(
+                "ov_extract_voice_ref failed (status {status}): {detail}"
+            )));
+        }
+        Ok(Self { raw })
+    }
+
+    /// Code slice, `[num_codebooks][ref_T]` row-major (T fastest).
+    #[must_use]
+    pub(crate) fn codes(&self) -> &[i32] {
+        let len =
+            (self.raw.num_codebooks.max(0) as usize).saturating_mul(self.raw.ref_T.max(0) as usize);
+        // SAFETY: ref_codes owns `num_codebooks * ref_T` int32 values
+        // for the lifetime of self (freed only in Drop).
+        unsafe { std::slice::from_raw_parts(self.raw.ref_codes, len) }
+    }
+
+    /// Reference length in codec frames (25 fps).
+    #[must_use]
+    pub(crate) fn ref_t(&self) -> c_int {
+        self.raw.ref_T
+    }
+}
+
+impl Drop for OvVoiceRef {
+    fn drop(&mut self) {
+        // SAFETY: header documents ov_voice_ref_free as safe on any
+        // (including zeroed) struct; it only frees ref_codes.
+        unsafe { ov_voice_ref_free(&raw mut self.raw) };
     }
 }
 

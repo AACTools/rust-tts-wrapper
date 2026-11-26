@@ -79,7 +79,7 @@ piper-en_US-john-medium` resolves `C:\models\piper-en_US-john-medium`).
 Omit `modelPath` to use the default install dir
 (`~/.rust-tts-wrapper/sherpaonnx`, relocatable via `TTS_MODELS_DIR`).
 | qwen3-local | `modelsDir` (required), `threads`, `temperature`, `topK`, `maxTokens` |
-| omnivoice-local | `modelPath`, `codecPath` (required GGUFs), `numSteps`, `seed`, `instruct`, `language` |
+| omnivoice-local | `modelPath`, `codecPath` (required GGUFs), `numSteps`, `seed`, `instruct`, `device`, `language` |
 | floravox | `modelsDir`, `modelId`, `misaki`, `chars`, `speaker` |
 | pocket | `bundleDir`, `reference` |
 
@@ -177,6 +177,19 @@ language the runtime rejects (e.g. a name outside its table) falls
 back to auto-detection with a warning instead of failing the
 utterance. `en-GB`-style input maps to base `en` with the region
 expressed as an accent instruct; `ar` maps to `arb` (standard Arabic).
+
+Cloning: the reference WAV is codec-encoded **once** at
+`set_reference` time; the RVQ codes are cached and reused for every
+synthesis (the *codes* are bit-identical to the raw-samples path, but
+the per-call codec encode is skipped). One audible trade: the codes
+path carries no reference loudness, so cloned output is
+peak-normalized (about 10 dB louder for a quiet reference) — trim with
+the `volume` credential if needed; the runtime's own voice registry
+makes the same trade. `device` selects the GGML backend
+(`"CUDA0"`, `"Vulkan0"`, `"MTL0"`, `"CPU"`); omit it for the
+runtime's best-available default. `numSteps` trades MaskGIT quality
+for speed (default 32; 16 is ~2× faster with some quality loss —
+listen before shipping it to users).
 
 ### floravox
 

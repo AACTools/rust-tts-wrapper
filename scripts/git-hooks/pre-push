@@ -26,6 +26,10 @@ COMBOS=(
     "cloning"
     "floravox"
     "pocket-timing"
+    "omnivoice-local"     # #151: links the dev stub (scripts/dev-stubs)
+                          # so the combo runs without a locally built
+                          # runtime — CI builds the real one; catching
+                          # clippy/test failures here saves the run
 )
 fail=0
 for combo in "${COMBOS[@]}"; do
@@ -35,6 +39,11 @@ for combo in "${COMBOS[@]}"; do
     else
         args="--no-default-features --features $combo"
         label="$combo"
+    fi
+    # The omnivoice-local combo needs OMNIVOICE_LIB at build time; the
+    # dev stub satisfies it without a real runtime build.
+    if [[ "$combo" == "omnivoice-local" ]]; then
+        export OMNIVOICE_LIB="$PWD/scripts/dev-stubs"
     fi
     if ! cargo clippy $args --all-targets -- -D warnings >/dev/null 2>&1; then
         echo "pre-push: clippy FAILED for [$label]" >&2
@@ -65,5 +74,16 @@ cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --
     || { echo "pre-push: sherpa-g2p test suite failed" >&2; exit 1; }
 cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --tests --quiet >/dev/null \
     || { echo "pre-push: sherpa-g2p integration suite failed" >&2; exit 1; }
+# omnivoice-local suite against the dev stub (engine + contract-guard
+# tests; live/ignored tests stay opt-in). The TEST_MODEL/CODEC exports
+# are load-bearing: without them the engine-level tests silently skip
+# (loop-review finding — the guards were inert in every automated gate).
+export OMNIVOICE_LIB="$PWD/scripts/dev-stubs"
+export OMNIVOICE_TEST_MODEL=/dev/null
+export OMNIVOICE_TEST_CODEC=/dev/null
+cargo test --no-default-features --features omnivoice-local --lib --quiet >/dev/null \
+    || { echo "pre-push: omnivoice-local test suite failed" >&2; exit 1; }
+cargo test --no-default-features --features omnivoice-local --tests --quiet >/dev/null \
+    || { echo "pre-push: omnivoice-local integration suite failed" >&2; exit 1; }
 
 exit 0

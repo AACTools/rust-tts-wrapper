@@ -57,6 +57,17 @@ int ov_synthesize(ov_context *ctx, const ov_tts_params *params, ov_audio *out) {
         snprintf(last_err, sizeof last_err, "ov_synthesize: unknown language '%s'", params->lang ? params->lang : "");
         return -1;
     }
+    // Contract guards (issue #151 P2): the engine sends pre-encoded
+    // reference tokens only — raw samples or a mismatched pair is a
+    // wiring bug the real runtime would silently accept.
+    if (params->ref_audio_24k) {
+        snprintf(last_err, sizeof last_err, "stub: raw ref_audio_24k must not be used (engine passes tokens)");
+        return -1;
+    }
+    if ((params->ref_T > 0) != (params->ref_audio_tokens != NULL)) {
+        snprintf(last_err, sizeof last_err, "stub: ref_T/ref_audio_tokens mismatch");
+        return -1;
+    }
     // ~1 second of 24 kHz silence.
     int n = 24000;
     float *buf = malloc((size_t)n * sizeof(float));
@@ -85,3 +96,29 @@ int ov_duration_sec_to_tokens(const ov_context *ctx, float seconds) {
     if (seconds <= 0) return -1;
     return (int)(seconds * 75.0f); // 25 fps tokens x3 (arbitrary stub)
 }
+
+// ── Voice-reference codes (ABI v4; issue #151 P2) ──────────────────
+typedef struct { int32_t *ref_codes; int ref_T; int num_codebooks; } ov_voice_ref;
+
+int ov_extract_voice_ref(const ov_context *ctx, const float *ref_audio_24k, int ref_n_samples, ov_voice_ref *out) {
+    if (!ctx || !ref_audio_24k || ref_n_samples <= 0 || !out) {
+        snprintf(last_err, sizeof last_err, "ov_extract_voice_ref: invalid params");
+        return -1;
+    }
+    // One frame per hop (960 samples @ 24 kHz = 25 fps), 8 codebooks.
+    int ref_T = ref_n_samples / 960;
+    if (ref_T <= 0) ref_T = 1;
+    out->ref_codes = calloc((size_t)8 * (size_t)ref_T, sizeof(int32_t));
+    out->ref_T = ref_T;
+    out->num_codebooks = 8;
+    last_err[0] = 0;
+    return 0;
+}
+
+void ov_voice_ref_free(ov_voice_ref *ref) {
+    if (ref) {
+        free(ref->ref_codes);
+        ref->ref_codes = NULL; ref->ref_T = 0; ref->num_codebooks = 0;
+    }
+}
+

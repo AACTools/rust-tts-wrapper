@@ -13,6 +13,14 @@
 //! prior (or `duration_override`), and couples `rate` into duration:
 //! `rate > 1.0` shortens the output.
 //!
+//! # Voice cloning: codes, not samples
+//! The reference is codec-encoded **once** (at `set_reference` /
+//! `set_reference_samples` time, via the runtime's
+//! `ov_extract_voice_ref`) and the RVQ codes are cached and reused for
+//! every synthesis — the per-call codec encode (HuBERT + DAC encoder +
+//! RVQ, several seconds of CPU per call) is skipped. The codes are
+//! bit-identical to the raw-samples path the runtime documents.
+//!
 //! # Streaming
 //! **Not yet implemented.** The C ABI exposes `on_chunk` but this engine
 //! currently uses the buffered path: the full audio is synthesised, then
@@ -41,7 +49,7 @@ use crate::omnivoice_local_support::{
     bcp47_region_to_instruct, bcp47_to_omnivoice_lang, estimate_duration_secs, load_wav_24k_mono,
     omnivoice_language_codes, ov_audio, ov_audio_free, ov_context, ov_duration_sec_to_tokens,
     ov_free, ov_init, ov_init_default_params, ov_init_params, ov_last_error, ov_synthesize,
-    ov_tts_default_params, ov_tts_params, OmniVoiceError, OV_ABI_VERSION, OV_STATUS_OK,
+    ov_tts_default_params, ov_tts_params, OmniVoiceError, OvVoiceRef, OV_ABI_VERSION, OV_STATUS_OK,
 };
 use crate::types::{Gender, TtsError, TtsResult, Voice};
 use std::ffi::CString;
@@ -60,8 +68,12 @@ fn ov_lock() -> &'static Mutex<()> {
 pub struct OmniVoiceLocalEngine {
     ctx: *mut ov_context,
     params: OmniVoiceLocalParams,
-    /// Cached reference audio (24 kHz mono f32) + transcript for cloning
-    ref_audio: Option<Vec<f32>>,
+    /// Cached voice-reference codes for cloning (extracted ONCE via
+    /// `ov_extract_voice_ref` at `set_reference*` time — the per-call
+    /// codec encode is skipped, issue #151 P2)
+    voice_ref: Option<OvVoiceRef>,
+    /// Transcript of the reference audio (still sent per call: it is
+    /// part of the model prompt, not the codec encode).
     ref_text: Option<String>,
     /// Cooperative cancellation flag (polled via ov_cancel_cb)
     cancel_requested: AtomicBool,
@@ -82,6 +94,10 @@ pub struct OmniVoiceLocalParams {
     /// Voice-design attribute string ("female, child, british accent");
     /// validated against the model's token vocabulary by the runtime
     pub instruct: Option<String>,
+    /// GGML backend device override ("CUDA0", "Vulkan0", "MTL0",
+    /// "CPU"); None = the runtime's best-available default (issue
+    /// #151 P4 — GPU machines get interactive RTF, ~RTX 5090 RTF 0.023)
+    pub device: Option<String>,
     /// Override the syllable-prior duration (seconds); None = auto
     pub duration_override: Option<f32>,
     /// Language name or ISO code ("" = auto-detect). Per-call override
@@ -97,6 +113,7 @@ impl Default for OmniVoiceLocalParams {
             num_steps: 32,
             seed: 42,
             instruct: None,
+            device: None,
             duration_override: None,
             language: String::new(),
         }
@@ -119,6 +136,15 @@ impl OmniVoiceLocalEngine {
             .map_err(|_| TtsError("omnivoice-local: model path contains null".into()))?;
         let codec_c = CString::new(params.codec_path.clone())
             .map_err(|_| TtsError("omnivoice-local: codec path contains null".into()))?;
+        // GGML backend device ("CUDA0" / "Vulkan0" / "MTL0" / "CPU");
+        // None = the runtime's default (best available). Issue #151 P4.
+        let device_c = params
+            .device
+            .as_deref()
+            .filter(|d| !d.is_empty())
+            .map(CString::new)
+            .transpose()
+            .map_err(|_| TtsError("omnivoice-local: device contains null".into()))?;
 
         let mut iparams: ov_init_params = unsafe { std::mem::zeroed() };
         unsafe {
@@ -126,6 +152,7 @@ impl OmniVoiceLocalEngine {
             iparams.abi_version = OV_ABI_VERSION;
             iparams.model_path = model_c.as_ptr();
             iparams.codec_path = codec_c.as_ptr();
+            iparams.device = device_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         }
 
         // Lock: the runtime may not be init-thread-safe
@@ -134,13 +161,19 @@ impl OmniVoiceLocalEngine {
         drop(guard);
 
         if ctx.is_null() {
-            return Err(TtsError("omnivoice-local: ov_init failed".into()));
+            // Surface the runtime's own diagnostic — with the device
+            // credential a typo'd backend ("cuda0") fails exactly here
+            // (loop-review finding: bare "ov_init failed" gave no hint).
+            let detail = crate::omnivoice_local_support::last_error_string();
+            return Err(TtsError(format!(
+                "omnivoice-local: ov_init failed: {detail}"
+            )));
         }
 
         Ok(Self {
             ctx,
             params,
-            ref_audio: None,
+            voice_ref: None,
             ref_text: None,
             cancel_requested: AtomicBool::new(false),
         })
@@ -150,8 +183,13 @@ impl OmniVoiceLocalEngine {
     /// WAV file (any sample rate; resampled to 24 kHz mono internally).
     /// `ref_text` is the transcript of the reference audio.
     ///
+    /// The reference is codec-encoded **once** here — the RVQ codes are
+    /// cached and reused for every synthesis (bit-identical to the
+    /// raw-samples path; the per-call codec encode is skipped).
+    ///
     /// # Errors
-    /// Returns error when the WAV file cannot be read or decoded.
+    /// Returns error when the WAV file cannot be read/decoded, or when
+    /// the runtime's code extraction fails.
     pub fn set_reference(&mut self, ref_wav_path: &str, ref_text: &str) -> TtsResult<()> {
         let samples = load_wav_24k_mono(ref_wav_path).ok_or_else(|| {
             TtsError(format!(
@@ -163,29 +201,38 @@ impl OmniVoiceLocalEngine {
                 "omnivoice-local: reference WAV is empty: {ref_wav_path}"
             )));
         }
-        self.ref_audio = Some(samples);
-        self.ref_text = Some(ref_text.to_string());
-        Ok(())
+        self.install_reference(&samples, ref_text)
     }
 
     /// Set the reference from pre-loaded 24 kHz mono f32 samples.
+    /// The codec encode happens once here; see [`Self::set_reference`].
     ///
     /// # Errors
-    /// Returns error when `samples` is empty.
+    /// Returns error when `samples` is empty or code extraction fails.
     pub fn set_reference_samples(&mut self, samples: &[f32], ref_text: &str) -> TtsResult<()> {
         if samples.is_empty() {
             return Err(TtsError(
                 "omnivoice-local: reference samples are empty".into(),
             ));
         }
-        self.ref_audio = Some(samples.to_vec());
+        self.install_reference(samples, ref_text)
+    }
+
+    /// Extract + cache the reference codes shared by both setters.
+    fn install_reference(&mut self, samples: &[f32], ref_text: &str) -> TtsResult<()> {
+        let guard = ov_lock().lock().unwrap_or_else(PoisonError::into_inner);
+        let voice = OvVoiceRef::extract(self.ctx, samples)
+            .map_err(|e| TtsError(format!("omnivoice-local: {}", e.0)))?;
+        drop(guard);
+        self.voice_ref = Some(voice);
         self.ref_text = Some(ref_text.to_string());
         Ok(())
     }
 
     /// Clear the reference (switch to voice-design / default mode).
+    /// Frees the cached reference codes.
     pub fn clear_reference(&mut self) {
-        self.ref_audio = None;
+        self.voice_ref = None;
         self.ref_text = None;
     }
 
@@ -260,11 +307,11 @@ impl OmniVoiceLocalEngine {
             return Err(OmniVoiceError("duration→tokens conversion failed".into()));
         }
 
-        let (ref_ptr, ref_n, ref_text_c) = match (&self.ref_audio, &self.ref_text) {
-            (Some(audio), Some(text)) if !audio.is_empty() => {
+        let (tokens_ptr, ref_t, ref_text_c) = match (&self.voice_ref, &self.ref_text) {
+            (Some(voice), Some(text)) => {
                 let rc = CString::new(text.as_str())
                     .map_err(|_| OmniVoiceError("ref text null".into()))?;
-                (audio.as_ptr(), audio.len() as i32, Some(rc))
+                (voice.codes().as_ptr(), voice.ref_t(), Some(rc))
             }
             _ => (std::ptr::null(), 0, None),
         };
@@ -279,8 +326,11 @@ impl OmniVoiceLocalEngine {
             params.T_override = t_override;
             params.mg_num_step = self.params.num_steps;
             params.mg_seed = self.params.seed;
-            params.ref_audio_24k = ref_ptr;
-            params.ref_n_samples = ref_n;
+            // Pre-encoded reference codes (extracted once at
+            // set_reference time) — skips the per-call codec encode.
+            // ref_text still rides the prompt (it is text, not codec).
+            params.ref_audio_tokens = tokens_ptr;
+            params.ref_T = ref_t;
             params.ref_text = ref_text_c.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
             // Cooperative cancellation
             params.cancel = Some(Self::cancel_trampoline);
@@ -491,7 +541,7 @@ impl std::fmt::Debug for OmniVoiceLocalEngine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OmniVoiceLocalEngine")
             .field("params", &self.params)
-            .field("has_ref", &self.ref_audio.is_some())
+            .field("has_voice_ref", &self.voice_ref.is_some())
             .field("ref_text", &self.ref_text)
             .field("ctx_loaded", &!self.ctx.is_null())
             .field(
@@ -504,6 +554,10 @@ impl std::fmt::Debug for OmniVoiceLocalEngine {
 
 impl Drop for OmniVoiceLocalEngine {
     fn drop(&mut self) {
+        // Free the cached reference codes BEFORE the runtime context:
+        // drop order (ctx first below) must not leave codes dangling
+        // behind a freed runtime.
+        self.voice_ref = None;
         if !self.ctx.is_null() {
             let _guard = ov_lock().lock().unwrap_or_else(PoisonError::into_inner);
             unsafe { ov_free(self.ctx) };
@@ -563,7 +617,7 @@ mod tests {
                 duration_override: Some(4.0),
                 ..Default::default()
             },
-            ref_audio: None,
+            voice_ref: None,
             ref_text: None,
             cancel_requested: AtomicBool::new(false),
         };
@@ -628,6 +682,64 @@ mod gh64_language_fallback {
         assert!(engine
             .speak("hello", None, 1.0, 1.0, 1.0, None, None, None)
             .is_ok());
+    }
+}
+
+#[cfg(test)]
+mod voice_ref_tests {
+    use super::*;
+
+    /// Env-gated engine (stub or real GGUFs) — same pattern as the
+    /// GH #64 module above.
+    fn maybe_engine() -> Option<OmniVoiceLocalEngine> {
+        let model = std::env::var("OMNIVOICE_TEST_MODEL").ok()?;
+        let codec = std::env::var("OMNIVOICE_TEST_CODEC").ok()?;
+        OmniVoiceLocalEngine::new(OmniVoiceLocalParams {
+            model_path: model,
+            codec_path: codec,
+            ..Default::default()
+        })
+        .ok()
+    }
+
+    /// Issue #151 P2: setting a reference extracts codes ONCE and every
+    /// synthesis sends `ref_audio_tokens` + `ref_T` — never the raw
+    /// `ref_audio_24k` path. The dev stub's `ov_synthesize` contract
+    /// guards fail the call (and therefore this test) if the engine
+    /// ever wires the raw path or a mismatched pair back in.
+    #[test]
+    fn reference_sends_codes_not_samples() {
+        let Some(mut engine) = maybe_engine() else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
+        // ~2 seconds of dummy 24 kHz samples (stub: any non-empty input).
+        let samples = vec![0.05_f32; 48_000];
+        engine
+            .set_reference_samples(&samples, "reference transcript")
+            .expect("code extraction must succeed");
+        assert!(engine.voice_ref.is_some(), "codes must be cached");
+        // First and repeat synthesis both ride the codes path.
+        for i in 0..2 {
+            let out = engine.speak("hello again", None, 1.0, 1.0, 1.0, None, None, None);
+            assert!(out.is_ok(), "synthesis {i} via cached codes: {out:?}");
+        }
+        // Clearing frees the codes and returns to the no-reference path.
+        engine.clear_reference();
+        assert!(engine.voice_ref.is_none());
+        assert!(engine
+            .speak("hello again", None, 1.0, 1.0, 1.0, None, None, None)
+            .is_ok());
+    }
+
+    /// Empty reference samples are rejected before any FFI call.
+    #[test]
+    fn empty_reference_samples_error() {
+        let Some(mut engine) = maybe_engine() else {
+            eprintln!("skipping: OMNIVOICE_TEST_MODEL/CODEC not set");
+            return;
+        };
+        assert!(engine.set_reference_samples(&[], "text").is_err());
     }
 }
 
