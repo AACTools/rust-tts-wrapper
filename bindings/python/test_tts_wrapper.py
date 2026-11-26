@@ -20,6 +20,7 @@ from tts_wrapper import (
     CredentialStatus,
     EngineSetup,
     ErrorDetail,
+    SynthesisDiagnostics,
     TTSClient,
     TtsErrorCode,
     TTSError,
@@ -110,6 +111,36 @@ class ErrorSurface(unittest.TestCase):
             detail = c.get_last_error_detail()
             self.assertIsInstance(detail, ErrorDetail)
             self.assertEqual(detail.code, TtsErrorCode.NETWORK_ERROR)
+
+    def test_measured_synthesis_fails_like_the_others(self):
+        # Same closed-port contract as synth_to_bytes: the measured call
+        # is a synthesis first, and a failed one raises the same way.
+        creds = dict(DUMMY_CREDS)
+        creds["apiKey"] = "sk-abcdef1234567890abcdef"
+        creds["synthUrl"] = "http://127.0.0.1:1/v1/audio/speech"  # closed port
+        with make_client(**creds) as c:
+            with self.assertRaises(TTSError) as ctx:
+                c.synth_to_bytes_measured("probe")
+            self.assertEqual(ctx.exception.code, TtsErrorCode.NETWORK_ERROR)
+            self.assertNotIn("abcdef1234567890", str(ctx.exception))
+            self.assertEqual(
+                c.get_last_error_code(), TtsErrorCode.NETWORK_ERROR
+            )
+
+    def test_speech_diagnostics_read_the_record(self):
+        # The record's shape, as the native side writes it (camelCase,
+        # firstAudioMs null when no audio arrived).
+        d = SynthesisDiagnostics._from_json(
+            '{"wallMs":1523,"firstAudioMs":412,"audioBytes":192048,"chunks":37}'
+        )
+        self.assertEqual(
+            (d.wall_ms, d.first_audio_ms, d.audio_bytes, d.chunks),
+            (1523, 412, 192048, 37),
+        )
+        silent = SynthesisDiagnostics._from_json(
+            '{"wallMs":1523,"firstAudioMs":null,"audioBytes":0,"chunks":0}'
+        )
+        self.assertIsNone(silent.first_audio_ms)
 
     def test_speak_ssml_exposed(self):
         # GH #73: speak_ssml was missing from this binding. Through the

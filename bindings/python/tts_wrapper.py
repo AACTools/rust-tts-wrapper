@@ -206,6 +206,21 @@ def _load_lib():
     _lib.tts_create_for_model.restype = ctypes.c_void_p
     _lib.tts_create_for_model.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
 
+    # Measured synthesis is additive: an older native build does not
+    # export it. Probe rather than fail to load, and give callers a
+    # clear error.
+    global _measured_abi_available
+    _measured_abi_available = hasattr(_lib, "tts_synth_to_bytes_measured")
+    if _measured_abi_available:
+        _lib.tts_synth_to_bytes_measured.restype = ctypes.c_int32
+        _lib.tts_synth_to_bytes_measured.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_char_p,
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_uint8)),
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.POINTER(ctypes.c_void_p),
+        ]
+
     # The GH #68/#69 symbols are additive: an older native build (pre
     # PR #72) does not export them. Probe and give callers a clear
     # error instead of a cryptic AttributeError later (GH #73 review).
@@ -242,6 +257,8 @@ _parity_available: Optional[bool] = None
 
 _models_abi_available: Optional[bool] = None
 
+_measured_abi_available: Optional[bool] = None
+
 _MODELS_ABI_PRECEDES = (
     "native rust_tts_wrapper predates the #102 model-management ABI "
     "(PR #103); rebuild the library"
@@ -250,6 +267,11 @@ _MODELS_ABI_PRECEDES = (
 _PARITY_PRECEDES = (
     "native rust_tts_wrapper predates the GH #68/#69 ABI (PR #72); "
     "rebuild the library"
+)
+
+_MEASURED_ABI_PRECEDES = (
+    "native rust_tts_wrapper predates measured synthesis "
+    "(tts_synth_to_bytes_measured); rebuild the library"
 )
 
 
@@ -261,6 +283,11 @@ def _require_parity() -> None:
 def _require_models_abi() -> None:
     if _load_lib() and not _models_abi_available:
         raise TTSError(_MODELS_ABI_PRECEDES)
+
+
+def _require_measured_abi() -> None:
+    if _load_lib() and not _measured_abi_available:
+        raise TTSError(_MEASURED_ABI_PRECEDES)
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +388,34 @@ class ErrorDetail:
             display_message=str(d.get("displayMessage", "")),
             engine_id=str(d.get("engineId", "")),
             field_key=str(d.get("fieldKey", "")),
+        )
+
+
+@dataclass
+class SynthesisDiagnostics:
+    """What one synthesis cost, measured from the outside.
+
+    Every engine is measured the same way, through the audio it
+    delivers to its callback, so engines compare like for like.
+    :attr:`first_audio_ms` is ``None`` when no audio arrived; well below
+    :attr:`wall_ms` it means the engine streamed, close to it that the
+    audio only came at the end.
+    """
+
+    wall_ms: int
+    first_audio_ms: Optional[int]
+    audio_bytes: int
+    chunks: int
+
+    @classmethod
+    def _from_json(cls, raw: str) -> "SynthesisDiagnostics":
+        d = json.loads(raw)
+        first = d.get("firstAudioMs")
+        return cls(
+            wall_ms=int(d.get("wallMs", 0)),
+            first_audio_ms=int(first) if first is not None else None,
+            audio_bytes=int(d.get("audioBytes", 0)),
+            chunks=int(d.get("chunks", 0)),
         )
 
 
@@ -562,6 +617,39 @@ class TTSClient:
         if buf:
             self._lib.tts_free_bytes(buf, length.value)
         return data
+
+    def synth_to_bytes_measured(self, text: str) -> Tuple[bytes, SynthesisDiagnostics]:
+        """Synthesise to bytes and report what the synthesis cost.
+
+        Returns the audio and a :class:`SynthesisDiagnostics`. Every
+        engine is measured the same way, from the outside: when its
+        first audio arrived, when all of it had, and how much there was.
+        A failed synthesis raises, as :meth:`synth_to_bytes` does.
+        """
+        _require_measured_abi()
+        buf = ctypes.POINTER(ctypes.c_uint8)()
+        length = ctypes.c_size_t()
+        record = ctypes.c_void_p()
+        if self._lib.tts_synth_to_bytes_measured(
+            self._ctx,
+            text.encode(),
+            ctypes.byref(buf),
+            ctypes.byref(length),
+            ctypes.byref(record),
+        ) != 0:
+            raise self._error("synth_to_bytes_measured failed")
+        data = ctypes.string_at(buf, length.value) if buf and length.value > 0 else b""
+        if buf:
+            self._lib.tts_free_bytes(buf, length.value)
+        if not record:
+            raise TTSError("synth_to_bytes_measured returned no record")
+        try:
+            raw = ctypes.cast(record, ctypes.c_char_p).value
+            if not raw:
+                raise TTSError("synth_to_bytes_measured returned no record")
+            return data, SynthesisDiagnostics._from_json(raw.decode("utf-8", "replace"))
+        finally:
+            self._lib.tts_free_string(record)
 
     # --- playback control ---------------------------------------------
 

@@ -48,5 +48,6 @@ include = [
   "tts_check_credentials",
   "tts_synth_to_bytes",
   "tts_synth_to_wav",
+  "tts_synth_to_bytes_measured",
   "tts_free_bytes",
 ]

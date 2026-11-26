@@ -14,6 +14,9 @@ plus a flat C ABI with bindings for .NET, Python, Node and Swift.
   input, SSML, voice cloning (experimental).
 - **A stable C ABI** (`include/tts_wrapper.h`) with stable error
   codes, a typed engine-setup schema and a tri-state credential check.
+- **What a synthesis cost**, measured the same way for every engine:
+  time to first audio, total time and audio delivered, for comparing a
+  local model with a cloud provider like for like.
 
 Sibling projects: [js-tts-wrapper](https://github.com/AACTools/js-tts-wrapper) ·
 [swift-tts-wrapper](https://github.com/AACTools/swift-tts-wrapper) ·
@@ -43,7 +46,7 @@ cargo build --no-default-features --features avsynth,cloud  # macOS
 
 | Doc | Contents |
 |---|---|
-| [Rust usage](docs/rust.md) | creating engines, callbacks, voices, errors, setup schema, timeline, feature flags |
+| [Rust usage](docs/rust.md) | creating engines, callbacks, voices, errors, setup schema, timeline, what a synthesis cost, feature flags |
 | [.NET usage](docs/dotnet.md) | NuGet package, `TtsClient`, the `AbstractTtsClient` adapter, migration guide |
 | [Python usage](docs/python.md) | ctypes client, loading, examples |
 | [Node usage](docs/node.md) | npm package, events API |

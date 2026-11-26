@@ -14,7 +14,7 @@ Every binding wraps the **flat C ABI** declared in
 | Area | Symbols |
 |---|---|
 | Lifecycle | `tts_create`, `tts_destroy` |
-| Synthesis | `tts_speak`, `tts_speak_ssml`, `tts_speak_sync`, `tts_synth_to_bytes`, `tts_free_bytes` |
+| Synthesis | `tts_speak`, `tts_speak_ssml`, `tts_speak_sync`, `tts_synth_to_bytes`, `tts_synth_to_wav`, `tts_synth_to_bytes_measured`, `tts_free_bytes` |
 | Control | `tts_stop`, `tts_pause`, `tts_resume` |
 | Settings | `tts_set_voice`, `tts_set_rate`, `tts_set_pitch`, `tts_set_volume` |
 | Events | `tts_set_on_audio`, `tts_set_on_boundary` (7-arg incl. `estimated`), `tts_set_on_mark`, `tts_set_on_viseme`, `tts_set_on_start`, `tts_set_on_end`, `tts_set_on_error` |
@@ -68,8 +68,9 @@ the device + simulator staticlibs with the C header; drag them into Xcode.
 
 All six suites assert the **same contract** (engine enumeration, lifecycle,
 setters, callback registration, deterministic failure with a dummy cloud
-key), so a regression in the ABI trips every suite, and the C harness
-additionally verifies the header compiles as clean C11.
+key — for `tts_synth_to_bytes_measured` too), so a regression in the ABI
+trips every suite, and the C harness additionally verifies the header
+compiles as clean C11.
 
 ## Running the suites
 

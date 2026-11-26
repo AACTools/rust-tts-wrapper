@@ -13,7 +13,7 @@ reference harness compiled with `-Wall -Wextra -Werror`.
 | Area | Symbols |
 |---|---|
 | Lifecycle | `tts_create`, `tts_destroy` |
-| Synthesis | `tts_speak`, `tts_speak_ssml`, `tts_speak_sync`, `tts_synth_to_bytes`, `tts_synth_to_wav`, `tts_free_bytes` |
+| Synthesis | `tts_speak`, `tts_speak_ssml`, `tts_speak_sync`, `tts_synth_to_bytes`, `tts_synth_to_wav`, `tts_synth_to_bytes_measured`, `tts_free_bytes` |
 | Control | `tts_stop`, `tts_pause`, `tts_resume` |
 | Settings | `tts_set_voice`, `tts_set_rate`, `tts_set_pitch`, `tts_set_volume` |
 | Events | `tts_set_on_audio`, `tts_set_on_boundary` (7-arg incl. `estimated`), `tts_set_on_mark`, `tts_set_on_viseme`, `tts_set_on_start`, `tts_set_on_end`, `tts_set_on_error` |
@@ -38,6 +38,26 @@ Conventions that hold across the ABI:
 `tts_synth_to_wav` returns one PCM WAV buffer at the synthesized sample
 rate for cloud and Sherpa-ONNX engines. Free it with `tts_free_bytes`.
 `tts_synth_to_bytes` keeps its original engine-specific byte format.
+
+`tts_synth_to_bytes_measured` is `tts_synth_to_bytes` plus a record of what
+the synthesis cost. It takes one more out-pointer, for a JSON string owned by
+the caller and freed with `tts_free_string`:
+
+```c
+{"wallMs":1523,"firstAudioMs":412,"audioBytes":192048,"chunks":37}
+```
+
+`wallMs` is from the call until the engine returned. `firstAudioMs` is until
+the first audio arrived, which is how long a listener waits, and `null` when
+none did: well below `wallMs` the engine streamed and the audio could be
+played as it was made; close to it, the audio only came at the end, however
+it was then split up. `audioBytes` and `chunks` are how much audio was
+delivered, and in how many deliveries. Every engine is measured the same way,
+through the audio callback, so engines are compared like for like. On failure
+it returns -1 and writes nothing, so there is nothing to free.
+
+The record is JSON rather than a struct so that fields can be added without
+changing a layout that every binding declares by hand.
 
 `tts_get_sherpa_models_json` returns the bundled registry JSON keyed by model
 ID. Free the returned string with `tts_free_string`. A build without Sherpa-ONNX

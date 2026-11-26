@@ -97,6 +97,43 @@ public sealed class BindingsExtrasTests : IDisposable
     }
 
     [Fact]
+    public void Measured_Synth_Fails_Like_Its_Twin_At_A_Closed_Port()
+    {
+        using var unreachable = new TtsClient("openai", new()
+        {
+            ["apiKey"] = "sk-abcdef1234567890abcdef",
+            ["synthUrl"] = "http://127.0.0.1:1/v1/audio/speech",
+        });
+
+        var ex = Assert.Throws<TtsException>(() => unreachable.SynthToBytesMeasured("probe"));
+        Assert.Equal(TtsErrorCode.NetworkError, ex.ErrorCode);
+        Assert.DoesNotContain("abcdef1234567890", ex.Message);
+    }
+
+    [Fact]
+    public void SynthesisDiagnostics_Read_The_Record()
+    {
+        // The record as the native side writes it: camelCase, and
+        // firstAudioMs null when no audio arrived.
+        var streamed = SynthesisDiagnostics.FromJson(
+            "{\"wallMs\":1523,\"firstAudioMs\":412,\"audioBytes\":192048,\"chunks\":37}");
+        Assert.NotNull(streamed);
+        Assert.Equal(1523UL, streamed!.WallMs);
+        Assert.Equal(412UL, streamed.FirstAudioMs);
+        Assert.Equal(192_048UL, streamed.AudioBytes);
+        Assert.Equal(37UL, streamed.Chunks);
+
+        var silent = SynthesisDiagnostics.FromJson(
+            "{\"wallMs\":1523,\"firstAudioMs\":null,\"audioBytes\":0,\"chunks\":0}");
+        Assert.NotNull(silent);
+        Assert.Null(silent!.FirstAudioMs);
+
+        // Anything that is not the record is unknown, not a crash.
+        Assert.Null(SynthesisDiagnostics.FromJson("[]"));
+        Assert.Null(SynthesisDiagnostics.FromJson("not json"));
+    }
+
+    [Fact]
     public void Synth_Failure_Yields_Stable_Code_And_Redacted_Detail()
     {
         using var unreachable = new TtsClient("openai", new()

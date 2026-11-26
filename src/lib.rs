@@ -1580,7 +1580,8 @@ pub extern "C" fn tts_get_last_error_detail_json(ctx: *mut tts_ctx) -> *mut c_ch
 }
 
 /// Free a string returned by [`tts_get_last_error_detail_json`],
-/// [`tts_get_engine_setups_json`], or [`tts_get_sherpa_models_json`].
+/// [`tts_get_engine_setups_json`], [`tts_get_sherpa_models_json`], or
+/// [`tts_synth_to_bytes_measured`].
 ///
 /// # Safety
 ///
@@ -2335,7 +2336,7 @@ pub extern "C" fn tts_synth_to_bytes(
     out_bytes: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    synth_to_buffer(ctx, text, out_bytes, out_len, false)
+    synth_to_buffer(ctx, text, out_bytes, out_len, false, None)
 }
 
 /// Synthesize text to a playable WAV file without starting playback.
@@ -2353,7 +2354,43 @@ pub extern "C" fn tts_synth_to_wav(
     out_bytes: *mut *mut u8,
     out_len: *mut usize,
 ) -> i32 {
-    synth_to_buffer(ctx, text, out_bytes, out_len, true)
+    synth_to_buffer(ctx, text, out_bytes, out_len, true, None)
+}
+
+/// Synthesize text to audio bytes and report what the synthesis cost.
+///
+/// The audio is written as [`tts_synth_to_bytes`] writes it. `*out_diagnostics`
+/// receives a JSON string owned by the caller, to free with [`tts_free_string`]:
+///
+/// `{"wallMs":1523,"firstAudioMs":412,"audioBytes":192048,"chunks":37}`
+///
+/// - `wallMs`: from the call until the engine returned, all the audio delivered.
+/// - `firstAudioMs`: until the first audio arrived, which is how long a
+///   listener waits. `null` when no audio arrived. Well below `wallMs` means
+///   the engine streamed and the audio could be played as it was made; close
+///   to it means the audio only came at the end, however it was then split up.
+/// - `audioBytes`: how much audio was delivered, in bytes.
+/// - `chunks`: how many times audio was delivered.
+///
+/// Measured from the outside, through the audio callback every engine is
+/// asked to deliver to, so engines are compared like for like. An engine that
+/// only plays through the operating system delivers nothing that way.
+/// Returns 0 on success, -1 on failure (with nothing to free).
+///
+/// # Safety
+/// `ctx` must be valid. `out_bytes`, `out_len` and `out_diagnostics` must be non-null.
+#[no_mangle]
+pub extern "C" fn tts_synth_to_bytes_measured(
+    ctx: *mut tts_ctx,
+    text: *const c_char,
+    out_bytes: *mut *mut u8,
+    out_len: *mut usize,
+    out_diagnostics: *mut *mut c_char,
+) -> i32 {
+    if out_diagnostics.is_null() {
+        return -1;
+    }
+    synth_to_buffer(ctx, text, out_bytes, out_len, false, Some(out_diagnostics))
 }
 
 fn synth_to_buffer(
@@ -2362,6 +2399,8 @@ fn synth_to_buffer(
     out_bytes: *mut *mut u8,
     out_len: *mut usize,
     wav: bool,
+    // Set when the caller asks what the synthesis cost.
+    out_diagnostics: Option<*mut *mut c_char>,
 ) -> i32 {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         if ctx.is_null() || text.is_null() || out_bytes.is_null() || out_len.is_null() {
@@ -2391,29 +2430,26 @@ fn synth_to_buffer(
 
         let engine = &ctx_ref.engine;
         let result = if wav {
-            engine.synth_to_wav(&text_str, voice.as_deref(), rate, pitch, volume)
+            engine
+                .synth_to_wav(&text_str, voice.as_deref(), rate, pitch, volume)
+                .map(|data| (data, None))
+        } else if out_diagnostics.is_some() {
+            engine
+                .synth_to_bytes_measured(&text_str, voice.as_deref(), rate, pitch, volume)
+                .map(|(data, diagnostics)| (data, Some(diagnostics)))
         } else {
-            engine.synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume)
+            engine
+                .synth_to_bytes(&text_str, voice.as_deref(), rate, pitch, volume)
+                .map(|data| (data, None))
         };
         match result {
-            Ok(data) => {
-                if data.is_empty() {
-                    unsafe {
-                        *out_bytes = ptr::null_mut();
-                        *out_len = 0;
-                    }
-                    return 0;
-                }
-                let len = data.len();
-                let Ok(layout) = std::alloc::Layout::array::<u8>(len) else {
-                    set_error(&format!("Audio buffer too large: {len} bytes"));
+            Ok((data, diagnostics)) => {
+                if unsafe { write_audio_buffer(&data, out_bytes, out_len) } != 0 {
                     return -1;
-                };
-                let ptr = unsafe { std::alloc::alloc(layout) };
-                unsafe {
-                    ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
-                    *out_bytes = ptr;
-                    *out_len = len;
+                }
+                if let Some(out) = out_diagnostics {
+                    let json = diagnostics.map_or(ptr::null_mut(), |d| diagnostics_to_raw(&d));
+                    unsafe { *out = json };
                 }
                 0
             }
@@ -2427,6 +2463,46 @@ fn synth_to_buffer(
         }
     }))
     .unwrap_or(-1)
+}
+
+/// Hand an audio buffer to the caller through the ABI's out-pointers.
+///
+/// Returns 0, or -1 with the global error set when the buffer cannot be
+/// allocated. Nothing is written on failure.
+///
+/// # Safety
+/// `out_bytes` and `out_len` must be non-null.
+unsafe fn write_audio_buffer(data: &[u8], out_bytes: *mut *mut u8, out_len: *mut usize) -> i32 {
+    if data.is_empty() {
+        unsafe {
+            *out_bytes = ptr::null_mut();
+            *out_len = 0;
+        }
+        return 0;
+    }
+    let len = data.len();
+    let Ok(layout) = std::alloc::Layout::array::<u8>(len) else {
+        set_error(&format!("Audio buffer too large: {len} bytes"));
+        return -1;
+    };
+    let dest = unsafe { std::alloc::alloc(layout) };
+    unsafe {
+        ptr::copy_nonoverlapping(data.as_ptr(), dest, len);
+        *out_bytes = dest;
+        *out_len = len;
+    }
+    0
+}
+
+/// A synthesis's measurements as an owned C string for the ABI.
+///
+/// Null if they cannot be serialised or hold an interior null, neither of
+/// which a handful of numbers can.
+fn diagnostics_to_raw(diagnostics: &types::SynthesisDiagnostics) -> *mut c_char {
+    serde_json::to_string(diagnostics)
+        .ok()
+        .and_then(|json| CString::new(json).ok())
+        .map_or(ptr::null_mut(), CString::into_raw)
 }
 
 /// Free a buffer returned by [`tts_synth_to_bytes`] or [`tts_synth_to_wav`].
@@ -2479,5 +2555,186 @@ mod poison_tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         LAST_ERROR.clear_poison();
+    }
+}
+
+#[cfg(test)]
+mod measured_ffi_tests {
+    use super::*;
+    use crate::engine::test_engine::{Scripted, Step};
+
+    /// A context around a scripted engine, filled as `tts_create_inner` fills
+    /// one. The engine is returned too, to read what it was asked.
+    fn context(steps: &[Step]) -> (tts_ctx, Arc<Scripted>) {
+        let scripted = Arc::new(Scripted::new(steps));
+        let empty = || AudioCallback {
+            cb: None,
+            userdata: ptr::null_mut(),
+        };
+        let ctx = tts_ctx {
+            engine: scripted.clone(),
+            credentials_json: String::new(),
+            voice_id: Mutex::new(None),
+            rate: Mutex::new(1.0),
+            pitch: Mutex::new(1.0),
+            volume: Mutex::new(1.0),
+            last_error: Mutex::new(None),
+            last_error_detail: Mutex::new(ErrorDetail::new(TtsErrorCode::Unknown, None, None, "")),
+            on_audio: Mutex::new(empty()),
+            on_start: Mutex::new(VoidCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_end: Mutex::new(VoidCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_error: Mutex::new(ErrorCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_mark: Mutex::new(MarkCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_boundary: Mutex::new(BoundaryCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+            on_viseme: Mutex::new(VisemeCallback {
+                cb: None,
+                userdata: ptr::null_mut(),
+            }),
+        };
+        (ctx, scripted)
+    }
+
+    /// What the function wrote, with the record parsed.
+    struct Handed {
+        rc: i32,
+        audio: Vec<u8>,
+        record: serde_json::Value,
+    }
+
+    fn measure(ctx: &mut tts_ctx) -> Handed {
+        let mut bytes: *mut u8 = ptr::null_mut();
+        let mut len: usize = 0;
+        let mut record: *mut c_char = ptr::null_mut();
+        let text = CString::new("hello").unwrap();
+        let rc = tts_synth_to_bytes_measured(
+            ctx,
+            text.as_ptr(),
+            ptr::from_mut(&mut bytes),
+            ptr::from_mut(&mut len),
+            ptr::from_mut(&mut record),
+        );
+        let audio = if bytes.is_null() {
+            Vec::new()
+        } else {
+            let audio = unsafe { std::slice::from_raw_parts(bytes, len) }.to_vec();
+            tts_free_bytes(bytes, len);
+            audio
+        };
+        let record = if record.is_null() {
+            serde_json::Value::Null
+        } else {
+            let json = unsafe { CStr::from_ptr(record) }
+                .to_string_lossy()
+                .into_owned();
+            tts_free_string(record);
+            serde_json::from_str(&json).unwrap_or_else(|e| panic!("{json}: {e}"))
+        };
+        Handed { rc, audio, record }
+    }
+
+    #[test]
+    fn audio_and_a_record_are_handed_over() {
+        let (mut ctx, _) = context(&[Step::Chunk(b"abcde")]);
+        let handed = measure(&mut ctx);
+        assert_eq!(handed.rc, 0);
+        assert_eq!(handed.audio, b"abcde");
+        assert_eq!(handed.record["audioBytes"], 5);
+        assert_eq!(handed.record["chunks"], 1);
+        assert!(handed.record["wallMs"].is_u64(), "{}", handed.record);
+        assert!(handed.record["firstAudioMs"].is_u64(), "{}", handed.record);
+    }
+
+    #[test]
+    fn without_audio_the_record_says_so() {
+        let (mut ctx, _) = context(&[]);
+        let handed = measure(&mut ctx);
+        assert_eq!(handed.rc, 0);
+        assert_eq!(handed.audio, b"");
+        assert_eq!(handed.record["audioBytes"], 0);
+        assert_eq!(handed.record["chunks"], 0);
+        assert_eq!(handed.record["firstAudioMs"], serde_json::Value::Null);
+        assert!(handed.record["wallMs"].is_u64(), "{}", handed.record);
+    }
+
+    #[test]
+    fn a_failed_synthesis_leaves_nothing_to_free() {
+        let (mut ctx, _) = context(&[Step::Fail("engine out of memory")]);
+        let mut bytes: *mut u8 = ptr::null_mut();
+        let mut len: usize = 0;
+        let mut record: *mut c_char = ptr::null_mut();
+        let text = CString::new("hello").unwrap();
+        let rc = tts_synth_to_bytes_measured(
+            ptr::from_mut(&mut ctx),
+            text.as_ptr(),
+            ptr::from_mut(&mut bytes),
+            ptr::from_mut(&mut len),
+            ptr::from_mut(&mut record),
+        );
+        assert_eq!(rc, -1);
+        assert!(bytes.is_null(), "no buffer");
+        assert_eq!(len, 0);
+        assert!(record.is_null(), "no record");
+        let error = unsafe { CStr::from_ptr(tts_get_last_error(ptr::from_mut(&mut ctx))) };
+        assert!(
+            error.to_string_lossy().contains("engine out of memory"),
+            "the engine's message is the error: {}",
+            error.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn the_context_decides_the_request_as_for_any_synthesis() {
+        let (mut ctx, scripted) = context(&[Step::Chunk(b"a")]);
+        let voice = CString::new("a-voice").unwrap();
+        tts_set_voice(ptr::from_mut(&mut ctx), voice.as_ptr());
+        tts_set_rate(ptr::from_mut(&mut ctx), 1.5);
+        tts_set_pitch(ptr::from_mut(&mut ctx), 1.1);
+        tts_set_volume(ptr::from_mut(&mut ctx), 0.5);
+        assert_eq!(measure(&mut ctx).rc, 0);
+        let request = &scripted.requests()[0];
+        assert_eq!(request.text, "hello");
+        assert_eq!(request.voice.as_deref(), Some("a-voice"));
+        assert!((request.rate - 1.5).abs() <= f32::EPSILON);
+        assert!((request.pitch - 1.1).abs() <= f32::EPSILON);
+        assert!((request.volume - 0.5).abs() <= f32::EPSILON);
+    }
+
+    #[test]
+    fn a_null_record_pointer_is_refused_before_any_synthesis() {
+        // The record is the point of the call: without somewhere to put it,
+        // nothing is synthesised, rather than a synthesis nobody measured.
+        let (mut ctx, scripted) = context(&[Step::Chunk(b"a")]);
+        let mut bytes: *mut u8 = ptr::null_mut();
+        let mut len: usize = 0;
+        let text = CString::new("hello").unwrap();
+        let rc = tts_synth_to_bytes_measured(
+            ptr::from_mut(&mut ctx),
+            text.as_ptr(),
+            ptr::from_mut(&mut bytes),
+            ptr::from_mut(&mut len),
+            ptr::null_mut(),
+        );
+        assert_eq!(rc, -1);
+        assert!(bytes.is_null());
+        assert_eq!(len, 0);
+        assert!(
+            scripted.requests().is_empty(),
+            "refused before the engine was asked"
+        );
     }
 }

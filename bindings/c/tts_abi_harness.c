@@ -180,6 +180,27 @@ static void check_synth_failure_surface(tts_ctx *ctx) {
     CHECK(tts_synth_to_bytes(ctx, NULL, &bytes, &len) != 0,
           "null text (synth) must return error");
 
+    /* The measured call fails the same way, and leaves nothing to free:
+     * a failed synthesis has no record to hand over. */
+    char *record = NULL;
+    CHECK(tts_synth_to_bytes_measured(ctx, "hello c abi", &bytes, &len, &record) != 0,
+          "synth_to_bytes_measured must fail offline");
+    CHECK(bytes == NULL, "no buffer handed out on a failed measured synth");
+    CHECK(len == 0, "length is zero on a failed measured synth");
+    CHECK(record == NULL, "no record handed out on a failed measured synth");
+    CHECK(tts_synth_to_bytes_measured(ctx, NULL, &bytes, &len, &record) != 0,
+          "null text (measured) must return error");
+    CHECK(tts_synth_to_bytes_measured(ctx, "hello c abi", NULL, &len, &record) != 0,
+          "null audio out-pointer (measured) must return error");
+    CHECK(tts_synth_to_bytes_measured(ctx, "hello c abi", &bytes, NULL, &record) != 0,
+          "null length out-pointer (measured) must return error");
+    CHECK(tts_synth_to_bytes_measured(ctx, "hello c abi", &bytes, &len, NULL) != 0,
+          "null record out-pointer (measured) must return error");
+    CHECK(tts_synth_to_bytes_measured(NULL, "x", &bytes, &len, &record) != 0,
+          "null ctx (measured) must return error");
+    CHECK(record == NULL, "still no record after the refused calls");
+    tts_free_string(NULL);
+
     /* The failed synth must populate last_error with a real message. */
     const char *err = tts_get_last_error(ctx);
     CHECK(err != NULL, "last_error must be populated after failure");

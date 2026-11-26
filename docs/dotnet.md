@@ -147,6 +147,24 @@ specification):
 - In-flight native enumeration cannot be aborted mid-call; a cancelled
   token suppresses delivery of its results instead.
 
+### What a synthesis cost
+
+```csharp
+var result = client.SynthToBytesMeasured("Hello there");
+byte[] audio = result.Audio;
+var d = result.Diagnostics;
+// d.WallMs       from the call until the engine returned
+// d.FirstAudioMs how long a listener waits; null when no audio arrived
+// d.AudioBytes   how much audio was delivered
+// d.Chunks       in how many deliveries
+```
+
+Every engine is measured the same way, from the outside, so a local model
+and a cloud provider can be compared like for like. When `FirstAudioMs` is
+well below `WallMs` the engine streamed, and the audio could be played as it
+was made; close to it, the audio only came at the end, however it was then
+split up.
+
 ## API mapping
 
 | DotNetTtsWrapper | rust-tts-wrapper |

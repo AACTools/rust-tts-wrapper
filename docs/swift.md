@@ -130,3 +130,21 @@ case .checkFailed(let detail): break   // e.g. MissingConfiguration + fieldKey
 let setups = try TtsClient.engineSetups()
 let azure = try TtsClient.engineSetup("azure")
 ```
+
+## What a synthesis cost
+
+```swift
+let result = try client.synthToBytesMeasured("Hello there")
+result.audio          // Data; empty when the engine delivered none
+let d = result.diagnostics
+d.wallMs              // from the call until the engine returned
+d.firstAudioMs        // how long a listener waits; nil when no audio arrived
+d.audioBytes          // how much audio was delivered
+d.chunks              // in how many deliveries
+```
+
+Every engine is measured the same way, from the outside, so a local model
+and a cloud provider can be compared like for like. When `firstAudioMs` is
+well below `wallMs` the engine streamed, and the audio could be played as it
+was made; close to it, the audio only came at the end, however it was then
+split up.

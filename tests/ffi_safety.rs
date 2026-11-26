@@ -203,3 +203,88 @@ fn test_null_ctx_is_tolerated_across_the_surface() {
         assert!(bytes.len() < 4096, "error string unreasonably long");
     }
 }
+
+#[test]
+fn test_measured_synthesis_refuses_null_arguments() {
+    // Each argument null in turn, against an otherwise valid call: an
+    // error, never a crash, and nothing to free. The record's out-pointer
+    // too: the record is the point of the call, and a null one must not
+    // turn it into a synthesis nobody measured.
+    use rust_tts_wrapper as w;
+    type Text = *const std::os::raw::c_char;
+    type OutBytes = *mut *mut u8;
+    type OutLen = *mut usize;
+    type OutRecord = *mut *mut std::os::raw::c_char;
+
+    fn nothing_written(bytes: *mut u8, len: usize, record: *mut std::os::raw::c_char) -> bool {
+        bytes.is_null() && len == 0 && record.is_null()
+    }
+
+    let id = std::ffi::CString::new("openai").unwrap();
+    let creds = std::ffi::CString::new(r#"{"apiKey":"dummy-key-for-ffi-tests"}"#).unwrap();
+    let ctx = w::tts_create(id.as_ptr(), creds.as_ptr());
+    assert!(
+        !ctx.is_null(),
+        "a cloud engine with a dummy key is created offline"
+    );
+
+    let text = std::ffi::CString::new("hello").unwrap();
+    let mut bytes: *mut u8 = std::ptr::null_mut();
+    let mut len: usize = 0;
+    let mut record: *mut std::os::raw::c_char = std::ptr::null_mut();
+
+    let cases: [(&str, *mut w::tts_ctx, Text, OutBytes, OutLen, OutRecord); 5] = [
+        (
+            "null context",
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            &mut bytes,
+            &mut len,
+            &mut record,
+        ),
+        (
+            "null text",
+            ctx,
+            std::ptr::null(),
+            &mut bytes,
+            &mut len,
+            &mut record,
+        ),
+        (
+            "null audio out-pointer",
+            ctx,
+            text.as_ptr(),
+            std::ptr::null_mut(),
+            &mut len,
+            &mut record,
+        ),
+        (
+            "null length out-pointer",
+            ctx,
+            text.as_ptr(),
+            &mut bytes,
+            std::ptr::null_mut(),
+            &mut record,
+        ),
+        (
+            "null record out-pointer",
+            ctx,
+            text.as_ptr(),
+            &mut bytes,
+            &mut len,
+            std::ptr::null_mut(),
+        ),
+    ];
+    for (what, ctx, text, out_bytes, out_len, out_record) in cases {
+        assert_eq!(
+            w::tts_synth_to_bytes_measured(ctx, text, out_bytes, out_len, out_record),
+            -1,
+            "{what}"
+        );
+        assert!(
+            nothing_written(bytes, len, record),
+            "{what}: nothing to free after a refused call"
+        );
+    }
+    w::tts_destroy(ctx);
+}

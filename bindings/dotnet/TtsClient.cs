@@ -41,6 +41,7 @@ public static class Native
     [DllImport(Lib)] public static extern void tts_resume(IntPtr ctx);
 
     [DllImport(Lib)] public static extern int tts_synth_to_bytes(IntPtr ctx, string text, out IntPtr outBytes, out UIntPtr outLen);
+    [DllImport(Lib)] public static extern int tts_synth_to_bytes_measured(IntPtr ctx, string text, out IntPtr outBytes, out UIntPtr outLen, out IntPtr outDiagnostics);
     [DllImport(Lib)] public static extern void tts_free_bytes(IntPtr bytes, UIntPtr len);
 
     [DllImport(Lib)] public static extern void tts_set_voice(IntPtr ctx, string voiceId);
@@ -357,6 +358,55 @@ public class TtsClient : IDisposable
         Marshal.Copy(bufPtr, data, 0, (int)length);
         Native.tts_free_bytes(bufPtr, len);
         return data;
+    }
+
+    /// <summary>
+    /// Synthesise <paramref name="text"/> to a byte buffer and report what the
+    /// synthesis cost. Every engine is measured the same way, from the outside;
+    /// see <see cref="SynthesisDiagnostics"/>.
+    /// </summary>
+    public MeasuredSynthesis SynthToBytesMeasured(string text)
+    {
+        ThrowIfDisposed();
+        IntPtr bufPtr;
+        UIntPtr len;
+        IntPtr recordPtr;
+        if (Native.tts_synth_to_bytes_measured(_ctx, text, out bufPtr, out len, out recordPtr) != 0)
+            throw CreateException();
+
+        // checked cast — UIntPtr → int can overflow on >2GiB buffers.
+        long length = (long)len;
+        if (length > int.MaxValue)
+        {
+            Native.tts_free_bytes(bufPtr, len);
+            Native.tts_free_string(recordPtr);
+            throw new TtsException("Synthesised buffer exceeds 2 GiB");
+        }
+
+        byte[] data = Array.Empty<byte>();
+        if (length > 0 && bufPtr != IntPtr.Zero)
+        {
+            data = new byte[length];
+            Marshal.Copy(bufPtr, data, 0, (int)length);
+            Native.tts_free_bytes(bufPtr, len);
+        }
+
+        SynthesisDiagnostics? diagnostics = null;
+        if (recordPtr != IntPtr.Zero)
+        {
+            try
+            {
+                // UTF-8, as the Rust side emits it.
+                diagnostics = SynthesisDiagnostics.FromJson(Marshal.PtrToStringUTF8(recordPtr) ?? "");
+            }
+            finally
+            {
+                Native.tts_free_string(recordPtr);
+            }
+        }
+        if (diagnostics is null)
+            throw new TtsException("tts_synth_to_bytes_measured returned an unreadable record");
+        return new MeasuredSynthesis { Audio = data, Diagnostics = diagnostics };
     }
 
     // --- playback control ---------------------------------------------

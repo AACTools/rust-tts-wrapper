@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::fmt;
 use std::os::raw::c_char;
 
+use serde::Serialize;
+
 /// Voice gender, matching Swift's `UnifiedVoice.Gender`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Gender {
@@ -267,6 +269,64 @@ pub struct WordBoundary {
     pub estimated: bool,
 }
 
+/// One synthesis, measured.
+///
+/// Every engine is measured the same way, from the outside: when its first
+/// audio arrived, when all of it had, and how much there was. Nothing here
+/// depends on an engine reporting anything about itself, so a local model and
+/// a cloud provider can be put side by side.
+///
+/// Returned by [`TtsEngine::synth_to_bytes_measured`](crate::engine::TtsEngine::synth_to_bytes_measured),
+/// and as JSON by [`tts_synth_to_bytes_measured`](crate::tts_synth_to_bytes_measured)
+/// (`wallMs`, `firstAudioMs`, `audioBytes`, `chunks`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SynthesisDiagnostics {
+    /// From the call until the engine returned, all the audio delivered.
+    pub wall_ms: u64,
+    /// Until the first audio arrived: how long a listener waits. `None`
+    /// when no audio arrived.
+    ///
+    /// Well below [`Self::wall_ms`] means the engine streamed, and the
+    /// audio could be played as it was made. Close to it means the audio
+    /// only came at the end, however the engine then split it up.
+    pub first_audio_ms: Option<u64>,
+    /// The audio delivered, in bytes.
+    pub audio_bytes: u64,
+    /// How many times audio was delivered.
+    pub chunks: u64,
+}
+
+impl SynthesisDiagnostics {
+    /// The seconds of audio that `audio_bytes` come to as 16-bit PCM at
+    /// `sample_rate`, with `channels` channels. Zero for a zero rate or
+    /// channel count.
+    #[must_use]
+    pub fn audio_seconds_pcm16(&self, sample_rate: u32, channels: u16) -> f64 {
+        if sample_rate == 0 || channels == 0 {
+            return 0.0;
+        }
+        // Exact up to 2^53 bytes: any utterance there has ever been.
+        #[allow(clippy::cast_precision_loss)]
+        let bytes = self.audio_bytes as f64;
+        bytes / (2.0 * f64::from(channels) * f64::from(sample_rate))
+    }
+
+    /// Seconds spent per second of audio: the real-time factor. `1.0` is as
+    /// fast as the audio plays, and less is faster. `None` without audio, or
+    /// when the call took no measurable time.
+    #[must_use]
+    pub fn real_time_factor(&self, audio_seconds: f64) -> Option<f64> {
+        if self.wall_ms == 0 || audio_seconds <= 0.0 {
+            return None;
+        }
+        // Exact up to 2^53 ms: about 285,000 years.
+        #[allow(clippy::cast_precision_loss)]
+        let wall_s = self.wall_ms as f64 / 1000.0;
+        Some(wall_s / audio_seconds)
+    }
+}
+
 /// Describes a registered engine for introspection.
 #[derive(Debug, Clone)]
 pub struct EngineDescriptor {
@@ -410,5 +470,66 @@ mod tests {
     #[cfg(not(feature = "display_names"))]
     fn test_locale_display_name_fallback_is_raw_code() {
         assert_eq!(locale_display_name("en-US"), "en-US");
+    }
+}
+
+#[cfg(test)]
+mod synthesis_diagnostics_tests {
+    use super::SynthesisDiagnostics;
+
+    #[test]
+    fn pcm16_seconds_follow_the_bytes_the_rate_and_the_channels() {
+        let d = SynthesisDiagnostics {
+            wall_ms: 1_000,
+            first_audio_ms: Some(250),
+            audio_bytes: 48_000, // 1 s of mono 16-bit at 24 kHz
+            chunks: 1,
+        };
+        assert!((d.audio_seconds_pcm16(24_000, 1) - 1.0).abs() < 1e-9);
+        assert!((d.audio_seconds_pcm16(24_000, 2) - 0.5).abs() < 1e-9);
+        assert_eq!(d.audio_seconds_pcm16(0, 1), 0.0);
+        assert_eq!(d.audio_seconds_pcm16(24_000, 0), 0.0);
+    }
+
+    #[test]
+    fn real_time_factor_is_seconds_per_second_of_audio() {
+        let d = SynthesisDiagnostics {
+            wall_ms: 500,
+            first_audio_ms: Some(100),
+            audio_bytes: 0,
+            chunks: 1,
+        };
+        // Half a second spent on two seconds of audio: four times faster than real time.
+        assert!((d.real_time_factor(2.0).unwrap() - 0.25).abs() < 1e-9);
+        assert!(d.real_time_factor(0.0).is_none(), "no audio, no factor");
+        let instant = SynthesisDiagnostics { wall_ms: 0, ..d };
+        assert!(
+            instant.real_time_factor(1.0).is_none(),
+            "no time, no factor"
+        );
+    }
+
+    #[test]
+    fn json_is_camel_case_and_says_when_no_audio_arrived() {
+        let streamed = SynthesisDiagnostics {
+            wall_ms: 1523,
+            first_audio_ms: Some(412),
+            audio_bytes: 192_048,
+            chunks: 37,
+        };
+        assert_eq!(
+            serde_json::to_string(&streamed).unwrap(),
+            r#"{"wallMs":1523,"firstAudioMs":412,"audioBytes":192048,"chunks":37}"#
+        );
+        let silent = SynthesisDiagnostics {
+            first_audio_ms: None,
+            audio_bytes: 0,
+            chunks: 0,
+            ..streamed
+        };
+        assert_eq!(
+            serde_json::to_string(&silent).unwrap(),
+            r#"{"wallMs":1523,"firstAudioMs":null,"audioBytes":0,"chunks":0}"#
+        );
     }
 }

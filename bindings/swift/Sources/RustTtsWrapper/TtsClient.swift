@@ -105,6 +105,31 @@ public struct TtsErrorDetail: Sendable, Hashable {
     public let fieldKey: String
 }
 
+/// What one synthesis cost, from `TtsClient.synthToBytesMeasured(_:)`.
+/// Every engine is measured the same way, from the outside, so a local
+/// model and a cloud provider can be compared like for like.
+public struct SynthesisDiagnostics: Sendable, Hashable {
+    /// From the call until the engine returned, all the audio delivered.
+    public let wallMs: UInt64
+    /// Until the first audio arrived: how long a listener waits, and `nil`
+    /// when no audio arrived. Well below `wallMs` the engine streamed, and
+    /// the audio could be played as it was made; close to it, the audio only
+    /// came at the end.
+    public let firstAudioMs: UInt64?
+    /// The audio delivered, in bytes.
+    public let audioBytes: UInt64
+    /// How many times audio was delivered.
+    public let chunks: UInt64
+}
+
+/// Audio from one synthesis, and what the synthesis cost.
+public struct MeasuredSynthesis: Sendable {
+    /// The audio; empty when the engine delivered none.
+    public let audio: Data
+    /// What the synthesis cost.
+    public let diagnostics: SynthesisDiagnostics
+}
+
 /// Tri-state credential check outcome (GH #69): static catalogs answer
 /// `unverified` — enumerating them proves nothing about the key.
 public enum CredentialStatus: String, Sendable {
@@ -286,6 +311,35 @@ public final class TtsClient: @unchecked Sendable {
         guard let buf = bufPtr, length > 0 else { return Data() }
         defer { tts_free_bytes(buf, length) }
         return Data(bytes: buf, count: Int(length))
+    }
+
+    /// Synthesise to a byte buffer and report what the synthesis cost.
+    /// Every engine is measured the same way, from the outside: when its
+    /// first audio arrived, when all of it had, and how much there was.
+    public func synthToBytesMeasured(_ text: String) throws -> MeasuredSynthesis {
+        guard let ctx else { throw TtsError("client closed") }
+        var bufPtr: UnsafeMutablePointer<UInt8>?
+        var length: UInt = 0
+        var recordPtr: UnsafeMutablePointer<CChar>?
+        let rc = text.withCString { textPtr in
+            tts_synth_to_bytes_measured(ctx, textPtr, &bufPtr, &length, &recordPtr)
+        }
+        if rc != 0 {
+            throw structuredError("tts_synth_to_bytes_measured failed")
+        }
+        defer {
+            if let buf = bufPtr, length > 0 { tts_free_bytes(buf, length) }
+            if let record = recordPtr { tts_free_string(record) }
+        }
+        guard let record = recordPtr,
+              let diagnostics = Self.decodeDiagnostics(String(cString: record)) else {
+            throw TtsError("tts_synth_to_bytes_measured returned an unreadable record")
+        }
+        var audio = Data()
+        if let buf = bufPtr, length > 0 {
+            audio = Data(bytes: buf, count: Int(length))
+        }
+        return MeasuredSynthesis(audio: audio, diagnostics: diagnostics)
     }
 
     // --- playback control ---------------------------------------------
@@ -865,6 +919,22 @@ public final class TtsClient: @unchecked Sendable {
             displayMessage: d["displayMessage"] as? String ?? "",
             engineId: d["engineId"] as? String ?? "",
             fieldKey: d["fieldKey"] as? String ?? ""
+        )
+    }
+
+    /// Decode the record of a measured synthesis. A missing or non-numeric
+    /// `firstAudioMs` is "no audio arrived"; a record that is not an object
+    /// is not a record.
+    private static func decodeDiagnostics(_ json: String) -> SynthesisDiagnostics? {
+        guard let data = json.data(using: .utf8),
+              let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return SynthesisDiagnostics(
+            wallMs: (d["wallMs"] as? NSNumber)?.uint64Value ?? 0,
+            firstAudioMs: (d["firstAudioMs"] as? NSNumber)?.uint64Value,
+            audioBytes: (d["audioBytes"] as? NSNumber)?.uint64Value ?? 0,
+            chunks: (d["chunks"] as? NSNumber)?.uint64Value ?? 0
         )
     }
 
