@@ -38,11 +38,11 @@ jobs:
       # `sapi` and `avsynth` are platform-gated; on Linux we lint the union
       # of features that actually build here.
       run: |
-        cargo clippy --no-default-features --features system,cloud,sherpaonnx --all-targets -- -D warnings
+        cargo clippy --locked --no-default-features --features system,cloud,sherpaonnx --all-targets -- -D warnings
 
     - name: Run clippy (speaker feature, #139 cpal playback)
       run: |
-        cargo clippy --no-default-features --features sherpaonnx,speaker --all-targets -- -D warnings
+        cargo clippy --locked --no-default-features --features sherpaonnx,speaker --all-targets -- -D warnings
 
     - name: Formatting standards summary
       run: |

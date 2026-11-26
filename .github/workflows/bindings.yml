@@ -33,7 +33,7 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: ABI conformance suites
-        run: cargo test --no-default-features --features ${{ matrix.features }} --test ffi_conformance --test ffi_lifecycle --test ffi_safety
+        run: cargo test --locked --no-default-features --features ${{ matrix.features }} --test ffi_conformance --test ffi_lifecycle --test ffi_safety
 
   c-harness:
     name: C harness (${{ matrix.os }})
@@ -69,7 +69,7 @@ jobs:
         run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build library
         shell: bash
-        run: cargo build --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+        run: cargo build --locked --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
       - name: npm install + test
         working-directory: bindings/nodejs
         run: |
@@ -95,7 +95,7 @@ jobs:
         run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build library (release)
         shell: bash
-        run: cargo build --release --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+        run: cargo build --locked --release --no-default-features --features ${{ runner.os == 'macOS' && 'avsynth,cloud' || runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
       - name: unittest (ABI conformance + GH #68/#69/#73 parity)
         shell: bash
         working-directory: bindings/python
@@ -127,7 +127,7 @@ jobs:
         run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Build library (release)
         shell: bash
-        run: cargo build --release --no-default-features --features ${{ runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
+        run: cargo build --locked --release --no-default-features --features ${{ runner.os == 'Windows' && 'sapi,cloud' || 'system,cloud' }}
       - name: Set TTS_WRAPPER_LIB
         shell: bash
         run: |
@@ -178,7 +178,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build library (debug)
-        run: cargo build --no-default-features --features avsynth,cloud
+        run: cargo build --locked --no-default-features --features avsynth,cloud
       - name: Verify vendored header matches include/tts_wrapper.h
         run: diff include/tts_wrapper.h bindings/swift/Sources/CRustTtsWrapper/include/tts_wrapper.h
       - name: swift test

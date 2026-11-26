@@ -25,13 +25,13 @@ run_feature_test() {
         return
     fi
 
-    if cargo test --no-default-features --features "$features" --test factory_reachability 2>&1 | grep -q "test result: ok"; then
+    if cargo test --locked --no-default-features --features "$features" --test factory_reachability 2>&1 | grep -q "test result: ok"; then
         echo "PASS"
         PASS=$((PASS + 1))
     else
         echo "FAIL"
         FAIL=$((FAIL + 1))
-        cargo test --no-default-features --features "$features" --test factory_reachability 2>&1 | grep -E "FAILED|panicked|error" | head -3
+        cargo test --locked --no-default-features --features "$features" --test factory_reachability 2>&1 | grep -E "FAILED|panicked|error" | head -3
     fi
 }
 
@@ -58,8 +58,8 @@ fi
 run_feature_test "system+cloud+sherpaonnx+floravox+ssml-expand" "system,cloud,sherpaonnx,floravox,ssml-expand"
 
 # Full default build (should always work)
-echo -n "  cargo build (default): "
-if cargo build 2>&1 | tail -1 | grep -q "Finished"; then
+echo -n "  cargo build --locked (default): "
+if cargo build --locked 2>&1 | tail -1 | grep -q "Finished"; then
     echo "PASS"; PASS=$((PASS + 1))
 else
     echo "FAIL"; FAIL=$((FAIL + 1))

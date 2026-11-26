@@ -44,7 +44,7 @@ jobs:
         esac
 
     - name: Run tests
-      run: cargo test ${{ env.FEATURES }} --verbose
+      run: cargo test --locked ${{ env.FEATURES }} --verbose
 
     - name: Run speaker-feature tests (#139 cpal playback)
       # The cpal player's unit tests (incl. the C1 handoff pin) run
@@ -53,10 +53,10 @@ jobs:
       if: matrix.os == 'ubuntu-latest'
       run: |
         scripts/ci/apt-install-resilient.sh libasound2-dev
-        cargo test --no-default-features --features sherpaonnx,speaker --lib --verbose
+        cargo test --locked --no-default-features --features sherpaonnx,speaker --lib --verbose
 
     - name: Run FFI safety tests
-      run: cargo test ${{ env.FEATURES }} --test ffi_safety --verbose
+      run: cargo test --locked ${{ env.FEATURES }} --test ffi_safety --verbose
 
   coverage:
     name: Code Coverage

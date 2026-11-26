@@ -21,36 +21,36 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy (Linux features)
-        run: cargo clippy --no-default-features --features system,cloud -- -D warnings
+        run: cargo clippy --locked --no-default-features --features system,cloud -- -D warnings
 
       - name: Clippy (floravox)
-        run: cargo clippy --no-default-features --features floravox -- -D warnings
+        run: cargo clippy --locked --no-default-features --features floravox -- -D warnings
 
       - name: Clippy + test (sherpaonnx + sherpa-g2p)
         # #82: the G2P front-end feature must compile and pass its unit
         # tests in CI (the real-bundle + live tests stay #[ignore]d and
         # run in the sherpaonnx-live workflow / by hand)
         run: |
-          cargo clippy --no-default-features --features cloud,sherpaonnx,sherpa-g2p --all-targets -- -D warnings
-          cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib
-          cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --test sherpa_models_ffi
+          cargo clippy --locked --no-default-features --features cloud,sherpaonnx,sherpa-g2p --all-targets -- -D warnings
+          cargo test --locked --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib
+          cargo test --locked --no-default-features --features cloud,sherpaonnx,sherpa-g2p --test sherpa_models_ffi
 
       - name: Build (Linux features)
-        run: cargo build --no-default-features --features system,cloud
+        run: cargo build --locked --no-default-features --features system,cloud
 
       - name: Run tests
-        run: cargo test --no-default-features --features system,cloud
+        run: cargo test --locked --no-default-features --features system,cloud
 
       - name: Build cloud-only
-        run: cargo build --no-default-features --features cloud
+        run: cargo build --locked --no-default-features --features cloud
 
       - name: Build + test floravox
         # ort's static prebuilts download per-platform and can 504 (same
         # flakiness as the sherpaonnx builds) — non-blocking until proven.
         continue-on-error: true
         run: |
-          cargo build --no-default-features --features floravox
-          cargo test --no-default-features --features floravox --lib
+          cargo build --locked --no-default-features --features floravox
+          cargo test --locked --no-default-features --features floravox --lib
 
       - name: Upload C header
         uses: actions/upload-artifact@v4
@@ -90,8 +90,8 @@ jobs:
       - name: Clippy + test (pocket-timing)
         if: matrix.engine == 'pocket-timing'
         run: |
-          cargo clippy --no-default-features --features pocket-timing -- -D warnings
-          cargo test --no-default-features --features pocket-timing --lib
+          cargo clippy --locked --no-default-features --features pocket-timing -- -D warnings
+          cargo test --locked --no-default-features --features pocket-timing --lib
 
       - name: Build runtime library
         if: matrix.repo != 'none'
@@ -116,8 +116,8 @@ jobs:
           QWEN3_TTS_LIB: ${{ matrix.engine == 'qwen3-local' && '/home/runner/engine' || '' }}
           OMNIVOICE_LIB: ${{ matrix.engine == 'omnivoice-local' && '/home/runner/engine' || '' }}
         run: |
-          cargo clippy --no-default-features --features ${{ matrix.engine }} -- -D warnings
-          cargo test --no-default-features --features ${{ matrix.engine }} --lib
+          cargo clippy --locked --no-default-features --features ${{ matrix.engine }} -- -D warnings
+          cargo test --locked --no-default-features --features ${{ matrix.engine }} --lib
 
   macos-build:
     runs-on: macos-latest
@@ -128,13 +128,13 @@ jobs:
           components: clippy
 
       - name: Clippy (macOS features)
-        run: cargo clippy --no-default-features --features avsynth,cloud -- -D warnings
+        run: cargo clippy --locked --no-default-features --features avsynth,cloud -- -D warnings
 
       - name: Build (macOS features)
-        run: cargo build --no-default-features --features avsynth,cloud
+        run: cargo build --locked --no-default-features --features avsynth,cloud
 
       - name: Run tests
-        run: cargo test --no-default-features --features avsynth,cloud
+        run: cargo test --locked --no-default-features --features avsynth,cloud
 
   mobile-cross-compile:
     # Android + iOS are release platforms now (publish.yml ships .so/.a for
@@ -179,13 +179,13 @@ jobs:
             # cloud (static ort where a prebuilt exists)
             env CARGO_TARGET_${TUP}_LINKER="$TC/${TRIPLE}24-clang" \
                 CC_$T="$TC/${TRIPLE}24-clang" AR_$T="$TC/llvm-ar" \
-                cargo build --release --target $T --no-default-features --features cloud
+                cargo build --locked --release --target $T --no-default-features --features cloud
           done
       - name: Build all iOS targets (cloud only, staticlib)
         if: "!matrix.android"
         run: |
           for T in aarch64-apple-ios aarch64-apple-ios-sim; do
-            cargo build --release --target $T --no-default-features --features cloud
+            cargo build --locked --release --target $T --no-default-features --features cloud
             # (floravox iOS builds removed — see private fork)
           done
       - name: Build and link Sherpa-ONNX for iOS device and simulator
@@ -213,10 +213,10 @@ jobs:
           components: clippy
 
       - name: Clippy (Windows features)
-        run: cargo clippy --no-default-features --features sapi,cloud -- -D warnings
+        run: cargo clippy --locked --no-default-features --features sapi,cloud -- -D warnings
 
       - name: Build (Windows features)
-        run: cargo build --no-default-features --features sapi,cloud
+        run: cargo build --locked --no-default-features --features sapi,cloud
 
       - name: Run tests
-        run: cargo test --no-default-features --features sapi,cloud
+        run: cargo test --locked --no-default-features --features sapi,cloud
