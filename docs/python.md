@@ -93,6 +93,22 @@ client.on_mark(lambda name, off, s, e: ...)
 client.on_viseme(lambda vid, off: ...)
 ```
 
+## What a synthesis cost
+
+```python
+audio, d = client.synth_to_bytes_measured("Hello there")
+# d.wall_ms        from the call until the engine returned
+# d.first_audio_ms how long a listener waits; None when no audio arrived
+# d.audio_bytes    how much audio was delivered
+# d.chunks         in how many deliveries
+```
+
+Every engine is measured the same way, from the outside, so a local model
+and a cloud provider can be compared like for like. When `first_audio_ms` is
+well below `wall_ms` the engine streamed, and the audio could be played as it
+was made; close to it, the audio only came at the end, however it was then
+split up.
+
 ## Tests
 
 ```bash

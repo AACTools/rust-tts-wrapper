@@ -137,6 +137,37 @@ let offset = timeline.offset_at(2.5); // byte offset at 2.5 s of playback
 
 See `examples/timeline-demo.rs` for the full highlighting pattern.
 
+## What a synthesis cost
+
+Every engine is measured the same way, from the outside: when its first
+audio arrived, when all of it had, and how much there was. Nothing depends
+on an engine reporting anything about itself, so a local model and a cloud
+provider can be put side by side.
+
+```rust
+let (audio, d) = engine.synth_to_bytes_measured("Hello", None, 1.0, 1.0, 1.0)?;
+let (audio, d) = engine.synth_to_bytes_measured_with_options("Hello", Some(&opts))?;
+
+let first = d.first_audio_ms.map_or("never".into(), |ms| format!("{ms} ms"));
+println!("{} ms in all, first audio at {first}: {} bytes in {} deliveries",
+         d.wall_ms, d.audio_bytes, d.chunks);
+
+// With the audio's format known (synth_to_bytes keeps the engine's own):
+let seconds = d.audio_seconds_pcm16(24_000, 1);
+let rtf = d.real_time_factor(seconds); // seconds spent per second of audio
+```
+
+- `first_audio_ms` is how long a listener waits, and `None` when no audio
+  arrived. Well below `wall_ms`, the engine streamed and the audio could be
+  played as it was made; close to it, the audio only came at the end,
+  however the engine then split it up.
+- The default goes through `speak`'s audio callback, the path streaming
+  playback uses. SAPI hands that callback nothing (it plays aloud), so SAPI
+  measures its silent synthesis path instead: one delivery, at the end.
+  Engines that only play through the operating system (`system`, AVSpeech)
+  deliver no audio this way, as with their `synth_to_bytes`, and report
+  `None`.
+
 ## Feature flags
 
 | Feature | Engines / capability |

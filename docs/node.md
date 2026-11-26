@@ -80,3 +80,17 @@ const azure = TtsClient.engineSetup("azure");
 ```
 
 Unknown field kinds from newer native builds degrade to `"text"`.
+
+## What a synthesis cost
+
+```js
+const { audio, diagnostics } = client.synthToBytesMeasured("Hello there");
+// diagnostics: { wallMs, firstAudioMs, audioBytes, chunks }
+// firstAudioMs is null when no audio arrived.
+```
+
+Every engine is measured the same way, from the outside, so a local model
+and a cloud provider can be compared like for like. When `firstAudioMs` is
+well below `wallMs` the engine streamed, and the audio could be played as it
+was made; close to it, the audio only came at the end, however it was then
+split up.
