@@ -1,6 +1,13 @@
 /target
 **/*.orig
-Cargo.lock
+
+# Cargo.lock is COMMITTED (issue #143): release builds run --locked so
+# a tag's dependency versions are exactly the committed resolution and
+# downstream Flatpak/offline builds can reuse it. The apple-swiftpm
+# path filter and the sherpaonnx-live cache key depend on it existing.
+# (js/Cargo.lock stays ignored: the wasm32 crate is not part of the
+# release pipeline — commit it if that ever changes.)
+js/Cargo.lock
 
 # Example output artifacts (generated when running examples locally)
 /examples/output/

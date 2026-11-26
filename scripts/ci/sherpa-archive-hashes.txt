@@ -1,0 +1,9 @@
+# SHA-256 pins for the sherpa-onnx prebuilt archives the release builds
+# link (issue #144). Format: sha256sum-compatible "<hash>  <filename>".
+# KEEP IN SYNC with the sherpa-onnx-sys pin in Cargo.toml (2.0.1) and
+# the archive names sherpa-onnx-sys 2.0.1's build.rs requests.
+# The iOS xcframework pins live in scripts/build-ios-sherpa.sh.
+55cfadf65ba50d0afc1a802b7a337942819e51c94a5b5a384def1978f7c70871  sherpa-onnx-v2.0.1-linux-x64-static-lib.tar.bz2
+d7a9b14f337958e7373c8c650f046df33d210bbaff2f33cb8322dda663ee5e1c  sherpa-onnx-v2.0.1-osx-arm64-static-lib.tar.bz2
+23e7b986b197eda0bbc47ff3d7d5c87afd6ef2b9077214ba26b0f1ec52ef0e66  sherpa-onnx-v2.0.1-win-x64-static-MT-Release-lib.tar.bz2
+023a3c528c1d61d2854c4b8b8fa874f9bb1b7cd4ca7e5cfc31a849400958864d  sherpa-onnx-v2.0.1-win-x86-static-MD-Release-lib.tar.bz2

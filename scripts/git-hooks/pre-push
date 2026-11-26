@@ -45,7 +45,7 @@ for combo in "${COMBOS[@]}"; do
     if [[ "$combo" == "omnivoice-local" ]]; then
         export OMNIVOICE_LIB="$PWD/scripts/dev-stubs"
     fi
-    if ! cargo clippy $args --all-targets -- -D warnings >/dev/null 2>&1; then
+    if ! cargo clippy --locked $args --all-targets -- -D warnings >/dev/null 2>&1; then
         echo "pre-push: clippy FAILED for [$label]" >&2
         fail=1
     fi
@@ -68,11 +68,11 @@ fi
 # delegating (check_credentials_status downgraded Rejected) — every
 # lib suite was green and only tests/error_detail_ffi.rs caught it,
 # burning a CI run.
-cargo test --lib --quiet >/dev/null || { echo "pre-push: default test suite failed" >&2; exit 1; }
-cargo test --tests --quiet >/dev/null || { echo "pre-push: default integration suite failed" >&2; exit 1; }
-cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --quiet >/dev/null \
+cargo test --locked --lib --quiet >/dev/null || { echo "pre-push: default test suite failed" >&2; exit 1; }
+cargo test --locked --tests --quiet >/dev/null || { echo "pre-push: default integration suite failed" >&2; exit 1; }
+cargo test --locked --no-default-features --features cloud,sherpaonnx,sherpa-g2p --lib --quiet >/dev/null \
     || { echo "pre-push: sherpa-g2p test suite failed" >&2; exit 1; }
-cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --tests --quiet >/dev/null \
+cargo test --locked --no-default-features --features cloud,sherpaonnx,sherpa-g2p --tests --quiet >/dev/null \
     || { echo "pre-push: sherpa-g2p integration suite failed" >&2; exit 1; }
 # omnivoice-local suite against the dev stub (engine + contract-guard
 # tests; live/ignored tests stay opt-in). The TEST_MODEL/CODEC exports
@@ -81,9 +81,9 @@ cargo test --no-default-features --features cloud,sherpaonnx,sherpa-g2p --tests 
 export OMNIVOICE_LIB="$PWD/scripts/dev-stubs"
 export OMNIVOICE_TEST_MODEL=/dev/null
 export OMNIVOICE_TEST_CODEC=/dev/null
-cargo test --no-default-features --features omnivoice-local --lib --quiet >/dev/null \
+cargo test --locked --no-default-features --features omnivoice-local --lib --quiet >/dev/null \
     || { echo "pre-push: omnivoice-local test suite failed" >&2; exit 1; }
-cargo test --no-default-features --features omnivoice-local --tests --quiet >/dev/null \
+cargo test --locked --no-default-features --features omnivoice-local --tests --quiet >/dev/null \
     || { echo "pre-push: omnivoice-local integration suite failed" >&2; exit 1; }
 
 exit 0

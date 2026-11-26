@@ -101,6 +101,19 @@
   </ItemGroup>
 
   <!--
+    GH #145: third-party notices travel with the package. The publish
+    workflow generates THIRD_PARTY_NOTICES.md (from the committed
+    Cargo.lock) and copies it next to this project before dotnet pack.
+    Local packs without the file simply skip it.
+  -->
+  <ItemGroup Condition="Exists('$(MSBuildProjectDirectory)/THIRD_PARTY_NOTICES.md')">
+    <Content Include="$(MSBuildProjectDirectory)/THIRD_PARTY_NOTICES.md"
+             Pack="true"
+             PackagePath="THIRD_PARTY_NOTICES.md"
+             CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
     Build target: before packing, verify the native lib exists.
     Skip with -p:SkipNativeLibCheck=true if you want a managed-only package.
   -->

@@ -29,10 +29,17 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+      - name: Update Cargo.lock root version
+        # #143: --locked compares the root package version too — keep
+        # the lock's own stanza in step with the tag. Dependency
+        # versions in the lock are NOT touched.
+        run: python3 scripts/ci/bump-lock-version.py "${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4
         with:
           name: version-sync
-          path: Cargo.toml
+          path: |
+            Cargo.toml
+            Cargo.lock
 
   test:
     name: Test
@@ -48,16 +55,16 @@ jobs:
         # Resilient against canonical-mirror DNS outages (see the script).
         run: scripts/ci/apt-install-resilient.sh libspeechd-dev libclang-dev
       - name: Clippy (Linux features)
-        run: cargo clippy --no-default-features --features system,cloud -- -D warnings
+        run: cargo clippy --locked --no-default-features --features system,cloud -- -D warnings
       - name: Test (Linux features)
-        run: cargo test --no-default-features --features system,cloud
+        run: cargo test --locked --no-default-features --features system,cloud
       - name: Clippy (Linux + sherpaonnx)
         continue-on-error: true  # sherpa-onnx 504 download issue (see TODO.md)
-        run: cargo clippy --no-default-features --features system,cloud,sherpaonnx -- -D warnings
+        run: cargo clippy --locked --no-default-features --features system,cloud,sherpaonnx -- -D warnings
       - name: Build system-only
-        run: cargo build --no-default-features --features system
+        run: cargo build --locked --no-default-features --features system
       - name: Build cloud-only
-        run: cargo build --no-default-features --features cloud
+        run: cargo build --locked --no-default-features --features cloud
 
   test-windows:
     # The Windows NuGet DLLs carry sapi + cloud + sherpaonnx together
@@ -75,7 +82,7 @@ jobs:
       - name: Test (sapi,cloud,sherpaonnx,sherpa-g2p)
         env:
           RTW_SKIP_EDGE_LIVE: "1"
-        run: cargo test --no-default-features --features sapi,cloud,sherpaonnx,sherpa-g2p
+        run: cargo test --locked --no-default-features --features sapi,cloud,sherpaonnx,sherpa-g2p
       - uses: actions/download-artifact@v4
         with:
           name: engine-libs-windows-x64
@@ -134,7 +141,7 @@ jobs:
           RTW_SKIP_EDGE_LIVE: "1"
         run: |
           $env:PATH = "$env:PATH;$env:QWEN3_TTS_LIB\build;$env:QWEN3_TTS_LIB\ggml\build\src;$env:OMNIVOICE_LIB\build"
-          cargo test --no-default-features --features sapi,cloud,sherpaonnx,sherpa-g2p,qwen3-local,omnivoice-local,pocket-timing,cloning
+          cargo test --locked --no-default-features --features sapi,cloud,sherpaonnx,sherpa-g2p,qwen3-local,omnivoice-local,pocket-timing,cloning
 
   build:
     name: Build ${{ matrix.label }}
@@ -338,27 +345,52 @@ jobs:
       - name: Download sherpa-onnx x86 prebuilt (32-bit Windows only)
         # sherpa-onnx-sys doesn't auto-detect win-x86, so download the
         # prebuilt static libs for the pinned crate version and point the
-        # build at them via SHERPA_ONNX_LIB_DIR.
+        # build at them via SHERPA_ONNX_LIB_DIR. The download is
+        # SHA-256-verified against scripts/ci/sherpa-archive-hashes.txt
+        # (GH #144 — previously the archive was linked unverified).
         #
         # KEEP IN SYNC with the exact `sherpa-onnx` pin in Cargo.toml:
-        # builds resolve fresh (Cargo.lock is gitignored and the version
-        # job rewrites Cargo.toml), so a version mismatch means either a
-        # compile error (crate/sys pair drift — sys 2.0.1 links
-        # utf8proc + ssentencepiece_core, which the older 1.13.x
-        # archives don't ship) or LNK2019 (crate newer than the lib).
-        # Since sherpa-onnx 2.x the crate and the k2-fsa C-API release
-        # share version numbers: v1.6.6 pinned crate 1.13.8 and paired
-        # it with the v1.13.5 archive; crate =2.0.1 pairs with v2.0.1.
+        # the version-sync job rewrites Cargo.toml/lock to the tag, so a
+        # version mismatch means either a compile error (crate/sys pair
+        # drift — sys 2.0.1 links utf8proc + ssentencepiece_core, which
+        # the older 1.13.x archives don't ship) or LNK2019 (crate newer
+        # than the lib). Since sherpa-onnx 2.x the crate and the k2-fsa
+        # C-API release share version numbers: v1.6.6 pinned crate 1.13.8
+        # and paired it with the v1.13.5 archive; crate =2.0.1 pairs
+        # with v2.0.1.
         if: matrix.target == 'i686-pc-windows-msvc'
         shell: pwsh
         run: |
-          $url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.1/sherpa-onnx-v2.0.1-win-x86-static-MD-Release-lib.tar.bz2"
-          Invoke-WebRequest -Uri $url -OutFile sherpa-x86.tar.bz2
+          $dir = scripts/ci/fetch-sherpa-archive.ps1 -Archive sherpa-onnx-v2.0.1-win-x86-static-MD-Release-lib.tar.bz2
+          $archive = Join-Path $dir "sherpa-onnx-v2.0.1-win-x86-static-MD-Release-lib.tar.bz2"
           mkdir sherpa-x86-libs | Out-Null
-          tar -xjf sherpa-x86.tar.bz2 -C sherpa-x86-libs --strip-components=1
+          tar -xjf $archive -C sherpa-x86-libs --strip-components=1
           "SHERPA_ONNX_LIB_DIR=$PWD/sherpa-x86-libs/lib" >> $env:GITHUB_ENV
           Write-Host "SHERPA_ONNX_LIB_DIR set to $PWD/sherpa-x86-libs/lib"
           ls sherpa-x86-libs/lib/
+      - name: Fetch + verify sherpa-onnx archive (GH #144)
+        # The desktop sherpa legs used to link whatever bytes the
+        # upstream CDN served (the sherpa-onnx-sys build script does no
+        # checksum check). Download ourselves against the pinned
+        # SHA-256 manifest and hand the verified archive to the sys
+        # crate via SHERPA_ONNX_ARCHIVE_DIR.
+        if: runner.os != 'Windows' && contains(matrix.features, 'sherpaonnx')
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu) archive=sherpa-onnx-v2.0.1-linux-x64-static-lib.tar.bz2 ;;
+            aarch64-apple-darwin)     archive=sherpa-onnx-v2.0.1-osx-arm64-static-lib.tar.bz2 ;;
+            *) echo "no pinned sherpa archive for ${{ matrix.target }} — extend scripts/ci/sherpa-archive-hashes.txt" >&2; exit 1 ;;
+          esac
+          dir=$(scripts/ci/fetch-sherpa-archive.sh "$archive")
+          echo "SHERPA_ONNX_ARCHIVE_DIR=$dir" >> "$GITHUB_ENV"
+      - name: Fetch + verify sherpa-onnx archive (GH #144, Windows)
+        if: runner.os == 'Windows' && contains(matrix.features, 'sherpaonnx') && matrix.target != 'i686-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $archive = "sherpa-onnx-v2.0.1-win-x64-static-MT-Release-lib.tar.bz2"
+          $dir = scripts/ci/fetch-sherpa-archive.ps1 -Archive $archive
+          "SHERPA_ONNX_ARCHIVE_DIR=$dir" >> $env:GITHUB_ENV
       - uses: nttld/setup-ndk@v1
         if: matrix.android == true
         with:
@@ -386,7 +418,7 @@ jobs:
           env CARGO_TARGET_${TUP}_LINKER="$TC/${CLANG_TRIPLE}24-clang" \
               CC_${{ matrix.target }}="$TC/${CLANG_TRIPLE}24-clang" \
               AR_${{ matrix.target }}="$TC/llvm-ar" \
-              cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+              cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - uses: actions/download-artifact@v4
         if: matrix.offline_engines == true
         with:
@@ -427,10 +459,10 @@ jobs:
           ls -la eng/qwen3/build eng/qwen3/ggml/build/src eng/omnivoice/build
       - name: Build release (cargo)
         if: matrix.cross != true && matrix.android != true
-        run: cargo build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+        run: cargo build --locked --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Build release (cross)
         if: matrix.cross == true
-        run: cross build --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
+        run: cross build --locked --release --target ${{ matrix.target }} --no-default-features --features ${{ matrix.features }}
       - name: Rename artifacts
         shell: bash
         run: |
@@ -529,6 +561,14 @@ jobs:
           # .NET 9 SDK is required for OIDC Trusted Publishing support
           # in `dotnet nuget push`. The project still targets net8.0.
           dotnet-version: '9.0.x'
+      - name: Place third-party notices (GH #145)
+        # The notices ride inside the .nupkg as well as the release
+        # assets — MIT/Apache/BSD require notices to travel with
+        # binary copies, and the package statically links ORT/sherpa.
+        uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: bindings/dotnet
       - name: Pack
         # Pass the version from the git tag (e.g. v0.2.3 → 0.2.3)
         shell: pwsh
@@ -768,9 +808,28 @@ jobs:
           path: engine-libs/
           if-no-files-found: warn  # don't block the release if a platform fails
 
+  # ── Third-party notices (GH #145) ───────────────────────────────────
+  # Generate the licence inventory for the binary artifacts from the
+  # committed Cargo.lock (GH #143): statically linked native deps +
+  # every Rust crate, with the full texts of the distinct licences.
+  notices:
+    name: Third-party notices
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate THIRD_PARTY_NOTICES.md
+        run: |
+          python3 scripts/generate-third-party-notices.py > THIRD_PARTY_NOTICES.md
+          head -n 5 THIRD_PARTY_NOTICES.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: third-party-notices
+          path: THIRD_PARTY_NOTICES.md
+
   release:
     name: GitHub Release
-    needs: [build, npm, offline-engine-libs]
+    needs: [build, npm, offline-engine-libs, notices]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -789,11 +848,16 @@ jobs:
         with:
           path: engine-libs-artifacts
           pattern: "engine-libs-*"
+      - uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
       - name: Organize release assets
         run: |
           mkdir -p release-assets
           cp artifacts/* release-assets/ 2>/dev/null || true
           cp include/tts_wrapper.h release-assets/
+          # GH #145: the licence inventory travels with the binaries.
+          cp THIRD_PARTY_NOTICES.md release-assets/
           # engine shared libraries: tar each platform into a single
           # asset (softprops files glob doesn't recurse into subdirs — #60)
           for dir in engine-libs-artifacts/engine-libs-*; do

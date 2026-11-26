@@ -322,7 +322,7 @@ jobs:
       - name: Run live SherpaOnnx tests
         shell: bash
         run: |
-          cargo test --test sherpaonnx_live --no-default-features --features sherpaonnx -- --ignored --nocapture --test-threads=1
+          cargo test --locked --test sherpaonnx_live --no-default-features --features sherpaonnx -- --ignored --nocapture --test-threads=1
 
       - name: Run German G2P live + real-bundle tests (#82)
         # The wrapper-side G2P front-end: engine → provisioning →
@@ -339,8 +339,8 @@ jobs:
           export SHERPA_TEST_DEU_DIR="$VG/deu"
           export SHERPA_TEST_DE_LEXICON="$VG/de/lexicon.txt"
           export SHERPA_TEST_DEU_LEXICON="$VG/deu/lexicon.txt"
-          cargo test --test sherpaonnx_live --no-default-features --features sherpaonnx,sherpa-g2p -- --ignored --nocapture --test-threads=1 german
-          # one filter per invocation — cargo test takes a single
+          cargo test --locked --test sherpaonnx_live --no-default-features --features sherpaonnx,sherpa-g2p -- --ignored --nocapture --test-threads=1 german
+          # one filter per invocation — cargo test --locked takes a single
           # positional filter and errors on the second (Mac-team review)
-          cargo test --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_g2p -- --ignored --nocapture
-          cargo test --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_lexicon -- --ignored --nocapture
+          cargo test --locked --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_g2p -- --ignored --nocapture
+          cargo test --locked --lib --no-default-features --features sherpaonnx,sherpa-g2p sherpa_lexicon -- --ignored --nocapture
