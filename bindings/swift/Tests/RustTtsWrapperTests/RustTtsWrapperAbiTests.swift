@@ -71,6 +71,7 @@ final class RustTtsWrapperAbiTests: XCTestCase {
         XCTAssertThrowsError(try c.speakSync("hello swift"))
         XCTAssertNotNil(c.getLastError())
         XCTAssertThrowsError(try c.synthToBytes("hello swift"))
+        XCTAssertThrowsError(try c.synthToBytesMeasured("hello swift"))
     }
 
     func testCallbackRegistrationDoesNotThrow() throws {

@@ -91,6 +91,16 @@ public class AbiConformanceTests
     }
 
     [Fact]
+    public void MeasuredSynthesis_DummyKeyFailsObservably()
+    {
+        // The measured call is a synthesis first: with a dummy key it fails
+        // as its unmeasured twin does, never as a silent success.
+        using var c = MakeClient();
+        Assert.ThrowsAny<Exception>(() => c.SynthToBytesMeasured("hello dotnet"));
+        Assert.False(string.IsNullOrEmpty(c.GetLastError()));
+    }
+
+    [Fact]
     public void CallbackRegistrationDoesNotThrow()
     {
         using var c = MakeClient();

@@ -212,6 +212,28 @@ test("synthesis failure yields a stable code and redacted detail", () => {
   c.close();
 });
 
+test("measured synthesis fails like the others (closed port, dummy key)", () => {
+  const c = new TtsClient({
+    engineId: "openai",
+    credentials: {
+      apiKey: "sk-abcdef1234567890abcdef",
+      synthUrl: "http://127.0.0.1:1/v1/audio/speech", // closed port: deterministic
+    },
+  });
+  try {
+    c.synthToBytesMeasured("probe");
+    assert.fail("must throw");
+  } catch (err) {
+    assert.equal(err.name, "TtsError");
+    assert.equal(err.code, 4); // NetworkError
+    assert.ok(!String(err.message).includes("abcdef1234567890"), "secret redacted");
+  }
+  // A refused call (null text) is an error too, never a crash.
+  assert.throws(() => c.synthToBytesMeasured(null));
+  assert.equal(c.lastErrorCode(), 4);
+  c.close();
+});
+
 // --- engine-agnostic local-model management (#102, PR #103) ------------
 // Holds under any build: with no local engines compiled in the
 // catalogues are EMPTY and that is success. When sherpaonnx is in the

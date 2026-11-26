@@ -225,6 +225,22 @@ function loadLibrary(explicitPath) {
     if (!parity[name]) throw new Error(PARITY_PRECEDES);
     return parity[name];
   };
+  // Measured synthesis is additive as well: probe like the parity set so
+  // an older native build gets a clear error.
+  const MEASURED_PRECEDES =
+    "native rust_tts_wrapper predates measured synthesis (tts_synth_to_bytes_measured); rebuild the library";
+  const measuredFns = {
+    // The record is an owned char* that the caller frees. Declared as
+    // void* on purpose: koffi decodes a char* to a JS string, which would
+    // lose the pointer to free.
+    tts_synth_to_bytes_measured: optional(
+      "int32_t tts_synth_to_bytes_measured(void *ctx, const char *text, _Out_ uint8_t **out_bytes, _Out_ uintptr_t *out_len, _Out_ void **out_diagnostics)",
+    ),
+  };
+  const needMeasured = (name) => {
+    if (!measuredFns[name]) throw new Error(MEASURED_PRECEDES);
+    return measuredFns[name];
+  };
 
   return {
     lib,
@@ -234,6 +250,7 @@ function loadLibrary(explicitPath) {
     setters,
     parity: { fns: parity, needParity },
     models: { fns: modelsFns, needModels },
+    measured: { fns: measuredFns, needMeasured },
     TtsVoice,
     TtsEngineInfo,
   };
@@ -417,6 +434,42 @@ class TtsClient extends EventEmitter {
     } finally {
       this._abi.protos.tts_free_bytes(ptr, BigInt(len));
     }
+  }
+
+  /**
+   * Synthesise to a Buffer and report what the synthesis cost.
+   *
+   * Every engine is measured the same way, from the outside: when its
+   * first audio arrived, when all of it had, and how much there was.
+   * `diagnostics.firstAudioMs` is null when no audio arrived; well below
+   * `wallMs` it means the engine streamed, close to it that the audio
+   * only came at the end. Returns an empty Buffer on zero audio.
+   *
+   * @returns {{ audio: Buffer, diagnostics: import("./index.d.ts").SynthesisDiagnostics }}
+   */
+  synthToBytesMeasured(text) {
+    this._throwIfClosed();
+    const measure = this._abi.measured.needMeasured("tts_synth_to_bytes_measured");
+    const out = [null];
+    const outLen = [0n];
+    const outRecord = [null];
+    const rc = measure(this._ctx, text, out, outLen, outRecord);
+    if (rc !== 0) throw this._structuredError("tts_synth_to_bytes_measured failed");
+    const len = Number(outLen[0]);
+    const ptr = out[0];
+    let audio = Buffer.alloc(0);
+    if (ptr && len !== 0) {
+      try {
+        audio = Buffer.from(koffi.decode(ptr, "uint8_t", len));
+      } finally {
+        this._abi.protos.tts_free_bytes(ptr, BigInt(len));
+      }
+    }
+    const diagnostics = readOwnedJson(this._abi, outRecord[0]);
+    if (!diagnostics) {
+      throw new TtsError("tts_synth_to_bytes_measured returned no record", null);
+    }
+    return { audio, diagnostics };
   }
 
   // --- playback control --------------------------------------------------

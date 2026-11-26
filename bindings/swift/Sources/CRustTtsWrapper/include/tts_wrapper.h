@@ -465,7 +465,8 @@ char *tts_get_last_error_detail_json(struct tts_ctx *ctx);
 
 /**
  * Free a string returned by [`tts_get_last_error_detail_json`],
- * [`tts_get_engine_setups_json`], or [`tts_get_sherpa_models_json`].
+ * [`tts_get_engine_setups_json`], [`tts_get_sherpa_models_json`], or
+ * [`tts_synth_to_bytes_measured`].
  *
  * # Safety
  *
@@ -690,6 +691,36 @@ int32_t tts_synth_to_wav(struct tts_ctx *ctx,
                          const char *text,
                          uint8_t **out_bytes,
                          uintptr_t *out_len);
+
+/**
+ * Synthesize text to audio bytes and report what the synthesis cost.
+ *
+ * The audio is written as [`tts_synth_to_bytes`] writes it. `*out_diagnostics`
+ * receives a JSON string owned by the caller, to free with [`tts_free_string`]:
+ *
+ * `{"wallMs":1523,"firstAudioMs":412,"audioBytes":192048,"chunks":37}`
+ *
+ * - `wallMs`: from the call until the engine returned, all the audio delivered.
+ * - `firstAudioMs`: until the first audio arrived, which is how long a
+ *   listener waits. `null` when no audio arrived. Well below `wallMs` means
+ *   the engine streamed and the audio could be played as it was made; close
+ *   to it means the audio only came at the end, however it was then split up.
+ * - `audioBytes`: how much audio was delivered, in bytes.
+ * - `chunks`: how many times audio was delivered.
+ *
+ * Measured from the outside, through the audio callback every engine is
+ * asked to deliver to, so engines are compared like for like. An engine that
+ * only plays through the operating system delivers nothing that way.
+ * Returns 0 on success, -1 on failure (with nothing to free).
+ *
+ * # Safety
+ * `ctx` must be valid. `out_bytes`, `out_len` and `out_diagnostics` must be non-null.
+ */
+int32_t tts_synth_to_bytes_measured(struct tts_ctx *ctx,
+                                    const char *text,
+                                    uint8_t **out_bytes,
+                                    uintptr_t *out_len,
+                                    char **out_diagnostics);
 
 /**
  * Free a buffer returned by [`tts_synth_to_bytes`] or [`tts_synth_to_wav`].

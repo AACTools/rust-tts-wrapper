@@ -35,7 +35,7 @@ do {
 
 - `TtsClient(engineId:credentials:)` — engine constructor; throws `TtsError`
   on failure with the message from `tts_get_last_error`.
-- `speak`, `speakSync`, `synthToBytes` — synthesis entry points.
+- `speak`, `speakSync`, `synthToBytes`, `synthToBytesMeasured` — synthesis entry points.
 - `stop`, `pause`, `resume` — playback control.
 - `setVoice`, `setRate`, `setPitch`, `setVolume` — per-instance settings.
 - `setOnAudio`, `setOnBoundary` — typed closures. Pass `nil` to clear. The

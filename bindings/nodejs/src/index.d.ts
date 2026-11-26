@@ -172,6 +172,27 @@ export interface InstalledVoice {
   languages: Array<{ bcp47: string; display: string }>;
 }
 
+/** What one synthesis cost, measured the same way for every engine:
+ *  from the outside, through the audio it delivers. */
+export interface SynthesisDiagnostics {
+  /** From the call until the engine returned, all the audio delivered. */
+  wallMs: number;
+  /** Until the first audio arrived: how long a listener waits. Null when
+   *  no audio arrived. Well below wallMs means the engine streamed; close
+   *  to it, that the audio only came at the end. */
+  firstAudioMs: number | null;
+  /** The audio delivered, in bytes. */
+  audioBytes: number;
+  /** How many times audio was delivered. */
+  chunks: number;
+}
+
+/** Audio from one synthesis, and what it cost. */
+export interface MeasuredSynthesis {
+  audio: Buffer;
+  diagnostics: SynthesisDiagnostics;
+}
+
 declare class TtsClient extends NodeJS.EventEmitter {
   constructor(options?: TtsClientOptions);
 
@@ -179,6 +200,8 @@ declare class TtsClient extends NodeJS.EventEmitter {
   speakSsml(ssml: string): void;
   speakSync(text: string): void;
   synthToBytes(text: string): Buffer;
+  /** Synthesise to a Buffer and report what the synthesis cost. */
+  synthToBytesMeasured(text: string): MeasuredSynthesis;
 
   stop(): void;
   pause(): void;
