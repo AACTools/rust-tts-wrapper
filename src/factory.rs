@@ -293,6 +293,7 @@ fn create_engine_inner(
                         .unwrap_or(32),
                     seed: creds.get("seed").and_then(|s| s.parse().ok()).unwrap_or(42),
                     instruct: creds.get("instruct").cloned(),
+                    device: creds.get("device").cloned().filter(|d| !d.is_empty()),
                     language: creds.get("language").cloned().unwrap_or_default(),
                     ..Default::default()
                 };
