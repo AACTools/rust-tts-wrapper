@@ -996,6 +996,7 @@ pub(crate) fn test_qwen_run_task_json_shape() {
         1.0,  // wrapper neutral → API neutral 50
         true,
         None,
+        None,
     );
     assert_eq!(v["header"]["action"], "run-task");
     assert_eq!(v["header"]["task_id"], "task-1");
@@ -1023,7 +1024,7 @@ pub(crate) fn test_qwen_volume_multiplier_mapping() {
     // [0, 100] with neutral at 50. 0.5 → 25, 1.0 → 50, 2.0 → 100, and
     // anything above 2.0 clamps to 100.
     let mk = |volume: f32| {
-        let v = qwen_run_task_json("t", "m", "v", 1.0, 1.0, volume, false, None);
+        let v = qwen_run_task_json("t", "m", "v", 1.0, 1.0, volume, false, None, None);
         v["payload"]["parameters"]["volume"].as_i64().unwrap()
     };
     assert_eq!(mk(0.0), 0);
@@ -1044,12 +1045,108 @@ pub(crate) fn test_qwen_run_task_instruction_included() {
         1.0,
         false,
         Some("Speak cheerfully."),
+        None,
     );
     assert_eq!(
         v["payload"]["parameters"]["instruction"],
         "Speak cheerfully."
     );
     assert_eq!(v["payload"]["parameters"]["word_timestamp_enabled"], false);
+}
+
+#[test]
+pub(crate) fn test_qwen_run_task_language_hints() {
+    // Comma-separated credential → JSON array; empty segments dropped.
+    // (The service honours only the FIRST element per its reference —
+    // the array shape is what the API takes; docs tell users to pass
+    // one code.)
+    let v = qwen_run_task_json(
+        "t",
+        "qwen-audio-3.1-tts-flash",
+        "longanlingxin_v3.1",
+        1.0,
+        1.0,
+        1.0,
+        false,
+        None,
+        Some(" zh-sh , , fr ,,"),
+    );
+    assert_eq!(
+        v["payload"]["parameters"]["language_hints"],
+        serde_json::json!(["zh-sh", "fr"])
+    );
+    // Absent / empty → no parameter at all.
+    let v = qwen_run_task_json("t", "m", "v", 1.0, 1.0, 1.0, false, None, Some(""));
+    assert!(v["payload"]["parameters"].get("language_hints").is_none());
+    let v = qwen_run_task_json("t", "m", "v", 1.0, 1.0, 1.0, false, None, None);
+    assert!(v["payload"]["parameters"].get("language_hints").is_none());
+}
+
+#[test]
+pub(crate) fn test_qwen_voice_inferred_model() {
+    // Minority-language system voices embed the full model prefix.
+    assert_eq!(
+        qwen_voice_inferred_model("qwen-audio-3.1-tts-flash-zora_bg"),
+        Some("qwen-audio-3.1-tts-flash")
+    );
+    // 3.1 voice ids carry the _v3.1 suffix.
+    assert_eq!(
+        qwen_voice_inferred_model("longanlingxin_v3.1"),
+        Some("qwen-audio-3.1-tts-flash")
+    );
+    assert_eq!(
+        qwen_voice_inferred_model("Emily_v3.1"),
+        Some("qwen-audio-3.1-tts-flash")
+    );
+    // 3.0-style ids, CosyVoice names and garbage infer nothing.
+    // The two unsuffixed 3.0 flagship names are plus-only: they infer
+    // 3.0-plus (against the flash default they 411 — probed).
+    assert_eq!(
+        qwen_voice_inferred_model("longanlingxin"),
+        Some("qwen-audio-3.0-tts-plus")
+    );
+    assert_eq!(
+        qwen_voice_inferred_model("longanlufeng"),
+        Some("qwen-audio-3.0-tts-plus")
+    );
+    assert_eq!(qwen_voice_inferred_model("longanhuan_v3.6"), None);
+    assert_eq!(qwen_voice_inferred_model("longanyang"), None);
+    assert_eq!(qwen_voice_inferred_model("longwan_v3"), None);
+    assert_eq!(qwen_voice_inferred_model(""), None);
+}
+
+#[test]
+pub(crate) fn test_qwen_static_voices_refresh() {
+    // GH #149: the refreshed table carries the 3.1 families and the
+    // minority-language system voices, with unique ids.
+    let voices = static_voices("qwen").expect("static qwen voices");
+    let mut ids: Vec<&str> = voices.iter().map(|v| v.id.as_str()).collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "voice ids must be unique");
+    // The coverage win: minority-language voices present with their
+    // own language codes (spot checks incl. the probed Bulgarian).
+    for (id, bcp47) in [
+        ("qwen-audio-3.1-tts-flash-zora_bg", "bg"),
+        ("qwen-audio-3.1-tts-flash-layaung_my", "my"),
+        ("qwen-audio-3.1-tts-flash-nuru_sw", "sw"),
+        ("qwen-audio-3.1-tts-flash-hiraya_tl", "tl"),
+    ] {
+        let v = voices.iter().find(|v| v.id == id).unwrap_or_else(|| {
+            panic!("missing minority voice {id}");
+        });
+        assert_eq!(v.primary_language(), bcp47, "{id} language");
+    }
+    // 3.1 and CosyVoice families present.
+    assert!(voices.iter().any(|v| v.id == "longanlingxin_v3.1"));
+    assert!(voices.iter().any(|v| v.id == "Emily_v3.1"));
+    assert!(voices.iter().any(|v| v.id == "Donna_v3.1"));
+    assert!(voices.iter().any(|v| v.id == "loongbella_v3.1"));
+    assert!(voices.iter().any(|v| v.id == "loongbella_v3"));
+    // The 3.0 default-model voices are still there.
+    assert!(voices.iter().any(|v| v.id == "longanhuan_v3.6"));
+    assert!(total >= 100, "expected the refreshed table, got {total}");
 }
 
 #[test]

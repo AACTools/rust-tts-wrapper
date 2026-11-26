@@ -239,6 +239,7 @@ pub(crate) fn qwen_run_task_json(
     volume: f32,
     word_timestamps: bool,
     instruction: Option<&str>,
+    language_hints: Option<&str>,
 ) -> serde_json::Value {
     // The wrapper's rate/pitch/volume are 1.0-centred multipliers; the
     // API takes rate/pitch in [0.5, 2.0] and volume in [0, 100] with
@@ -260,6 +261,25 @@ pub(crate) fn qwen_run_task_json(
     if let Some(instr) = instruction.filter(|s| !s.is_empty()) {
         parameters["instruction"] = serde_json::Value::String(instr.to_string());
     }
+    // `languageHints` credential (issue #149): comma-separated language
+    // or dialect codes for the 3.1 multilingual voices ("zh-sh" for
+    // Shanghainese, "fr" for French, …). Split into the array the API
+    // expects; empty segments are dropped.
+    if let Some(hints) = language_hints.filter(|s| !s.is_empty()) {
+        let codes: Vec<&str> = hints
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !codes.is_empty() {
+            parameters["language_hints"] = serde_json::Value::Array(
+                codes
+                    .iter()
+                    .map(|c| serde_json::Value::String((*c).to_string()))
+                    .collect(),
+            );
+        }
+    }
     serde_json::json!({
         "header": {
             "action": "run-task",
@@ -277,9 +297,42 @@ pub(crate) fn qwen_run_task_json(
     })
 }
 
+/// Infer the model from a voice id when the caller set no explicit
+/// `modelId` credential (issue #149). Voice ids are strictly
+/// model-scoped (a mismatch fails the task with 411/418), so picking
+/// a listed voice must just work:
+///
+/// - the two 3.0-plus-only flagship names → 3.0-plus (against the
+///   3.0-flash default they would 411 — probed).
+/// - `qwen-audio-3.1-tts-flash-<name>_<lang>` ids embed the full model
+///   prefix (the minority-language system voices) → that model.
+/// - `*_v3.1` ids belong to the 3.1 families → 3.1-flash (the
+///   cheaper/faster member; pin `modelId` for 3.1-plus).
+/// - 3.0-style ids and CosyVoice's bare `long*`/`*_v3` names infer
+///   nothing: 3.0 ids work with the default model, and CosyVoice
+///   voices require an explicit `modelId: cosyvoice-v3-flash` (their
+///   names collide with Qwen-Audio families, so inference would be
+///   ambiguous — `longanyang` exists in both lists).
+#[cfg(feature = "cloud")]
+pub(crate) fn qwen_voice_inferred_model(voice: &str) -> Option<&'static str> {
+    // 3.0-plus-only voices (per the voice-list doc): against the
+    // 3.0-flash default they 411 (probed — loop-review finding). The
+    // names are unambiguous, no other live model reuses them, so pin
+    // them to their model.
+    if voice == "longanlingxin" || voice == "longanlufeng" {
+        return Some("qwen-audio-3.0-tts-plus");
+    }
+    if voice.starts_with("qwen-audio-3.1-tts-flash-") {
+        return Some("qwen-audio-3.1-tts-flash");
+    }
+    if voice.ends_with("_v3.1") {
+        return Some("qwen-audio-3.1-tts-flash");
+    }
+    None
+}
+
 /// Split text into ≤ `QWEN_TEXT_CHUNK_CHARS` pieces on char boundaries
 /// (the protocol caps a single continue-task at 20 000 characters).
-#[cfg(feature = "cloud")]
 pub(crate) fn qwen_chunk_text(text: &str) -> Vec<&str> {
     if text.chars().count() <= QWEN_TEXT_CHUNK_CHARS {
         return vec![text];
@@ -334,6 +387,8 @@ pub(crate) fn qwen_speak_ws(
     credentials: &HashMap<String, String>,
     model: &str,
     instruction: Option<&str>,
+    language_hints: Option<&str>,
+    cancel: &std::sync::atomic::AtomicBool,
     mut on_audio: Option<QwenAudioFn<'_>>,
     mut on_boundary: Option<QwenBoundaryFn<'_>>,
     boundary_search_text: &str,
@@ -395,8 +450,35 @@ pub(crate) fn qwen_speak_ws(
         volume,
         on_boundary.is_some(),
         instruction,
+        language_hints,
     );
     send(&mut socket, &run_task, "run-task")?;
+
+    // The documented cancellation (issue #149): stop() sets the engine
+    // flag; we answer with finish-task + directive=cancel and return
+    // the audio delivered so far (truncated beats an error
+    // mid-utterance — the qwen3-local precedent). Polled at the top of
+    // each receive loop so a stalled service can't wedge a stop.
+    let send_cancel = |socket: &mut tungstenite::WebSocket<
+        tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+    >|
+     -> TtsResult<()> {
+        let cancel_task = serde_json::json!({
+            "header": {
+                "action": "finish-task",
+                "task_id": task_id,
+                "streaming": "duplex",
+            },
+            "payload": { "input": { "directive": "cancel" } },
+        });
+        send(socket, &cancel_task, "cancel")
+    };
+    let cancelled = |socket: &mut tungstenite::WebSocket<
+        tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+    >|
+     -> bool {
+        cancel.load(std::sync::atomic::Ordering::Relaxed) && send_cancel(socket).is_ok()
+    };
 
     // Wait for task-started before sending text (protocol ordering).
     // Idle timeout: reset on every message so a healthy long synthesis
@@ -410,6 +492,10 @@ pub(crate) fn qwen_speak_ws(
         if std::time::Instant::now() > deadline {
             let _ = socket.close(None);
             return Err(TtsError("qwen WebSocket task start timed out".into()));
+        }
+        if cancelled(&mut socket) {
+            let _ = socket.close(None);
+            return Ok(0); // stopped before synthesis started
         }
         match socket.read() {
             Ok(Message::Text(t)) => match qwen_parse_event(t.as_str()) {
@@ -464,6 +550,13 @@ pub(crate) fn qwen_speak_ws(
         if std::time::Instant::now() > deadline {
             let _ = socket.close(None);
             return Err(TtsError("qwen WebSocket synthesis timed out".into()));
+        }
+        if cancelled(&mut socket) {
+            let _ = socket.close(None);
+            // Truncated by stop(): the audio already delivered via
+            // on_audio stands (qwen3-local precedent — a stopped
+            // utterance is a success, not an error).
+            return Ok(audio_bytes);
         }
         let msg = match socket.read() {
             Ok(m) => m,

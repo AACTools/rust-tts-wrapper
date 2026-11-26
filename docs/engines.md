@@ -65,7 +65,7 @@ Canonical keys per engine (also available at runtime via
 | edge | — |
 | google | `apiKey` or `keyFilePath` (either) |
 | gemini | `apiKey`, `modelId`, `voice`, `style` |
-| qwen | `apiKey`, `modelId`, `region`, `instruction`, `wsUrl`, `customizationUrl` |
+| qwen | `apiKey`, `modelId`, `region`, `instruction`, `languageHints`, `wsUrl`, `customizationUrl` |
 | polly | `accessKeyId`, `secretAccessKey`, `region` |
 | playht | `apiKey`, `userId` |
 | watson | `apiKey`, `region`, `instanceId` |
@@ -125,6 +125,42 @@ text. Default `~/.rust-tts-wrapper/pronunciations.txt`, override via
 `tts_set_pronunciations_file` or `RUST_TTS_PRONUNCIATIONS`; edits
 apply on the next utterance. Full format and per-engine behavior:
 [pronunciations.md](pronunciations.md) (#125).
+
+### qwen (cloud, Alibaba Model Studio)
+
+The WS `tts_v2` protocol is shared by **three model families** — all
+work through this one engine, selected by the `modelId` credential
+(verified live, #149):
+
+| `modelId` | Notes |
+|---|---|
+| `qwen-audio-3.0-tts-flash` (default) | the shipped default |
+| `qwen-audio-3.1-tts-plus` / `qwen-audio-3.1-tts-flash` | 3.1 families; voice ids carry `_v3.1` |
+| `cosyvoice-v3-flash` / `cosyvoice-v3-plus` | CosyVoice v3 (voice ids `_v3` or bare `long*`) |
+
+`cosyvoice-v2` is not served on the international endpoint ("Model
+not exist"). Voice ids are **strictly model-scoped** (a mismatch fails
+the task with InvalidParameter) — but with no `modelId` credential the
+engine **infers the model from the voice id** (`_v3.1` suffix, the
+`qwen-audio-3.1-tts-flash-*` prefix, or the two 3.0-plus-only flagship
+names), so any non-CosyVoice voice from `get_voices()` just works.
+CosyVoice voices require an explicit `modelId` (their names overlap
+the Qwen-Audio families). The premium-Chinese list is a curated
+subset of the doc's table (all entries work; see the voice-list doc
+for the full set).
+
+The voice list includes the 3.1 **minority-language system voices**
+(Bulgarian, Croatian, Ukrainian, Vietnamese, Burmese, Tamil, Sinhala,
+Swahili, … — ~65 languages our offline engines cannot cover): ids like
+`qwen-audio-3.1-tts-flash-zora_bg`. For the 3.1 multilingual voices,
+`languageHints` (comma-separated codes: `zh-sh` for Shanghainese, `fr`
+for French, …) steers dialect/minor-language pronunciation — the
+service honours only the **first** code, so pass one.
+
+`stop()` cancels an in-flight synthesis with the protocol's documented
+`finish-task` + `directive=cancel` — the audio already delivered
+stands. Emotion/paralinguistic tags (`[laughing]`, `[excited]` for the
+Qwen-Audio families) ride the text verbatim.
 
 ### qwen3-local
 

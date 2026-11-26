@@ -23,6 +23,13 @@ pub struct CloudEngine {
     pub(crate) api_key: String,
     pub(crate) credentials: HashMap<String, String>,
     pub(crate) client: reqwest::blocking::Client,
+    /// Cooperative cancellation for WS synthesis (GH #149: the qwen
+    /// engine implements the protocol's documented finish-task +
+    /// directive=cancel; other WS providers ignore it for now).
+    /// Reset at the start of each qwen speak — the same reset-after-stop
+    /// race contract as the offline engines (a stop landing just before
+    /// the reset is dropped; stop() targets an in-flight synthesis).
+    pub(crate) cancel_requested: std::sync::atomic::AtomicBool,
 }
 
 impl CloudEngine {
@@ -110,6 +117,7 @@ impl CloudEngine {
             api_key,
             credentials: credentials.clone(),
             client: reqwest::blocking::Client::new(),
+            cancel_requested: std::sync::atomic::AtomicBool::new(false),
         })
     }
 }
@@ -304,6 +312,18 @@ impl CloudEngine {
         #[cfg(feature = "cloud")]
         if use_ws {
             if self.config.provider_id == "qwen" {
+                // Reset the stop flag for this utterance (GH #149).
+                self.cancel_requested
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                // Model selection (GH #149): an explicit `modelId`
+                // credential always wins; otherwise a 3.1-style voice id
+                // infers its model so any listed voice just works;
+                // otherwise the 3.0-flash default.
+                let model = if self.credentials.contains_key("modelId") {
+                    effective_model(&self.config).unwrap_or(QWEN_DEFAULT_MODEL)
+                } else {
+                    qwen_voice_inferred_model(&voice_to_use).unwrap_or(QWEN_DEFAULT_MODEL)
+                };
                 let bytes = qwen_speak_ws(
                     &text,
                     &voice_to_use,
@@ -312,13 +332,19 @@ impl CloudEngine {
                     volume,
                     &self.api_key,
                     &self.credentials,
-                    effective_model(&self.config).unwrap_or(QWEN_DEFAULT_MODEL),
+                    model,
                     self.credentials.get("instruction").map(String::as_str),
+                    self.credentials.get("languageHints").map(String::as_str),
+                    &self.cancel_requested,
                     on_audio,
                     on_boundary,
                     boundary_search_text,
                 )?;
-                if bytes == 0 {
+                if bytes == 0
+                    && !self
+                        .cancel_requested
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     return Err(TtsError("qwen synthesis returned no audio".into()));
                 }
                 return Ok(Some(QWEN_PCM_SAMPLE_RATE));
@@ -1200,6 +1226,12 @@ impl TtsEngine for CloudEngine {
     }
 
     fn stop(&self) -> TtsResult<()> {
+        // GH #149: the qwen WS synthesis polls this flag and answers
+        // with the protocol's documented finish-task + directive=cancel,
+        // keeping the audio already delivered. Other cloud providers
+        // still return Ok without acting (their loops do not poll).
+        self.cancel_requested
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 
