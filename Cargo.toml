@@ -58,6 +58,10 @@ cloud = ["cloud-core", "reqwest", "tungstenite", "uuid", "url", "symphonia"]
 # pocket-tts with REAL word timings: our own streaming loop over the tapped
 # Kyutai ONNX graphs (attention = the model's own alignment)
 pocket-timing = ["dep:ort", "dep:hound", "dep:floravox-ssml", "speechmarkdown", "ssml-expand"]
+# Word-level forced alignment (#109): the MMS wav2vec2-CTC aligner via
+# ort + the pure Viterbi core in word_aligner.rs. Model weights are
+# CC-BY-NC 4.0 (an optional, separately-fetched artifact).
+word-align = ["dep:ort", "dep:hound"]
 
 # wrapper-level <say-as> expansion (characters/cardinal/ordinal/date/
 # time/currency/telephone -> spoken words) for engines without native
